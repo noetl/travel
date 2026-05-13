@@ -49,9 +49,11 @@ import { Notification } from './widgets/Notification';
 import { ErrorCard } from './widgets/ErrorCard';
 import { ClarifyQuestion } from './widgets/ClarifyQuestion';
 import { LoadingCard } from './widgets/LoadingCard';
+import type { WidgetComponentProps, WidgetEvent } from './widgets/widgetUtils';
 
 export interface WidgetRendererProps {
   envelope: unknown;
+  onWidgetEvent?: (event: WidgetEvent) => void;
 }
 
 const ajv = new Ajv({ allErrors: true, strict: false });
@@ -86,7 +88,7 @@ Object.values(payloadSchemas).forEach((schema) => ajv.addSchema(schema));
 const schemaValidators: Record<string, ValidateFunction> = Object.fromEntries(
   Object.entries(payloadSchemas).map(([name, schema]) => [name, ajv.compile(schema)])
 );
-const componentMap: Record<string, React.ComponentType<{ payload: unknown; variantId?: string }>> = {
+const componentMap: Record<string, React.ComponentType<WidgetComponentProps>> = {
   bot_text: BotText,
   user_text: UserText,
   typing_indicator: TypingIndicator,
@@ -116,7 +118,7 @@ function fallbackText(reason: string) {
   return { text: `Unable to render this response (template mismatch): ${reason}`, markdown: false };
 }
 
-export function WidgetRenderer({ envelope }: WidgetRendererProps) {
+export function WidgetRenderer({ envelope, onWidgetEvent }: WidgetRendererProps) {
   if (!envelopeValidator(envelope)) {
     return <BotText payload={fallbackText(ajv.errorsText(envelopeValidator.errors))} variantId="default" />;
   }
@@ -132,5 +134,5 @@ export function WidgetRenderer({ envelope }: WidgetRendererProps) {
   if (wire.schema_version !== 1) {
     return <Alert severity="warning">Unsupported widget schema version: {wire.schema_version}</Alert>;
   }
-  return <Component payload={wire.payload} variantId={wire.variant} />;
+  return <Component payload={wire.payload} variantId={wire.variant} onWidgetEvent={onWidgetEvent} />;
 }

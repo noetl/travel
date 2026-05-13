@@ -36,4 +36,34 @@ The AI can adjust within declared knobs: variant, emphasis, bounded annotations,
 
 ## Type Generation
 
-`npm run build` invokes `scripts/build_widget_contracts.sh`, which runs `json-schema-to-typescript` over `playbooks/widget-contract/*.schema.json` and writes `src/contracts/widgets.ts`. The generated file is committed for editor support; schemas remain the source of truth.
+`npm run build` invokes `scripts/generate_widget_contracts.mjs`, which runs `json-schema-to-typescript` over `playbooks/widget-contract/*.schema.json` and writes `src/contracts/widgets.ts`. The generated file is committed for editor support; schemas remain the source of truth.
+
+## Material Implementation Notes
+
+Round 6b replaced the JSON stubs with real Material UI v6 components under
+`src/components/widgets/`. Each schema maps one-to-one to a component and is
+still validated before render by `WidgetRenderer`.
+
+| Widget type | Component | Notes |
+| --- | --- | --- |
+| `bot_text` | `BotText` | Markdown-capable Adiona bubble. |
+| `user_text` | `UserText` | Right-aligned user bubble. |
+| `typing_indicator` | `TypingIndicator` | Animated dot row. |
+| `clarify_question` | `ClarifyQuestion` | Chip-based choices. |
+| `date_range_picker` | `DateRangePicker` | Native date inputs with computed nights. |
+| `party_picker` | `PartyPicker` | Steppers plus child-age selects. |
+| `place_autocomplete_input` | `PlaceAutocompleteInput` | Free-solo MUI autocomplete. |
+| `action_chooser` | `ActionChooser` | Illustrated CTA cards. |
+| `flight_card` / `flight_list` | `FlightCard`, `FlightList` | Compact/full/in-popover offer display. |
+| `hotel_card` / `hotel_list` / `hotel_compare` | `HotelCard`, `HotelList`, `HotelCompare` | Card variants, compare grid, upsell banner. |
+| `place_card` / `place_list` | `PlaceCard`, `PlaceList` | Destination grid cards. |
+| `map_view` | `MapView` | Google Maps JS via `VITE_GOOGLE_MAPS_KEY`, with a no-key preview fallback. |
+| `filter_panel` | `FilterPanel` | Right-pane filter controls. |
+| `property_block` | `PropertyBlock` | Slot accumulator with edit actions. |
+| `itinerary_summary` | `ItinerarySummary` | End-of-flow review. |
+| `order_confirmation` | `OrderConfirmation` | Test-order receipt. |
+| `loading_card`, `error_card`, `notification` | `LoadingCard`, `ErrorCard`, `Notification` | Lifecycle states. |
+
+Interactive components emit `widget_submit` or `widget_cta_click` through the
+optional `WidgetRenderer.onWidgetEvent` callback. Surfaces that do not pass a
+callback still render safely.

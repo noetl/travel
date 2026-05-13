@@ -1,11 +1,27 @@
-import { WidgetStubCard } from './WidgetStubCard';
+import { Alert, Button, Stack } from '@mui/material';
+import type { ErrorCardPayload } from '../../contracts/widgets';
+import { asPayload, emitWidgetEvent, type WidgetComponentProps } from './widgetUtils';
 
-export interface ErrorCardProps {
-  payload: unknown;
-  variantId?: string;
-}
-
-export function ErrorCard({ payload, variantId }: ErrorCardProps) {
-  // TODO Round 6b: replace this JSON stub with the real Material rendering.
-  return <WidgetStubCard title="error_card" variantId={variantId} payload={payload} />;
+export function ErrorCard({ payload, onWidgetEvent }: WidgetComponentProps) {
+  const data = asPayload<ErrorCardPayload>(payload);
+  return (
+    <Alert
+      severity="error"
+      sx={{ borderRadius: 2 }}
+      action={
+        <Stack direction="row" spacing={1}>
+          {data.retry_action_id ? (
+            <Button color="inherit" size="small" onClick={() => emitWidgetEvent(onWidgetEvent, { type: 'widget_cta_click', action_id: data.retry_action_id })}>
+              Retry
+            </Button>
+          ) : null}
+          {data.contact_support ? <Button color="inherit" size="small">Support</Button> : null}
+        </Stack>
+      }
+    >
+      <strong>{data.title}</strong>
+      <br />
+      {data.description}
+    </Alert>
+  );
 }
