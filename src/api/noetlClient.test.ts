@@ -37,7 +37,7 @@ describe('noetlClient auth token handling', () => {
     vi.stubEnv('VITE_ALLOW_GUEST', 'true');
     noetlClient.defaults.adapter = async (config) => {
       expect(JSON.parse(config.data as string)).toEqual({
-        path: 'playbooks/itinerary-planner.yaml',
+        path: 'muno/playbooks/itinerary-planner',
         workload: {
           event_type: 'user_message',
           user_uid: 'auth0|abc'
@@ -47,7 +47,7 @@ describe('noetlClient auth token handling', () => {
     };
 
     await expect(
-      executePlaybook('playbooks/itinerary-planner.yaml', { event_type: 'user_message' }, { userUid: 'auth0|abc' })
+      executePlaybook('muno/playbooks/itinerary-planner', { event_type: 'user_message' }, { userUid: 'auth0|abc' })
     ).resolves.toEqual({ ok: true });
 
     noetlClient.defaults.adapter = originalAdapter;
