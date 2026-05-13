@@ -706,6 +706,7 @@ workflow:
         event_type: "{{ normalize_input.event_type }}"
         event_payload: "{{ normalize_input.event_payload }}"
         render_intent: "{{ extract_turn.render_intent }}"
+        extraction_json: "{{ extract_turn.json_str | default('{}') }}"
         slot_state_pre_tool: "{{ extract_turn.slot_state }}"
         slot_state_post_tool: "{{ normalize_tool_response.slot_state | default({}) }}"
         tool_summary: "{{ normalize_tool_response.summary | default({}) }}"
@@ -749,8 +750,11 @@ workflow:
             "_bot": _bot,
         })
 
+        extraction = _as_dict(extraction_json)
         slot_state = _as_dict(slot_state_post_tool) or _as_dict(slot_state_pre_tool)
-        intent = _as_dict(render_intent).get("kind") or "collect_missing"
+        slot_state = {**slot_state, **_as_dict(extraction.get("slot_updates"))}
+        render_intent = _as_dict(render_intent) or _as_dict(extraction.get("render_intent"))
+        intent = render_intent.get("kind") or "collect_missing"
         tool = _as_dict(tool_summary).get("tool", "")
         ok = not _as_dict(tool_summary).get("isError", False)
         tomorrow = date.today() + timedelta(days=30)
