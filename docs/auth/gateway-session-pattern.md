@@ -92,11 +92,11 @@ shared npm workspace. Round 9 copies the gateway-session pattern into Travel
 and documents the duplication here. A future shared package could reduce drift,
 but this round intentionally avoids monorepo restructuring.
 
-Travel keeps the existing Auth0 SPA provider, but it requests ID-token claims
-from `@auth0/auth0-react` after login, posts the raw ID token to
-`/api/auth/login`, stores the returned gateway session with the same
-`localStorage` keys as the GUI, and sends `Authorization: Bearer <session_token>`
-on subsequent gateway calls.
+Travel intentionally mirrors the GUI's direct URL-hash flow. It builds the
+Auth0 authorize URL directly, reads `id_token` from `/callback#...`, posts that
+raw ID token to `/api/auth/login`, stores the returned gateway session with the
+same `localStorage` keys as the GUI, and sends
+`Authorization: Bearer <session_token>` on subsequent gateway calls.
 
 Guest mode is disabled by default. Developers can set `VITE_ALLOW_GUEST=true`
 for local Vite runs when they need the old unauthenticated shell.
