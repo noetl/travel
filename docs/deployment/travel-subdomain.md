@@ -65,6 +65,7 @@ Required GitHub Actions secrets:
 Optional GitHub Actions variable:
 
 - `VITE_NOETL_API_BASE_URL` (defaults to `https://gateway.mestumre.dev/api`)
+- `VITE_GATEWAY_BASE_URL` (defaults to `https://gateway.mestumre.dev`)
 
 The Cloudflare token only needs permission to deploy the Pages project. A token
 with Cloudflare Pages edit access for the account is sufficient.
@@ -130,6 +131,9 @@ curl -I https://travel.mestumre.dev/
 In the browser:
 
 1. Open `https://travel.mestumre.dev`.
-2. Sign in with Auth0.
-3. Confirm the profile chip appears in the sidebar.
-4. Run a small trip-planner prompt and confirm a widget renders.
+2. Confirm the sign-in pane appears instead of the chat shell.
+3. Sign in with Auth0.
+4. Confirm the `Linking to gateway...` state completes and the profile chip
+   appears in the sidebar.
+5. Run a small trip-planner prompt and confirm a widget renders through gateway
+   session auth.

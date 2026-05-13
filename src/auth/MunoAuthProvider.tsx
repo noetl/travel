@@ -1,7 +1,15 @@
 import { Auth0Provider, useAuth0 } from '@auth0/auth0-react';
 import type { ReactNode } from 'react';
-import { createContext, useContext, useEffect, useMemo } from 'react';
-import { setAccessTokenProvider } from '../api/noetlClient';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { setSessionExpiredHandler } from '../api/noetlClient';
+import {
+  clearSession,
+  getStoredSession,
+  isGuestAllowed,
+  loginToGateway,
+  storeSession,
+  validateGatewaySession
+} from '../api/gatewaySession';
 import { getAuthConfig } from './authConfig';
 
 export interface MunoUser {
@@ -15,6 +23,11 @@ export interface MunoAuthState {
   isAuthConfigured: boolean;
   isAuthenticated: boolean;
   isLoading: boolean;
+  isGatewayLinked: boolean;
+  isLinkingGateway: boolean;
+  allowGuest: boolean;
+  canUseApp: boolean;
+  gatewayError?: string;
   user?: MunoUser;
   login: () => Promise<void>;
   logout: () => void;
@@ -25,6 +38,10 @@ const guestAuth: MunoAuthState = {
   isAuthConfigured: false,
   isAuthenticated: false,
   isLoading: false,
+  isGatewayLinked: false,
+  isLinkingGateway: false,
+  allowGuest: isGuestAllowed(),
+  canUseApp: isGuestAllowed(),
   login: async () => undefined,
   logout: () => undefined,
   getAccessToken: async () => null
@@ -36,12 +53,19 @@ function AuthBridge({ children }: { children: ReactNode }) {
   const config = getAuthConfig();
   const {
     getAccessTokenSilently,
+    getIdTokenClaims,
     isAuthenticated,
     isLoading,
     loginWithRedirect,
     logout,
     user
   } = useAuth0();
+  const [gatewayUser, setGatewayUser] = useState<MunoUser | undefined>();
+  const [isGatewayLinked, setIsGatewayLinked] = useState(false);
+  const [isLinkingGateway, setIsLinkingGateway] = useState(false);
+  const [gatewayError, setGatewayError] = useState<string | undefined>();
+  const linkInFlight = useRef(false);
+  const allowGuest = isGuestAllowed();
 
   const audience = config?.audience;
   const getAccessToken = useMemo(
@@ -59,32 +83,115 @@ function AuthBridge({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    setAccessTokenProvider(isAuthenticated ? getAccessToken : undefined);
-    return () => setAccessTokenProvider(undefined);
-  }, [getAccessToken, isAuthenticated]);
+    setSessionExpiredHandler(() => {
+      setIsGatewayLinked(false);
+      setGatewayUser(undefined);
+      setGatewayError('session_expired');
+    });
+    return () => setSessionExpiredHandler(undefined);
+  }, []);
+
+  useEffect(() => {
+    if (isLoading) return;
+
+    if (!isAuthenticated) {
+      if (!allowGuest) {
+        clearSession();
+      }
+      setIsGatewayLinked(false);
+      setGatewayUser(undefined);
+      setGatewayError(undefined);
+      return;
+    }
+
+    if (linkInFlight.current) return;
+
+    const linkGateway = async () => {
+      linkInFlight.current = true;
+      setIsLinkingGateway(true);
+      setGatewayError(undefined);
+
+      try {
+        const existing = getStoredSession();
+        if (existing?.token) {
+          const validUser = await validateGatewaySession(existing.token);
+          if (validUser) {
+            setGatewayUser(validUser);
+            setIsGatewayLinked(true);
+            return;
+          }
+          clearSession();
+        }
+
+        const claims = await getIdTokenClaims();
+        const rawIdToken = claims?.__raw;
+        if (!rawIdToken) {
+          throw new Error('Auth0 did not return an ID token for gateway login');
+        }
+
+        const gateway = await loginToGateway(rawIdToken, config?.domain || '');
+        storeSession(gateway.sessionToken, gateway.expiresAt, gateway.user);
+        setGatewayUser(gateway.user);
+        setIsGatewayLinked(true);
+      } catch (error) {
+        clearSession();
+        setIsGatewayLinked(false);
+        setGatewayUser(undefined);
+        setGatewayError(error instanceof Error ? error.message : 'Gateway login failed');
+      } finally {
+        setIsLinkingGateway(false);
+        linkInFlight.current = false;
+      }
+    };
+
+    void linkGateway();
+  }, [allowGuest, config?.domain, getIdTokenClaims, isAuthenticated, isLoading]);
 
   const value = useMemo<MunoAuthState>(
     () => ({
       isAuthConfigured: true,
-      isAuthenticated,
+      isAuthenticated: isAuthenticated && isGatewayLinked,
       isLoading,
-      user: user
+      isGatewayLinked,
+      isLinkingGateway,
+      allowGuest,
+      canUseApp: allowGuest || (isAuthenticated && isGatewayLinked),
+      gatewayError,
+      user: gatewayUser || (user
         ? {
             sub: user.sub,
             name: user.name,
             email: user.email,
             picture: user.picture
           }
-        : undefined,
+        : undefined),
       login: () =>
         loginWithRedirect({
           appState: { returnTo: window.location.pathname + window.location.search },
           authorizationParams: audience ? { audience } : undefined
         }),
-      logout: () => logout({ logoutParams: { returnTo: window.location.origin } }),
+      logout: () => {
+        clearSession();
+        setIsGatewayLinked(false);
+        setGatewayUser(undefined);
+        logout({ logoutParams: { returnTo: window.location.origin } });
+      },
       getAccessToken
     }),
-    [audience, getAccessToken, isAuthenticated, isLoading, loginWithRedirect, logout, user]
+    [
+      allowGuest,
+      audience,
+      gatewayError,
+      gatewayUser,
+      getAccessToken,
+      isAuthenticated,
+      isGatewayLinked,
+      isLinkingGateway,
+      isLoading,
+      loginWithRedirect,
+      logout,
+      user
+    ]
   );
 
   return <MunoAuthContext.Provider value={value}>{children}</MunoAuthContext.Provider>;

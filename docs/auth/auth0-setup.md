@@ -1,8 +1,10 @@
 # Auth0 Setup
 
-Muno uses Auth0 as a frontend-only SPA integration. The browser obtains an
-access token through `@auth0/auth0-react`; the backend still accepts guest mode
-and does not validate JWTs in this round.
+Muno uses Auth0 as a frontend-only SPA integration, then mirrors the NoETL GUI
+gateway-session pattern. After Auth0 signs the user in, the browser obtains the
+Auth0 ID token and exchanges it with `gateway.mestumre.dev/api/auth/login` for a
+NoETL gateway `session_token`. Subsequent playbook execution calls carry that
+gateway session with `Authorization: Bearer <session_token>`.
 
 ## Secret Source
 
@@ -20,9 +22,11 @@ browser.
 
 ## Local Development
 
-Guest mode is the default when Auth0 variables are missing:
+Production guest mode is disabled by default. For local development, set
+`VITE_ALLOW_GUEST=true` to keep the old unauthenticated shell:
 
 ```bash
+VITE_ALLOW_GUEST=true
 npm run dev
 ```
 
@@ -33,6 +37,7 @@ VITE_AUTH0_DOMAIN=<auth0-domain>
 VITE_AUTH0_CLIENT_ID=<auth0-spa-client-id>
 VITE_AUTH0_AUDIENCE=<auth0-audience>
 VITE_NOETL_API_BASE_URL=http://localhost:8082/api
+VITE_GATEWAY_BASE_URL=https://gateway.mestumre.dev
 ```
 
 Do not commit `.env.local`.
@@ -53,9 +58,24 @@ The Auth0 application must allow these URLs:
 - Web origin: `https://travel.mestumre.dev`
 - Local callback: `http://localhost:5173/callback`
 
+## Gateway Exchange
+
+The gateway exchange follows the same pattern documented in
+[`gateway-session-pattern.md`](./gateway-session-pattern.md):
+
+1. Auth0 SPA login completes in the browser.
+2. Muno reads the Auth0 ID token from `getIdTokenClaims().__raw`.
+3. Muno posts `{ auth0_token, auth0_domain }` to
+   `https://gateway.mestumre.dev/api/auth/login`.
+4. The gateway validates the token through the existing Auth0 login playbook and
+   returns `session_token` plus optional user info.
+5. Muno stores `session_token` and `user_info` in localStorage, matching the GUI.
+6. Authenticated playbook calls use the gateway session. A 401 clears local
+   session state and returns the user to the sign-in flow.
+
 ## Current Limits
 
-- JWT validation is frontend-only in this round.
-- Guest mode remains available as a fallback.
+- Gateway session validation now gates production playbook execution.
+- Guest mode is local-dev only via `VITE_ALLOW_GUEST=true`.
 - Firestore rules remain the v1 permissive rules until a later auth-hardening
   round.
