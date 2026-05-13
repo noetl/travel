@@ -10,7 +10,7 @@ export function BotText({ payload }: WidgetComponentProps) {
       <AgentAvatar />
       <WidgetCard sx={{ bgcolor: 'background.paper', minWidth: 240 }}>
         <Stack direction="row" justifyContent="space-between" spacing={2}>
-          <Typography variant="subtitle2">Adiona</Typography>
+          <Typography variant="subtitle2">Muno</Typography>
           {data.timestamp ? <Typography variant="caption" color="text.secondary">{compactTime(data.timestamp)}</Typography> : null}
         </Stack>
         <Box sx={{ mt: 0.75, '& p': { mt: 0, mb: 0.75 }, '& p:last-child': { mb: 0 } }}>
