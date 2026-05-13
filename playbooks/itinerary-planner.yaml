@@ -709,6 +709,11 @@ workflow:
             events_path = f"users/{user_uid}/trips/{trip_id}/events"
         else:
             events_path = f"{thread_path}/trip/events"
+        globals().update({
+            "slot_state": slot_state,
+            "default_from": default_from,
+            "default_to": default_to,
+        })
 
         def _calendar_events():
             region = slot_state.get("region", {}) if isinstance(slot_state.get("region"), dict) else {}
