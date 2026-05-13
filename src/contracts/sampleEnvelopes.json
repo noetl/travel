@@ -3,7 +3,7 @@
     "widget_type": "bot_text",
     "variant": "default",
     "payload": {
-      "text": "Hello from AdionaBot",
+      "text": "Hello from Muno",
       "timestamp": "2026-05-13T00:00:00Z",
       "markdown": true
     },
@@ -39,7 +39,7 @@
     "widget_type": "typing_indicator",
     "variant": "default",
     "payload": {
-      "agent_name": "AdionaBot"
+      "agent_name": "Muno"
     },
     "schema_version": 1,
     "ai_adjustments": {

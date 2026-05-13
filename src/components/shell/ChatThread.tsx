@@ -8,7 +8,7 @@ export function ChatThread() {
   return (
     <Box sx={{ display: 'grid', gridTemplateRows: 'auto 1fr auto', minWidth: 0 }}>
       <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
-        <Typography variant="h6">Adiona trip planner</Typography>
+        <Typography variant="h6">Muno trip planner</Typography>
       </Box>
       <Box sx={{ overflow: 'auto', p: 2, display: 'grid', gap: 1.5, alignContent: 'start' }}>
         {sampleEnvelopes.slice(0, 6).map((envelope, index) => (
