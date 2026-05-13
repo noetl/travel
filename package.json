@@ -9,6 +9,8 @@
     "contracts": "node scripts/generate_widget_contracts.mjs",
     "type-check": "npm run contracts && tsc --noEmit",
     "build": "npm run contracts && tsc --noEmit && vite build",
+    "build:cf": "npm ci && npm run build",
+    "deploy:cf": "npx wrangler pages deploy dist --project-name muno --branch main",
     "test": "vitest run",
     "lint": "tsc --noEmit",
     "smoke:widgets": "node scripts/widget_dispatch_smoke.mjs"
