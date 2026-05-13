@@ -78,7 +78,15 @@ workflow:
         import uuid
 
         def _as_dict(value):
-            return value if isinstance(value, dict) else {}
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    return {}
+            return {}
 
         tid = str(replay_thread_id or thread_id or "").strip()
         if not tid:
@@ -166,7 +174,15 @@ workflow:
         from datetime import date, datetime, timezone, timedelta
 
         def _as_dict(value):
-            return value if isinstance(value, dict) else {}
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    return {}
+            return {}
 
         def _text_from_event(payload):
             payload = _as_dict(payload)
@@ -535,7 +551,15 @@ workflow:
         import json
 
         def _as_dict(value):
-            return value if isinstance(value, dict) else {}
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    return {}
+            return {}
 
         def _as_list(value):
             return value if isinstance(value, list) else []
@@ -677,7 +701,15 @@ workflow:
         from datetime import date, datetime, timezone, timedelta
 
         def _as_dict(value):
-            return value if isinstance(value, dict) else {}
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    return {}
+            return {}
 
         def _env(widget_type, variant, payload):
             return {"schema_version": 1, "widget_type": widget_type, "variant": variant, "payload": payload}
