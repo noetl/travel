@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/hotel_list.schema.json",
+  "title": "HotelListPayload",
+  "description": "List of hotel_card payloads.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "items",
+    "total_count"
+  ],
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "hotel_card.schema.json"
+      }
+    },
+    "total_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "filter_summary": {
+      "type": "string"
+    },
+    "upsell_banner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "action_label",
+        "action_id"
+      ],
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "action_label": {
+          "type": "string"
+        },
+        "action_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

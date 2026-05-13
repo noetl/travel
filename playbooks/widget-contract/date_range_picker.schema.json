@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/date_range_picker.schema.json",
+  "title": "DateRangePickerPayload",
+  "description": "Interactive date range picker.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "min_date",
+    "max_date",
+    "locale",
+    "submit"
+  ],
+  "properties": {
+    "min_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "max_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "default_from": {
+      "type": "string",
+      "format": "date"
+    },
+    "default_to": {
+      "type": "string",
+      "format": "date"
+    },
+    "locale": {
+      "type": "string",
+      "enum": [
+        "en",
+        "ru"
+      ]
+    },
+    "submit": {
+      "type": "string",
+      "const": "submit"
+    },
+    "submitted_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to",
+        "nights"
+      ],
+      "properties": {
+        "from": {
+          "type": "string",
+          "format": "date"
+        },
+        "to": {
+          "type": "string",
+          "format": "date"
+        },
+        "nights": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

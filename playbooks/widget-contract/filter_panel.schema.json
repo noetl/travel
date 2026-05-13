@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/filter_panel.schema.json",
+  "title": "FilterPanelPayload",
+  "description": "Right-pane interactive filters.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "hotel_category_options",
+    "budget_range",
+    "guest_rating_options",
+    "applied"
+  ],
+  "properties": {
+    "hotel_category_options": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "budget_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min",
+        "max",
+        "currency"
+      ],
+      "properties": {
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "currency": {
+          "type": "string"
+        }
+      }
+    },
+    "guest_rating_options": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      }
+    },
+    "applied": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hotel_category": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "budget_min": {
+          "type": "number"
+        },
+        "budget_max": {
+          "type": "number"
+        },
+        "guest_rating_min": {
+          "type": "number"
+        }
+      }
+    },
+    "ctas": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "clear_all",
+          "apply"
+        ]
+      }
+    }
+  }
+}

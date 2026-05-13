@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/bot_text.schema.json",
+  "title": "BotTextPayload",
+  "description": "Bot bubble text. Markdown is allowed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "text"
+  ],
+  "properties": {
+    "text": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "markdown": {
+      "type": "boolean",
+      "default": true
+    }
+  }
+}

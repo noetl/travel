@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status *)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(npm install)",
+      "Bash(npm run *)",
+      "Bash(npx *)",
+      "Bash(docker build *)",
+      "Bash(podman build *)",
+      "Bash(./scripts/memory_add.sh *)",
+      "Bash(./scripts/memory_compact.sh)",
+      "Bash(./scripts/figma_fetch.sh *)",
+      "Read(*)"
+    ],
+    "deny": [
+      "Bash(git push --force *)",
+      "Bash(git reset --hard *)",
+      "Bash(rm -rf *)"
+    ]
+  },
+  "env": { "MUNO_ROOT": "." }
+}

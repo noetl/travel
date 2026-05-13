@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/_envelope.schema.json",
+  "title": "WidgetEnvelope",
+  "description": "Common wire envelope for all muno pre-templated widgets.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "widget_type",
+    "variant",
+    "payload",
+    "schema_version"
+  ],
+  "properties": {
+    "widget_type": {
+      "type": "string",
+      "enum": [
+        "bot_text",
+        "user_text",
+        "typing_indicator",
+        "date_range_picker",
+        "party_picker",
+        "place_autocomplete_input",
+        "flight_list",
+        "flight_card",
+        "hotel_list",
+        "hotel_card",
+        "hotel_compare",
+        "place_list",
+        "place_card",
+        "action_chooser",
+        "map_view",
+        "filter_panel",
+        "property_block",
+        "itinerary_summary",
+        "order_confirmation",
+        "notification",
+        "error_card",
+        "clarify_question",
+        "loading_card"
+      ]
+    },
+    "variant": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object"
+    },
+    "ai_adjustments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "emphasis": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "target",
+              "text"
+            ],
+            "properties": {
+              "target": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 240
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "info",
+                  "warning",
+                  "success",
+                  "error"
+                ]
+              }
+            }
+          }
+        },
+        "conditional_fields": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    }
+  }
+}

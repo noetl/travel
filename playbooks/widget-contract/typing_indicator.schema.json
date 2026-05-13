@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/typing_indicator.schema.json",
+  "title": "TypingIndicatorPayload",
+  "description": "Typing indicator for an agent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "agent_name"
+  ],
+  "properties": {
+    "agent_name": {
+      "type": "string",
+      "default": "AdionaBot"
+    }
+  }
+}

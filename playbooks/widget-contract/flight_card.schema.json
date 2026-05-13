@@ -1,0 +1,176 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/flight_card.schema.json",
+  "title": "FlightCardPayload",
+  "description": "Single Duffel or Amadeus flight offer card.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "offer_id",
+    "price",
+    "itineraries",
+    "carriers",
+    "duration",
+    "stops"
+  ],
+  "properties": {
+    "offer_id": {
+      "type": "string"
+    },
+    "price": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "currency"
+      ],
+      "properties": {
+        "total": {
+          "type": "string"
+        },
+        "currency": {
+          "type": "string"
+        }
+      }
+    },
+    "itineraries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "segments"
+        ],
+        "properties": {
+          "duration": {
+            "type": "string"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "departure",
+                "arrival",
+                "carrier",
+                "duration"
+              ],
+              "properties": {
+                "departure": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "iata",
+                    "at"
+                  ],
+                  "properties": {
+                    "iata": {
+                      "type": "string"
+                    },
+                    "at": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "arrival": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "iata",
+                    "at"
+                  ],
+                  "properties": {
+                    "iata": {
+                      "type": "string"
+                    },
+                    "at": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "carrier": {
+                  "type": "string"
+                },
+                "flight_number": {
+                  "type": "string"
+                },
+                "duration": {
+                  "type": "string"
+                },
+                "stops": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "carriers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "duration": {
+      "type": "string"
+    },
+    "stops": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "validating_airline": {
+      "type": "string"
+    },
+    "ctas": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "view_details",
+          "book_this"
+        ]
+      }
+    },
+    "ai_adjustments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "emphasis": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "target",
+              "text"
+            ],
+            "properties": {
+              "target": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 240
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "info",
+                  "warning",
+                  "success",
+                  "error"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/itinerary_summary.schema.json",
+  "title": "ItinerarySummaryPayload",
+  "description": "End-of-flow itinerary review.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "destination",
+    "dates",
+    "traveller_party"
+  ],
+  "properties": {
+    "destination": {
+      "type": "string"
+    },
+    "dates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ],
+      "properties": {
+        "from": {
+          "type": "string",
+          "format": "date"
+        },
+        "to": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    },
+    "traveller_party": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "picked_flight": {
+      "$ref": "flight_card.schema.json"
+    },
+    "picked_hotel": {
+      "$ref": "hotel_card.schema.json"
+    },
+    "total_cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "type": "number"
+        },
+        "currency": {
+          "type": "string"
+        }
+      }
+    },
+    "notes": {
+      "type": "string"
+    },
+    "ctas": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "confirm",
+          "edit"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/property_block.schema.json",
+  "title": "PropertyBlockPayload",
+  "description": "Right-pane slot accumulator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "slots"
+  ],
+  "properties": {
+    "slots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "missing"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "value": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          },
+          "edit_action_id": {
+            "type": "string"
+          },
+          "missing": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

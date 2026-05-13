@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/action_chooser.schema.json",
+  "title": "ActionChooserPayload",
+  "description": "Illustrated CTA row.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "prompt_text",
+    "options"
+  ],
+  "properties": {
+    "prompt_text": {
+      "type": "string"
+    },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "action_id"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "action_id": {
+            "type": "string"
+          },
+          "illustration_url": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      }
+    },
+    "submitted_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_id"
+      ],
+      "properties": {
+        "action_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

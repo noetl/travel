@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/hotel_compare.schema.json",
+  "title": "HotelComparePayload",
+  "description": "Two hotel cards side-by-side.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "items",
+    "comparison_facets"
+  ],
+  "properties": {
+    "items": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "hotel_card.schema.json"
+      }
+    },
+    "comparison_facets": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

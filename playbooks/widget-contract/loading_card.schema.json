@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/loading_card.schema.json",
+  "title": "LoadingCardPayload",
+  "description": "Async tool loading placeholder.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tool_name",
+    "started_at"
+  ],
+  "properties": {
+    "tool_name": {
+      "type": "string"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expected_duration_seconds": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/clarify_question.schema.json",
+  "title": "ClarifyQuestionPayload",
+  "description": "Clarifying question from the agent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "question_text",
+    "options"
+  ],
+  "properties": {
+    "question_text": {
+      "type": "string"
+    },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "action_id"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "action_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

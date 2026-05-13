@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/map_view.schema.json",
+  "title": "MapViewPayload",
+  "description": "Full-bleed map state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "center",
+    "zoom",
+    "markers"
+  ],
+  "properties": {
+    "center": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lat",
+        "lng"
+      ],
+      "properties": {
+        "lat": {
+          "type": "number"
+        },
+        "lng": {
+          "type": "number"
+        }
+      }
+    },
+    "zoom": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 22
+    },
+    "markers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "lat",
+          "lng",
+          "label",
+          "state"
+        ],
+        "properties": {
+          "lat": {
+            "type": "number"
+          },
+          "lng": {
+            "type": "number"
+          },
+          "label": {
+            "type": "string"
+          },
+          "hotel_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "normal",
+              "selected",
+              "viewed"
+            ]
+          }
+        }
+      }
+    },
+    "selected_marker_id": {
+      "type": "string"
+    },
+    "filter_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "star_rating": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "budget_min": {
+          "type": "number"
+        },
+        "budget_max": {
+          "type": "number"
+        },
+        "guest_rating_min": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}

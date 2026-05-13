@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/flight_list.schema.json",
+  "title": "FlightListPayload",
+  "description": "List of flight_card payloads.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "items",
+    "total_count",
+    "currency"
+  ],
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "flight_card.schema.json"
+      }
+    },
+    "emphasis_offer_id": {
+      "type": "string"
+    },
+    "total_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "currency": {
+      "type": "string"
+    }
+  }
+}

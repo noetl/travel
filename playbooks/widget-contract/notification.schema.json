@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/notification.schema.json",
+  "title": "NotificationPayload",
+  "description": "Toast-style notification.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "text"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warning",
+        "error",
+        "success"
+      ]
+    },
+    "text": {
+      "type": "string"
+    },
+    "dismissible": {
+      "type": "boolean",
+      "default": true
+    }
+  }
+}

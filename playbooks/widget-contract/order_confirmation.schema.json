@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/order_confirmation.schema.json",
+  "title": "OrderConfirmationPayload",
+  "description": "Duffel test order receipt.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "order_id",
+    "booking_reference",
+    "total_amount",
+    "total_currency"
+  ],
+  "properties": {
+    "order_id": {
+      "type": "string"
+    },
+    "booking_reference": {
+      "type": "string"
+    },
+    "total_amount": {
+      "type": "string"
+    },
+    "total_currency": {
+      "type": "string"
+    },
+    "passengers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "slices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "ctas": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "view_full",
+          "new_search"
+        ]
+      }
+    }
+  }
+}

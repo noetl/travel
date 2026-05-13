@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/error_card.schema.json",
+  "title": "ErrorCardPayload",
+  "description": "Graceful failure card.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "description"
+  ],
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "retry_action_id": {
+      "type": "string"
+    },
+    "contact_support": {
+      "type": "boolean"
+    }
+  }
+}
