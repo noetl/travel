@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:-noetl-demo-19700101}"
-IMAGE_REPO="${IMAGE_REPO:-ghcr.io/noetl/muno}"
+IMAGE_REPO="${IMAGE_REPO:-ghcr.io/noetl/travel}"
 TAG="${TAG:-$(date -u +%Y%m%d-%H%M%S)}"
 NOETL_API_BASE_URL="${VITE_NOETL_API_BASE_URL:-https://gateway.mestumre.dev/api}"
 RUNTIME="${CONTAINER_RUNTIME:-podman}"
