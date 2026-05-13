@@ -6,7 +6,7 @@ describe('widget contract fixtures', () => {
   it('keeps one sample envelope for every widget type', () => {
     const sampleTypes = new Set(sampleEnvelopes.map((item) => item.widget_type));
 
-    expect(sampleEnvelopes).toHaveLength(23);
+    expect(sampleEnvelopes).toHaveLength(24);
     expect(sampleTypes).toEqual(new Set(WIDGET_TYPES));
   });
 });

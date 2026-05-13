@@ -26,6 +26,7 @@ import notificationSchema from '../../playbooks/widget-contract/notification.sch
 import error_cardSchema from '../../playbooks/widget-contract/error_card.schema.json';
 import clarify_questionSchema from '../../playbooks/widget-contract/clarify_question.schema.json';
 import loading_cardSchema from '../../playbooks/widget-contract/loading_card.schema.json';
+import calendar_viewSchema from '../../playbooks/widget-contract/calendar_view.schema.json';
 import { BotText } from './widgets/BotText';
 import { UserText } from './widgets/UserText';
 import { TypingIndicator } from './widgets/TypingIndicator';
@@ -49,6 +50,7 @@ import { Notification } from './widgets/Notification';
 import { ErrorCard } from './widgets/ErrorCard';
 import { ClarifyQuestion } from './widgets/ClarifyQuestion';
 import { LoadingCard } from './widgets/LoadingCard';
+import { CalendarView } from './widgets/CalendarView';
 import type { WidgetComponentProps, WidgetEvent } from './widgets/widgetUtils';
 
 export interface WidgetRendererProps {
@@ -82,7 +84,8 @@ const payloadSchemas: Record<string, AnySchema> = {
   notification: notificationSchema,
   error_card: error_cardSchema,
   clarify_question: clarify_questionSchema,
-  loading_card: loading_cardSchema
+  loading_card: loading_cardSchema,
+  calendar_view: calendar_viewSchema
 };
 Object.values(payloadSchemas).forEach((schema) => ajv.addSchema(schema));
 const schemaValidators: Record<string, ValidateFunction> = Object.fromEntries(
@@ -111,7 +114,8 @@ const componentMap: Record<string, React.ComponentType<WidgetComponentProps>> = 
   notification: Notification,
   error_card: ErrorCard,
   clarify_question: ClarifyQuestion,
-  loading_card: LoadingCard
+  loading_card: LoadingCard,
+  calendar_view: CalendarView
 };
 
 function fallbackText(reason: string) {
