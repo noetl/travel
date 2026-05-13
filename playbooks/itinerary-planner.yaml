@@ -161,8 +161,8 @@ workflow:
       kind: python
       input:
         thread_path: "{{ normalize_input.thread_path }}"
-        event_type: "{{ normalize_input.event_type }}"
-        event_payload: "{{ normalize_input.event_payload }}"
+        event_type: "{{ workload.event_type | default('user_message') }}"
+        event_payload: "{{ workload.event_payload | default({}) }}"
         loaded_slot_state: "{{ load_slot_state.data | default({}) }}"
         ai_provider: "{{ workload.ai_provider | default('openai') }}"
         llm_extraction_model: "{{ workload.llm_extraction_model }}"
