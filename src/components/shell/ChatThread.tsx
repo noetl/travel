@@ -8,7 +8,7 @@ import { WidgetRenderer } from '../WidgetRenderer';
 import type { SidebarView } from './Sidebar';
 import type { WidgetEvent } from '../widgets/widgetUtils';
 
-const ITINERARY_PLAYBOOK = 'playbooks/itinerary-planner.yaml';
+const ITINERARY_PLAYBOOK = 'muno/playbooks/itinerary-planner';
 
 type ChatMessage =
   | { id: string; role: 'user'; text: string; view: SidebarView }
