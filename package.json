@@ -6,7 +6,7 @@
   "description": "Adiona/muno trip-planner frontend and playbook home base.",
   "scripts": {
     "dev": "vite",
-    "contracts": "bash scripts/build_widget_contracts.sh",
+    "contracts": "node scripts/generate_widget_contracts.mjs",
     "type-check": "npm run contracts && tsc --noEmit",
     "build": "npm run contracts && tsc --noEmit && vite build",
     "test": "vitest run",
