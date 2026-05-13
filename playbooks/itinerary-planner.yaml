@@ -85,7 +85,12 @@ workflow:
                     parsed = json.loads(value)
                     return parsed if isinstance(parsed, dict) else {}
                 except Exception:
-                    return {}
+                    try:
+                        import ast
+                        parsed = ast.literal_eval(value)
+                        return parsed if isinstance(parsed, dict) else {}
+                    except Exception:
+                        return {}
             return {}
 
         tid = str(replay_thread_id or thread_id or "").strip()
@@ -181,7 +186,12 @@ workflow:
                     parsed = json.loads(value)
                     return parsed if isinstance(parsed, dict) else {}
                 except Exception:
-                    return {}
+                    try:
+                        import ast
+                        parsed = ast.literal_eval(value)
+                        return parsed if isinstance(parsed, dict) else {}
+                    except Exception:
+                        return {}
             return {}
 
         def _text_from_event(payload):
@@ -558,7 +568,12 @@ workflow:
                     parsed = json.loads(value)
                     return parsed if isinstance(parsed, dict) else {}
                 except Exception:
-                    return {}
+                    try:
+                        import ast
+                        parsed = ast.literal_eval(value)
+                        return parsed if isinstance(parsed, dict) else {}
+                    except Exception:
+                        return {}
             return {}
 
         def _as_list(value):
@@ -708,7 +723,12 @@ workflow:
                     parsed = json.loads(value)
                     return parsed if isinstance(parsed, dict) else {}
                 except Exception:
-                    return {}
+                    try:
+                        import ast
+                        parsed = ast.literal_eval(value)
+                        return parsed if isinstance(parsed, dict) else {}
+                    except Exception:
+                        return {}
             return {}
 
         def _env(widget_type, variant, payload):
