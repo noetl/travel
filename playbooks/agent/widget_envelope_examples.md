@@ -1,0 +1,914 @@
+# Widget Envelope Examples
+
+Canonical valid examples for the 23 widget templates. These examples are generated from `src/contracts/sampleEnvelopes.json` and are used by the itinerary agent prompt and Round 6b renderer smokes.
+
+## bot_text
+
+```json
+{
+  "widget_type": "bot_text",
+  "variant": "default",
+  "payload": {
+    "text": "Hello from AdionaBot",
+    "timestamp": "2026-05-13T00:00:00Z",
+    "markdown": true
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## user_text
+
+```json
+{
+  "widget_type": "user_text",
+  "variant": "default",
+  "payload": {
+    "text": "Find flights to Paris",
+    "timestamp": "2026-05-13T00:00:01Z",
+    "user_avatar_url": "https://example.com/avatar.png"
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## typing_indicator
+
+```json
+{
+  "widget_type": "typing_indicator",
+  "variant": "default",
+  "payload": {
+    "agent_name": "AdionaBot"
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## date_range_picker
+
+```json
+{
+  "widget_type": "date_range_picker",
+  "variant": "compact",
+  "payload": {
+    "min_date": "2026-06-01",
+    "max_date": "2026-12-31",
+    "default_from": "2026-07-01",
+    "default_to": "2026-07-05",
+    "locale": "en",
+    "submit": "submit",
+    "submitted_value": {
+      "from": "2026-07-01",
+      "to": "2026-07-05",
+      "nights": 4
+    }
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## party_picker
+
+```json
+{
+  "widget_type": "party_picker",
+  "variant": "default",
+  "payload": {
+    "rooms_max": 4,
+    "adults_max": 6,
+    "children_max": 4,
+    "allow_child_ages": true,
+    "submitted_value": {
+      "rooms": 1,
+      "adults": 2,
+      "children": [
+        {
+          "age": 8
+        }
+      ]
+    }
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## place_autocomplete_input
+
+```json
+{
+  "widget_type": "place_autocomplete_input",
+  "variant": "default",
+  "payload": {
+    "placeholder": "Where to?",
+    "suggestions": [
+      {
+        "label": "Paris",
+        "id": "PAR",
+        "kind": "city"
+      }
+    ],
+    "submit_on_select": true,
+    "submitted_value": {
+      "label": "Paris",
+      "id": "PAR",
+      "kind": "city"
+    }
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## flight_list
+
+```json
+{
+  "widget_type": "flight_list",
+  "variant": "default",
+  "payload": {
+    "title": "Flights",
+    "items": [
+      {
+        "offer_id": "off_123",
+        "price": {
+          "total": "199.00",
+          "currency": "USD"
+        },
+        "itineraries": [
+          {
+            "duration": "PT6H",
+            "segments": [
+              {
+                "departure": {
+                  "iata": "SFO",
+                  "at": "2026-07-15T08:00:00"
+                },
+                "arrival": {
+                  "iata": "JFK",
+                  "at": "2026-07-15T16:30:00"
+                },
+                "carrier": "UA",
+                "flight_number": "100",
+                "duration": "PT5H30M",
+                "stops": 0
+              }
+            ]
+          }
+        ],
+        "carriers": [
+          "UA"
+        ],
+        "duration": "PT6H",
+        "stops": 0,
+        "validating_airline": "UA",
+        "ctas": [
+          "view_details",
+          "book_this"
+        ],
+        "ai_adjustments": {
+          "emphasis": "cheapest",
+          "annotations": [
+            {
+              "target": "price",
+              "text": "Good value",
+              "kind": "success"
+            }
+          ]
+        }
+      }
+    ],
+    "emphasis_offer_id": "off_123",
+    "total_count": 1,
+    "currency": "USD"
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## flight_card
+
+```json
+{
+  "widget_type": "flight_card",
+  "variant": "compact",
+  "payload": {
+    "offer_id": "off_123",
+    "price": {
+      "total": "199.00",
+      "currency": "USD"
+    },
+    "itineraries": [
+      {
+        "duration": "PT6H",
+        "segments": [
+          {
+            "departure": {
+              "iata": "SFO",
+              "at": "2026-07-15T08:00:00"
+            },
+            "arrival": {
+              "iata": "JFK",
+              "at": "2026-07-15T16:30:00"
+            },
+            "carrier": "UA",
+            "flight_number": "100",
+            "duration": "PT5H30M",
+            "stops": 0
+          }
+        ]
+      }
+    ],
+    "carriers": [
+      "UA"
+    ],
+    "duration": "PT6H",
+    "stops": 0,
+    "validating_airline": "UA",
+    "ctas": [
+      "view_details",
+      "book_this"
+    ],
+    "ai_adjustments": {
+      "emphasis": "cheapest",
+      "annotations": [
+        {
+          "target": "price",
+          "text": "Good value",
+          "kind": "success"
+        }
+      ]
+    }
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## hotel_list
+
+```json
+{
+  "widget_type": "hotel_list",
+  "variant": "default",
+  "payload": {
+    "title": "Hotels",
+    "items": [
+      {
+        "hotel_id": "hotel_1",
+        "name": "Central Hotel",
+        "location": {
+          "lat": 48.8566,
+          "lng": 2.3522,
+          "city": "Paris"
+        },
+        "star_rating": 4,
+        "score": 8.7,
+        "score_count": 210,
+        "thumb_up_count": 180,
+        "thumb_down_count": 12,
+        "photos": [
+          "https://example.com/hotel.jpg"
+        ],
+        "amenities": [
+          "wifi",
+          "breakfast"
+        ],
+        "price_per_night": 180,
+        "currency": "USD",
+        "rooms_matching": 3,
+        "available_rooms": 5,
+        "address": "1 Rue Example",
+        "distance_from_center": "0.5 km",
+        "ctas": [
+          "watch_in_detail",
+          "show_numbers"
+        ]
+      }
+    ],
+    "total_count": 1,
+    "filter_summary": "4 star near center",
+    "upsell_banner": {
+      "text": "Relax filters for more options",
+      "action_label": "Relax",
+      "action_id": "relax_filters"
+    }
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## hotel_card
+
+```json
+{
+  "widget_type": "hotel_card",
+  "variant": "compact",
+  "payload": {
+    "hotel_id": "hotel_1",
+    "name": "Central Hotel",
+    "location": {
+      "lat": 48.8566,
+      "lng": 2.3522,
+      "city": "Paris"
+    },
+    "star_rating": 4,
+    "score": 8.7,
+    "score_count": 210,
+    "thumb_up_count": 180,
+    "thumb_down_count": 12,
+    "photos": [
+      "https://example.com/hotel.jpg"
+    ],
+    "amenities": [
+      "wifi",
+      "breakfast"
+    ],
+    "price_per_night": 180,
+    "currency": "USD",
+    "rooms_matching": 3,
+    "available_rooms": 5,
+    "address": "1 Rue Example",
+    "distance_from_center": "0.5 km",
+    "ctas": [
+      "watch_in_detail",
+      "show_numbers"
+    ]
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## hotel_compare
+
+```json
+{
+  "widget_type": "hotel_compare",
+  "variant": "side_by_side",
+  "payload": {
+    "items": [
+      {
+        "hotel_id": "hotel_1",
+        "name": "Central Hotel",
+        "location": {
+          "lat": 48.8566,
+          "lng": 2.3522,
+          "city": "Paris"
+        },
+        "star_rating": 4,
+        "score": 8.7,
+        "score_count": 210,
+        "thumb_up_count": 180,
+        "thumb_down_count": 12,
+        "photos": [
+          "https://example.com/hotel.jpg"
+        ],
+        "amenities": [
+          "wifi",
+          "breakfast"
+        ],
+        "price_per_night": 180,
+        "currency": "USD",
+        "rooms_matching": 3,
+        "available_rooms": 5,
+        "address": "1 Rue Example",
+        "distance_from_center": "0.5 km",
+        "ctas": [
+          "watch_in_detail",
+          "show_numbers"
+        ]
+      },
+      {
+        "hotel_id": "hotel_2",
+        "name": "Riverside Hotel",
+        "location": {
+          "lat": 48.8566,
+          "lng": 2.3522,
+          "city": "Paris"
+        },
+        "star_rating": 4,
+        "score": 8.7,
+        "score_count": 210,
+        "thumb_up_count": 180,
+        "thumb_down_count": 12,
+        "photos": [
+          "https://example.com/hotel.jpg"
+        ],
+        "amenities": [
+          "wifi",
+          "breakfast"
+        ],
+        "price_per_night": 180,
+        "currency": "USD",
+        "rooms_matching": 3,
+        "available_rooms": 5,
+        "address": "1 Rue Example",
+        "distance_from_center": "0.5 km",
+        "ctas": [
+          "watch_in_detail",
+          "show_numbers"
+        ]
+      }
+    ],
+    "comparison_facets": [
+      "score",
+      "price_per_night"
+    ]
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## place_list
+
+```json
+{
+  "widget_type": "place_list",
+  "variant": "default",
+  "payload": {
+    "title": "Places",
+    "items": [
+      {
+        "place_id": "place_1",
+        "name": "Eiffel Tower",
+        "types": [
+          "landmark"
+        ],
+        "photos": [
+          "https://example.com/eiffel.jpg"
+        ],
+        "rating": 4.7,
+        "rating_count": 120000,
+        "opening_hours": "09:00-23:00",
+        "address": "Paris",
+        "ctas": [
+          "view_details",
+          "add_to_itinerary"
+        ]
+      }
+    ]
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## place_card
+
+```json
+{
+  "widget_type": "place_card",
+  "variant": "compact",
+  "payload": {
+    "place_id": "place_1",
+    "name": "Eiffel Tower",
+    "types": [
+      "landmark"
+    ],
+    "photos": [
+      "https://example.com/eiffel.jpg"
+    ],
+    "rating": 4.7,
+    "rating_count": 120000,
+    "opening_hours": "09:00-23:00",
+    "address": "Paris",
+    "ctas": [
+      "view_details",
+      "add_to_itinerary"
+    ]
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## action_chooser
+
+```json
+{
+  "widget_type": "action_chooser",
+  "variant": "default",
+  "payload": {
+    "prompt_text": "What next?",
+    "options": [
+      {
+        "label": "See hotels",
+        "action_id": "hotels",
+        "illustration_url": "https://example.com/hotels.png"
+      }
+    ],
+    "submitted_value": {
+      "action_id": "hotels"
+    }
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## map_view
+
+```json
+{
+  "widget_type": "map_view",
+  "variant": "default",
+  "payload": {
+    "center": {
+      "lat": 48.8566,
+      "lng": 2.3522
+    },
+    "zoom": 12,
+    "markers": [
+      {
+        "lat": 48.8566,
+        "lng": 2.3522,
+        "label": "Hotel",
+        "hotel_id": "hotel_1",
+        "state": "selected"
+      }
+    ],
+    "selected_marker_id": "hotel_1",
+    "filter_state": {
+      "star_rating": [
+        4,
+        5
+      ],
+      "budget_min": 100,
+      "budget_max": 300,
+      "guest_rating_min": 8
+    }
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## filter_panel
+
+```json
+{
+  "widget_type": "filter_panel",
+  "variant": "default",
+  "payload": {
+    "hotel_category_options": [
+      "4 star",
+      "5 star"
+    ],
+    "budget_range": {
+      "min": 50,
+      "max": 500,
+      "currency": "USD"
+    },
+    "guest_rating_options": [
+      7,
+      8,
+      9
+    ],
+    "applied": {
+      "hotel_category": [
+        "4 star"
+      ],
+      "budget_min": 100,
+      "budget_max": 300,
+      "guest_rating_min": 8
+    },
+    "ctas": [
+      "clear_all",
+      "apply"
+    ]
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## property_block
+
+```json
+{
+  "widget_type": "property_block",
+  "variant": "default",
+  "payload": {
+    "slots": [
+      {
+        "label": "Destination",
+        "value": "Paris",
+        "edit_action_id": "edit_destination",
+        "missing": false
+      },
+      {
+        "label": "Dates",
+        "missing": true
+      }
+    ]
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## itinerary_summary
+
+```json
+{
+  "widget_type": "itinerary_summary",
+  "variant": "default",
+  "payload": {
+    "destination": "Paris",
+    "dates": {
+      "from": "2026-07-01",
+      "to": "2026-07-05"
+    },
+    "traveller_party": {
+      "adults": 2
+    },
+    "total_cost": {
+      "amount": 1200,
+      "currency": "USD"
+    },
+    "notes": "Draft itinerary",
+    "ctas": [
+      "confirm",
+      "edit"
+    ]
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## order_confirmation
+
+```json
+{
+  "widget_type": "order_confirmation",
+  "variant": "default",
+  "payload": {
+    "order_id": "ord_123",
+    "booking_reference": "ABC123",
+    "total_amount": "199.00",
+    "total_currency": "USD",
+    "passengers": [
+      {
+        "name": "Alex"
+      }
+    ],
+    "slices": [
+      {
+        "origin": "SFO",
+        "destination": "JFK"
+      }
+    ],
+    "ctas": [
+      "view_full",
+      "new_search"
+    ]
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## notification
+
+```json
+{
+  "widget_type": "notification",
+  "variant": "default",
+  "payload": {
+    "kind": "success",
+    "text": "Saved",
+    "dismissible": true
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## error_card
+
+```json
+{
+  "widget_type": "error_card",
+  "variant": "default",
+  "payload": {
+    "title": "Could not load offers",
+    "description": "Try again later",
+    "retry_action_id": "retry",
+    "contact_support": false
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## clarify_question
+
+```json
+{
+  "widget_type": "clarify_question",
+  "variant": "default",
+  "payload": {
+    "question_text": "Which Paris airport?",
+    "options": [
+      {
+        "label": "CDG",
+        "action_id": "cdg"
+      },
+      {
+        "label": "ORY",
+        "action_id": "ory"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
+## loading_card
+
+```json
+{
+  "widget_type": "loading_card",
+  "variant": "default",
+  "payload": {
+    "tool_name": "Duffel search_offers",
+    "started_at": "2026-05-13T00:00:00Z",
+    "expected_duration_seconds": 20
+  },
+  "schema_version": 1,
+  "ai_adjustments": {
+    "annotations": [
+      {
+        "target": "widget",
+        "text": "sample"
+      }
+    ]
+  }
+}
+```
+
