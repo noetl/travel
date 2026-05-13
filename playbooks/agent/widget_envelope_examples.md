@@ -920,7 +920,7 @@ Canonical valid examples for the 24 widget templates. These examples are generat
   "variant": "compact",
   "payload": {
     "trip_id": "trip_smoke_1",
-    "events_path": "chat_threads/_smoke-calendar/trip/events",
+    "events_path": "chat_threads/_smoke-calendar/trip/current/events",
     "display_events": [
       {
         "event_id": "evt_depart_1",

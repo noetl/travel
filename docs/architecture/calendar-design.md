@@ -17,7 +17,7 @@ Events live under either:
 
 ```text
 users/{uid}/trips/{tripId}/events/{eventId}
-chat_threads/{threadId}/trip/events/{eventId}
+chat_threads/{threadId}/trip/current/events/{eventId}
 ```
 
 The guest path is used when the caller has no authenticated user id.

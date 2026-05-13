@@ -27,7 +27,7 @@ users/{uid}/trips/{tripId}/events/{eventId}
 Guest threads store events at:
 
 ```text
-chat_threads/{threadId}/trip/events/{eventId}
+chat_threads/{threadId}/trip/current/events/{eventId}
 ```
 
 The itinerary agent writes documents with this shape:
