@@ -12,5 +12,22 @@
   },
   "right_pane": {
     "title": "Trip state"
+  },
+  "widgets": {
+    "submit": "Submit",
+    "retry": "Retry",
+    "support": "Support",
+    "choose": "Choose",
+    "watch_in_detail": "Watch In Detail",
+    "show_numbers": "Show Numbers",
+    "book_this": "Book This",
+    "add_to_itinerary": "Add to itinerary",
+    "view_rooms": "View Rooms",
+    "confirm": "Confirm",
+    "edit": "Edit",
+    "clear_all": "Clear All",
+    "apply": "Apply",
+    "new_search": "New search",
+    "view_full_order": "View full order"
   }
 }

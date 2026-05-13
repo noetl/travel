@@ -16,16 +16,20 @@
   "dependencies": {
     "@emotion/react": "^11.13.5",
     "@emotion/styled": "^11.13.5",
+    "@fontsource/inter": "^5.2.8",
     "@mui/icons-material": "^6.5.0",
     "@mui/material": "^6.5.0",
+    "@vis.gl/react-google-maps": "^1.8.3",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "axios": "^1.12.0",
+    "date-fns": "^4.1.0",
     "firebase": "^11.0.0",
     "i18next": "^23.16.8",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-i18next": "^15.1.2",
+    "react-markdown": "^10.1.0",
     "react-router-dom": "^6.26.0"
   },
   "devDependencies": {
@@ -38,5 +42,7 @@
     "vite": "^7.0.8",
     "vitest": "^4.1.5"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

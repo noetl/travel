@@ -1,11 +1,19 @@
-import { WidgetStubCard } from './WidgetStubCard';
+import { Chip, Stack, Typography } from '@mui/material';
+import type { FlightListPayload } from '../../contracts/widgets';
+import { asPayload, type WidgetComponentProps } from './widgetUtils';
+import { FlightCard } from './FlightCard';
 
-export interface FlightListProps {
-  payload: unknown;
-  variantId?: string;
-}
-
-export function FlightList({ payload, variantId }: FlightListProps) {
-  // TODO Round 6b: replace this JSON stub with the real Material rendering.
-  return <WidgetStubCard title="flight_list" variantId={variantId} payload={payload} />;
+export function FlightList({ payload, onWidgetEvent }: WidgetComponentProps) {
+  const data = asPayload<FlightListPayload>(payload);
+  return (
+    <Stack spacing={1.25}>
+      <Stack direction="row" alignItems="center" justifyContent="space-between">
+        <Typography variant="h6">{data.title}</Typography>
+        <Chip label={`${data.total_count} offers · ${data.currency}`} size="small" />
+      </Stack>
+      {data.items.map((item) => (
+        <FlightCard key={item.offer_id} payload={{ ...item, ai_adjustments: item.offer_id === data.emphasis_offer_id ? { emphasis: 'cheapest' } : item.ai_adjustments }} variantId="compact" onWidgetEvent={onWidgetEvent} />
+      ))}
+    </Stack>
+  );
 }
