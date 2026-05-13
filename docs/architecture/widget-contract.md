@@ -24,7 +24,7 @@ Every widget crosses the agent-to-renderer boundary as:
 
 ## Closed Catalogue
 
-The renderer only accepts the 23 widget types in `playbooks/widget-contract/`. Unknown widget types or invalid payloads fall back to `bot_text` with a natural-language explanation. The agent must always produce a short textual description alongside a widget so fallback remains graceful.
+The renderer only accepts the 24 widget types in `playbooks/widget-contract/`. Unknown widget types or invalid payloads fall back to `bot_text` with a natural-language explanation. The agent must always produce a short textual description alongside a widget so fallback remains graceful.
 
 ## Schema Versioning
 
@@ -61,6 +61,7 @@ still validated before render by `WidgetRenderer`.
 | `filter_panel` | `FilterPanel` | Right-pane filter controls. |
 | `property_block` | `PropertyBlock` | Slot accumulator with edit actions. |
 | `itinerary_summary` | `ItinerarySummary` | End-of-flow review. |
+| `calendar_view` | `CalendarView` | Firestore-backed schedule view with static and live-read modes. |
 | `order_confirmation` | `OrderConfirmation` | Test-order receipt. |
 | `loading_card`, `error_card`, `notification` | `LoadingCard`, `ErrorCard`, `Notification` | Lifecycle states. |
 

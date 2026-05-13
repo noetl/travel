@@ -28,7 +28,8 @@ export interface WidgetEnvelope {
     | 'notification'
     | 'error_card'
     | 'clarify_question'
-    | 'loading_card';
+    | 'loading_card'
+    | 'calendar_view';
   variant: string;
   payload: {
     [k: string]: unknown;
@@ -71,6 +72,33 @@ export interface BotTextPayload {
   text: string;
   timestamp?: string;
   markdown?: boolean;
+}
+
+
+/**
+ * Firestore-backed trip calendar view.
+ */
+export interface CalendarViewPayload {
+  trip_id: string;
+  events_path: string;
+  display_events?: CalendarEvent[];
+  editable: boolean;
+  empty_state_text?: string;
+}
+export interface CalendarEvent {
+  event_id: string;
+  type: 'flight_depart' | 'flight_arrive' | 'check_in' | 'check_out' | 'activity' | 'user_note';
+  start_at: string;
+  end_at?: string | null;
+  timezone: string;
+  title: string;
+  location: string;
+  notes?: string | null;
+  source_order_id?: string | null;
+  source_hotel_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  google_calendar_event_id?: string | null;
 }
 
 
@@ -654,6 +682,7 @@ export interface UserTextPayload {
 export const WIDGET_TYPES = [
   "action_chooser",
   "bot_text",
+  "calendar_view",
   "clarify_question",
   "date_range_picker",
   "error_card",
@@ -677,5 +706,5 @@ export const WIDGET_TYPES = [
   "user_text"
 ] as const;
 export type WidgetType = typeof WIDGET_TYPES[number];
-export type WidgetPayload = ActionChooserPayload | BotTextPayload | ClarifyQuestionPayload | DateRangePickerPayload | ErrorCardPayload | FilterPanelPayload | FlightCardPayload | FlightListPayload | HotelCardPayload | HotelComparePayload | HotelListPayload | ItinerarySummaryPayload | LoadingCardPayload | MapViewPayload | NotificationPayload | OrderConfirmationPayload | PartyPickerPayload | PlaceAutocompleteInputPayload | PlaceCardPayload | PlaceListPayload | PropertyBlockPayload | TypingIndicatorPayload | UserTextPayload;
+export type WidgetPayload = ActionChooserPayload | BotTextPayload | CalendarViewPayload | ClarifyQuestionPayload | DateRangePickerPayload | ErrorCardPayload | FilterPanelPayload | FlightCardPayload | FlightListPayload | HotelCardPayload | HotelComparePayload | HotelListPayload | ItinerarySummaryPayload | LoadingCardPayload | MapViewPayload | NotificationPayload | OrderConfirmationPayload | PartyPickerPayload | PlaceAutocompleteInputPayload | PlaceCardPayload | PlaceListPayload | PropertyBlockPayload | TypingIndicatorPayload | UserTextPayload;
 export type WidgetEnvelopeOf<TPayload = WidgetPayload> = WidgetEnvelope & { payload: TPayload };

@@ -1,0 +1,19 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /chat_threads/{thread}/{document=**} {
+      allow read: if true;  // v1 demo: unauthenticated calendar widgets.
+      allow write: if false; // writes happen through mcp/firestore on the worker.
+    }
+
+    match /trips/{trip}/{document=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /users/{uid}/{document=**} {
+      allow read: if true;  // v1 demo; tighten to request.auth.uid == uid later.
+      allow write: if false;
+    }
+  }
+}

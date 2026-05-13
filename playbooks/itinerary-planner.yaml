@@ -163,7 +163,7 @@ workflow:
         import json
         import re
         import uuid
-        from datetime import date, timedelta
+        from datetime import date, datetime, timezone, timedelta
 
         def _as_dict(value):
             return value if isinstance(value, dict) else {}
@@ -243,6 +243,7 @@ workflow:
             updates["party"] = party
 
         payload = _as_dict(event_payload)
+        lowered_text = text.lower()
         if event_type in ("user_widget_submit", "user_widget_cta_click"):
             submitted = _as_dict(payload.get("submitted_value") or payload.get("value"))
             action_id = str(payload.get("action_id") or submitted.get("action_id") or "").strip()
@@ -261,6 +262,23 @@ workflow:
             if "hotel" in action_id or submitted.get("hotel_id"):
                 updates["picked_hotel_id"] = submitted.get("hotel_id") or action_id.replace("pick_hotel:", "")
 
+        wants_calendar = "show" in lowered_text and ("schedule" in lowered_text or "calendar" in lowered_text)
+
+        if any(word in lowered_text for word in ("meeting", "appointment", "reminder", "note")) and "add" in lowered_text:
+            updates["pending_calendar_events"] = [{
+                "event_id": f"note_{uuid.uuid4().hex[:10]}",
+                "type": "user_note",
+                "start_at": f"{(date.today() + timedelta(days=7)).isoformat()}T15:00:00-04:00",
+                "end_at": None,
+                "timezone": "America/New_York",
+                "title": text[:80] or "Trip note",
+                "location": "",
+                "notes": text,
+                "source_order_id": None,
+                "source_hotel_id": None,
+                "google_calendar_event_id": None,
+            }]
+
         next_state = _deep_merge(slot_state, updates)
         region_ready = isinstance(next_state.get("region"), dict)
         dates_ready = bool(next_state.get("check_in_date") and next_state.get("check_out_date"))
@@ -277,7 +295,9 @@ workflow:
         if not party_ready:
             render_intent["missing"].append("party")
 
-        if region_ready and "places_seen" not in next_state:
+        if wants_calendar:
+            render_intent = {"kind": "calendar_live"}
+        elif region_ready and "places_seen" not in next_state:
             tool_requests.append({
                 "tool": "mcp/google-places.search_text",
                 "arguments": {"query": next_state["region"].get("label", ""), "max_results": 5},
@@ -309,6 +329,8 @@ workflow:
             render_intent = {"kind": "show_hotels"}
         elif picked_flight and picked_hotel:
             render_intent = {"kind": "summary"}
+        elif next_state.get("pending_calendar_events"):
+            render_intent = {"kind": "calendar_live"}
 
         first_tool = tool_requests[0] if tool_requests else {}
         result = {
@@ -483,6 +505,8 @@ workflow:
         first_tool: "{{ extract_turn.first_tool }}"
         call_id: "{{ extract_turn.call_id }}"
         slot_state: "{{ extract_turn.slot_state }}"
+        thread_path: "{{ normalize_input.thread_path }}"
+        user_uid: "{{ workload.user_uid | default('guest') }}"
         places_result: "{{ call_google_places | default({}) }}"
         offers_result: "{{ call_duffel_offers | default({}) }}"
         hotels_result: "{{ call_amadeus_hotels | default({}) }}"
@@ -615,8 +639,10 @@ workflow:
         slot_state_pre_tool: "{{ extract_turn.slot_state }}"
         slot_state_post_tool: "{{ normalize_tool_response.slot_state | default({}) }}"
         tool_summary: "{{ normalize_tool_response.summary | default({}) }}"
+        user_uid: "{{ workload.user_uid | default('guest') }}"
       code: |
         import json
+        import uuid
         from datetime import date, timedelta
 
         def _as_dict(value):
@@ -635,6 +661,90 @@ workflow:
         tomorrow = date.today() + timedelta(days=30)
         default_from = slot_state.get("check_in_date") or tomorrow.isoformat()
         default_to = slot_state.get("check_out_date") or (tomorrow + timedelta(days=4)).isoformat()
+        trip_id = slot_state.get("trip_id") or f"trip_{str(thread_path).split('/')[-1]}"
+        if user_uid and user_uid != "guest":
+            events_path = f"users/{user_uid}/trips/{trip_id}/events"
+        else:
+            events_path = f"{thread_path}/trip/events"
+
+        def _calendar_events():
+            region = slot_state.get("region", {}) if isinstance(slot_state.get("region"), dict) else {}
+            destination = region.get("label", "Destination")
+            city_code = region.get("city_code", "MIA")
+            start = slot_state.get("check_in_date") or default_from
+            end = slot_state.get("check_out_date") or default_to
+            order_id = slot_state.get("order_id")
+            hotel_id = slot_state.get("picked_hotel_id")
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            events = []
+            if order_id or slot_state.get("picked_flight_offer_id"):
+                events.extend([
+                    {
+                        "event_id": f"flight_depart_{uuid.uuid4().hex[:8]}",
+                        "type": "flight_depart",
+                        "start_at": f"{start}T08:00:00-07:00",
+                        "end_at": None,
+                        "timezone": "America/Los_Angeles",
+                        "title": "Depart SFO",
+                        "location": "SFO",
+                        "notes": "Duffel test-mode flight segment",
+                        "source_order_id": order_id,
+                        "source_hotel_id": None,
+                        "created_at": now,
+                        "updated_at": now,
+                        "google_calendar_event_id": None,
+                    },
+                    {
+                        "event_id": f"flight_arrive_{uuid.uuid4().hex[:8]}",
+                        "type": "flight_arrive",
+                        "start_at": f"{start}T16:00:00-04:00",
+                        "end_at": None,
+                        "timezone": "America/New_York",
+                        "title": f"Arrive {city_code}",
+                        "location": city_code,
+                        "notes": "Duffel test-mode flight segment",
+                        "source_order_id": order_id,
+                        "source_hotel_id": None,
+                        "created_at": now,
+                        "updated_at": now,
+                        "google_calendar_event_id": None,
+                    },
+                ])
+            if hotel_id:
+                events.extend([
+                    {
+                        "event_id": f"check_in_{uuid.uuid4().hex[:8]}",
+                        "type": "check_in",
+                        "start_at": f"{start}T15:00:00-04:00",
+                        "end_at": None,
+                        "timezone": "America/New_York",
+                        "title": f"Check in at {destination}",
+                        "location": destination,
+                        "notes": "Default hotel check-in time",
+                        "source_order_id": None,
+                        "source_hotel_id": hotel_id,
+                        "created_at": now,
+                        "updated_at": now,
+                        "google_calendar_event_id": None,
+                    },
+                    {
+                        "event_id": f"check_out_{uuid.uuid4().hex[:8]}",
+                        "type": "check_out",
+                        "start_at": f"{end}T11:00:00-04:00",
+                        "end_at": None,
+                        "timezone": "America/New_York",
+                        "title": f"Check out from {destination}",
+                        "location": destination,
+                        "notes": "Default hotel check-out time",
+                        "source_order_id": None,
+                        "source_hotel_id": hotel_id,
+                        "created_at": now,
+                        "updated_at": now,
+                        "google_calendar_event_id": None,
+                    },
+                ])
+            events.extend(slot_state.get("pending_calendar_events") or [])
+            return events
 
         widgets = []
         bot_message = ""
@@ -705,6 +815,7 @@ workflow:
             }))
             bot_message = "Hotel options are ready."
         elif intent == "summary":
+            calendar_events = _calendar_events()
             widgets.append(_env("itinerary_summary", "default", {
                 "destination": slot_state.get("region", {}).get("label", "Destination"),
                 "dates": {"from": default_from, "to": default_to},
@@ -713,7 +824,26 @@ workflow:
                 "notes": "Test-mode itinerary. Duffel orders use wallet balance only.",
                 "ctas": ["confirm", "edit"],
             }))
+            widgets.append(_env("calendar_view", "compact", {
+                "trip_id": trip_id,
+                "events_path": events_path,
+                "display_events": calendar_events,
+                "editable": False,
+                "empty_state_text": "No events yet. Confirm a flight or hotel to populate the schedule.",
+            }))
             bot_message = "The itinerary is ready to review."
+        elif intent == "calendar_live":
+            calendar_events = _calendar_events()
+            calendar_payload = {
+                "trip_id": trip_id,
+                "events_path": events_path,
+                "editable": True,
+                "empty_state_text": "No events yet. Confirm a flight or hotel to populate the schedule.",
+            }
+            if calendar_events:
+                calendar_payload["display_events"] = calendar_events
+            widgets.append(_env("calendar_view", "full", calendar_payload))
+            bot_message = "Here is the current trip schedule."
         else:
             missing = _as_dict(render_intent).get("missing") or []
             if "region" in missing:
@@ -754,13 +884,109 @@ workflow:
                 safe_widgets.append(_bot("I prepared a response, but the widget shape was invalid."))
             else:
                 safe_widgets.append(item)
+        calendar_events = _calendar_events()
         result = {
             "thread_path": thread_path,
             "bot_message": bot_message,
             "widgets": safe_widgets,
             "first_widget": safe_widgets[0] if safe_widgets else _bot(bot_message or "Ready."),
+            "second_widget": safe_widgets[1] if len(safe_widgets) > 1 else {},
+            "calendar_events_path": events_path,
+            "calendar_events": calendar_events,
+            "first_calendar_event": calendar_events[0] if calendar_events else {},
+            "second_calendar_event": calendar_events[1] if len(calendar_events) > 1 else {},
+            "third_calendar_event": calendar_events[2] if len(calendar_events) > 2 else {},
+            "fourth_calendar_event": calendar_events[3] if len(calendar_events) > 3 else {},
         }
         globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: persist_calendar_event_1
+          when: "{{ render_widget_chat.first_calendar_event.event_id is defined }}"
+        - step: append_widget_event
+          when: "{{ render_widget_chat.first_calendar_event.event_id is not defined }}"
+
+  - step: persist_calendar_event_1
+    desc: Write first calendar event document when this turn produced one
+    tool:
+      kind: agent
+      framework: noetl
+      entrypoint: automation/agents/mcp/firestore
+      payload:
+        method: tools/call
+        tool: set_doc
+        firestore_database: "{{ workload.firestore_database }}"
+        arguments:
+          path: "{{ render_widget_chat.calendar_events_path }}/{{ render_widget_chat.first_calendar_event.event_id }}"
+          data: "{{ render_widget_chat.first_calendar_event }}"
+          merge: false
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: persist_calendar_event_2
+          when: "{{ render_widget_chat.second_calendar_event.event_id is defined }}"
+        - step: append_widget_event
+          when: "{{ render_widget_chat.second_calendar_event.event_id is not defined }}"
+
+  - step: persist_calendar_event_2
+    desc: Write second calendar event document when this turn produced one
+    tool:
+      kind: agent
+      framework: noetl
+      entrypoint: automation/agents/mcp/firestore
+      payload:
+        method: tools/call
+        tool: set_doc
+        firestore_database: "{{ workload.firestore_database }}"
+        arguments:
+          path: "{{ render_widget_chat.calendar_events_path }}/{{ render_widget_chat.second_calendar_event.event_id }}"
+          data: "{{ render_widget_chat.second_calendar_event }}"
+          merge: false
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: persist_calendar_event_3
+          when: "{{ render_widget_chat.third_calendar_event.event_id is defined }}"
+        - step: append_widget_event
+          when: "{{ render_widget_chat.third_calendar_event.event_id is not defined }}"
+
+  - step: persist_calendar_event_3
+    desc: Write third calendar event document when this turn produced one
+    tool:
+      kind: agent
+      framework: noetl
+      entrypoint: automation/agents/mcp/firestore
+      payload:
+        method: tools/call
+        tool: set_doc
+        firestore_database: "{{ workload.firestore_database }}"
+        arguments:
+          path: "{{ render_widget_chat.calendar_events_path }}/{{ render_widget_chat.third_calendar_event.event_id }}"
+          data: "{{ render_widget_chat.third_calendar_event }}"
+          merge: false
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: persist_calendar_event_4
+          when: "{{ render_widget_chat.fourth_calendar_event.event_id is defined }}"
+        - step: append_widget_event
+          when: "{{ render_widget_chat.fourth_calendar_event.event_id is not defined }}"
+
+  - step: persist_calendar_event_4
+    desc: Write fourth calendar event document when this turn produced one
+    tool:
+      kind: agent
+      framework: noetl
+      entrypoint: automation/agents/mcp/firestore
+      payload:
+        method: tools/call
+        tool: set_doc
+        firestore_database: "{{ workload.firestore_database }}"
+        arguments:
+          path: "{{ render_widget_chat.calendar_events_path }}/{{ render_widget_chat.fourth_calendar_event.event_id }}"
+          data: "{{ render_widget_chat.fourth_calendar_event }}"
+          merge: false
     next:
       spec: { mode: exclusive }
       arcs:
@@ -782,6 +1008,31 @@ workflow:
             type: agent_widget_emit
             payload:
               envelope: "{{ render_widget_chat.first_widget }}"
+            actor: { kind: agent, name: muno-itinerary-planner }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: append_second_widget_event
+          when: "{{ render_widget_chat.second_widget.widget_type is defined }}"
+        - step: append_chat_event
+          when: "{{ render_widget_chat.second_widget.widget_type is not defined }}"
+
+  - step: append_second_widget_event
+    desc: Append the optional companion widget, such as calendar_view after itinerary_summary
+    tool:
+      kind: agent
+      framework: noetl
+      entrypoint: automation/agents/mcp/firestore
+      payload:
+        method: tools/call
+        tool: append_event
+        firestore_database: "{{ workload.firestore_database }}"
+        arguments:
+          thread_path: "{{ normalize_input.thread_path }}"
+          event:
+            type: agent_widget_emit
+            payload:
+              envelope: "{{ render_widget_chat.second_widget }}"
             actor: { kind: agent, name: muno-itinerary-planner }
     next:
       spec: { mode: exclusive }

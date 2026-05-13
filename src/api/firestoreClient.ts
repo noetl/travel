@@ -1,5 +1,5 @@
 import { initializeApp, type FirebaseOptions } from 'firebase/app';
-import { collection, getFirestore, onSnapshot, query, type DocumentData } from 'firebase/firestore';
+import { collection, getFirestore, onSnapshot, orderBy, query, type DocumentData } from 'firebase/firestore';
 
 const config: FirebaseOptions | undefined = import.meta.env.VITE_FIREBASE_API_KEY
   ? {
@@ -19,5 +19,15 @@ export function listenToCollection(path: string, onItems: (items: DocumentData[]
   }
   return onSnapshot(query(collection(firestore, path)), (snapshot) => {
     onItems(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+  });
+}
+
+export function listenToCalendarEvents(path: string, onItems: (items: DocumentData[]) => void) {
+  if (!firestore) {
+    onItems([]);
+    return () => undefined;
+  }
+  return onSnapshot(query(collection(firestore, path.replace(/^\/+/, '')), orderBy('start_at', 'asc')), (snapshot) => {
+    onItems(snapshot.docs.map((doc) => ({ event_id: doc.id, ...doc.data() })));
   });
 }

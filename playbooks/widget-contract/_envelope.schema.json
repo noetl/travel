@@ -37,7 +37,8 @@
         "notification",
         "error_card",
         "clarify_question",
-        "loading_card"
+        "loading_card",
+        "calendar_view"
       ]
     },
     "variant": {

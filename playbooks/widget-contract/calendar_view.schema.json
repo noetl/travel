@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/calendar_view.schema.json",
+  "title": "CalendarViewPayload",
+  "description": "Firestore-backed trip calendar view.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["trip_id", "events_path", "editable"],
+  "properties": {
+    "trip_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "events_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "display_events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/calendar_event"
+      }
+    },
+    "editable": {
+      "type": "boolean"
+    },
+    "empty_state_text": {
+      "type": "string",
+      "maxLength": 240
+    }
+  },
+  "definitions": {
+    "calendar_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_id", "type", "start_at", "timezone", "title", "location"],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "enum": ["flight_depart", "flight_arrive", "check_in", "check_out", "activity", "user_note"]
+        },
+        "start_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 180
+        },
+        "notes": {
+          "type": ["string", "null"],
+          "maxLength": 1000
+        },
+        "source_order_id": {
+          "type": ["string", "null"]
+        },
+        "source_hotel_id": {
+          "type": ["string", "null"]
+        },
+        "created_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "google_calendar_event_id": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}
