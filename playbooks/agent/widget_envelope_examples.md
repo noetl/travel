@@ -330,7 +330,7 @@ Canonical valid examples for the 24 widget templates. These examples are generat
         "thumb_up_count": 180,
         "thumb_down_count": 12,
         "photos": [
-          "https://example.com/hotel.jpg"
+          "https://photos.hotelbeds.com/giata/original/00/000001/000001a_hb_a_001.jpg"
         ],
         "amenities": [
           "wifi",
@@ -388,7 +388,7 @@ Canonical valid examples for the 24 widget templates. These examples are generat
     "thumb_up_count": 180,
     "thumb_down_count": 12,
     "photos": [
-      "https://example.com/hotel.jpg"
+      "https://photos.hotelbeds.com/giata/original/00/000001/000001a_hb_a_001.jpg"
     ],
     "amenities": [
       "wifi",
@@ -439,7 +439,7 @@ Canonical valid examples for the 24 widget templates. These examples are generat
         "thumb_up_count": 180,
         "thumb_down_count": 12,
         "photos": [
-          "https://example.com/hotel.jpg"
+          "https://photos.hotelbeds.com/giata/original/00/000001/000001a_hb_a_001.jpg"
         ],
         "amenities": [
           "wifi",
@@ -470,7 +470,7 @@ Canonical valid examples for the 24 widget templates. These examples are generat
         "thumb_up_count": 180,
         "thumb_down_count": 12,
         "photos": [
-          "https://example.com/hotel.jpg"
+          "https://photos.hotelbeds.com/giata/original/00/000001/000001a_hb_a_001.jpg"
         ],
         "amenities": [
           "wifi",
@@ -521,7 +521,7 @@ Canonical valid examples for the 24 widget templates. These examples are generat
           "landmark"
         ],
         "photos": [
-          "https://example.com/eiffel.jpg"
+          "https://maps.googleapis.com/maps/api/staticmap?center=48.8584%2C2.2945&zoom=13&size=400x260&scale=2"
         ],
         "rating": 4.7,
         "rating_count": 120000,
@@ -559,7 +559,7 @@ Canonical valid examples for the 24 widget templates. These examples are generat
       "landmark"
     ],
     "photos": [
-      "https://example.com/eiffel.jpg"
+      "https://maps.googleapis.com/maps/api/staticmap?center=48.8584%2C2.2945&zoom=13&size=400x260&scale=2"
     ],
     "rating": 4.7,
     "rating_count": 120000,
@@ -780,7 +780,7 @@ Canonical valid examples for the 24 widget templates. These examples are generat
   "variant": "default",
   "payload": {
     "order_id": "ord_123",
-    "booking_reference": "ABC123",
+    "booking_reference": "XKQAYC",
     "total_amount": "199.00",
     "total_currency": "USD",
     "passengers": [

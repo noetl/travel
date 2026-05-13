@@ -15,9 +15,10 @@ import {
   Stack,
   Typography,
   alpha,
+  Skeleton,
   useTheme
 } from '@mui/material';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 
 export interface WidgetEvent {
   type: 'widget_submit' | 'widget_cta_click';
@@ -104,36 +105,54 @@ export function EmptyPhoto({ icon = 'hotel' }: { icon?: 'hotel' | 'flight' | 'im
   return (
     <Box
       sx={{
-        bgcolor: 'primary.light',
-        color: 'primary.contrastText',
+        position: 'relative',
+        bgcolor: 'background.default',
+        color: 'text.secondary',
         minHeight: 120,
         display: 'grid',
-        placeItems: 'center'
+        placeItems: 'center',
+        overflow: 'hidden'
       }}
     >
-      <Icon fontSize="large" />
+      <Skeleton variant="rectangular" animation={false} sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }} />
+      <Stack spacing={0.5} alignItems="center" sx={{ position: 'relative', zIndex: 1 }}>
+        <Icon fontSize="large" />
+        <Typography variant="caption">No photo available</Typography>
+      </Stack>
     </Box>
   );
 }
 
 export function PhotoStrip({ photos, icon = 'hotel' }: { photos?: string[]; icon?: 'hotel' | 'flight' | 'image' }) {
+  const [failed, setFailed] = useState(false);
   const first = photos?.find(Boolean);
-  if (!first) return <EmptyPhoto icon={icon} />;
+  if (!first || failed) return <EmptyPhoto icon={icon} />;
   return (
     <Box
       sx={{
         minHeight: 150,
         bgcolor: 'background.default',
-        backgroundImage: `url(${first})`,
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        position: 'relative'
+        position: 'relative',
+        overflow: 'hidden'
       }}
     >
+      <Box
+        component="img"
+        src={first}
+        alt=""
+        loading="lazy"
+        onError={() => setFailed(true)}
+        sx={{
+          display: 'block',
+          width: '100%',
+          height: 150,
+          objectFit: 'cover'
+        }}
+      />
       {photos && photos.length > 1 ? (
         <Chip
           size="small"
-          label={`1/${photos.length}`}
+          label={`View all ${photos.length} photos`}
           sx={{ position: 'absolute', right: 8, bottom: 8, bgcolor: 'rgba(255,255,255,0.9)' }}
         />
       ) : null}

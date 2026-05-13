@@ -2,9 +2,12 @@ import EditIcon from '@mui/icons-material/Edit';
 import { IconButton, List, ListItem, ListItemText, Stack, Typography } from '@mui/material';
 import type { PropertyBlockPayload } from '../../contracts/widgets';
 import { WidgetCard, asPayload, emitWidgetEvent, type WidgetComponentProps } from './widgetUtils';
+import { formatPossibleParty } from '../../utils/formatParty';
 
 export function PropertyBlock({ payload, onWidgetEvent }: WidgetComponentProps) {
   const data = asPayload<PropertyBlockPayload>(payload);
+  const slotValue = (slot: PropertyBlockPayload['slots'][number]) =>
+    slot.label.toLowerCase().includes('party') ? formatPossibleParty(slot.value) || String(slot.value ?? '-') : String(slot.value ?? '-');
   return (
     <WidgetCard>
       <Stack spacing={1}>
@@ -20,7 +23,7 @@ export function PropertyBlock({ payload, onWidgetEvent }: WidgetComponentProps) 
                 </IconButton>
               ) : null}
             >
-              <ListItemText primary={slot.label} secondary={slot.missing ? 'Missing' : String(slot.value ?? '-')} />
+              <ListItemText primary={slot.label} secondary={slot.missing ? 'Missing' : slotValue(slot)} />
             </ListItem>
           ))}
         </List>
