@@ -1,16 +1,18 @@
 import { Alert, Box, Button, CircularProgress, Stack, Typography } from '@mui/material';
+import { useState } from 'react';
 import { Route, Routes } from 'react-router-dom';
 import { AuthCallback } from './auth/AuthCallback';
 import { useMunoAuth } from './auth/MunoAuthProvider';
-import { Sidebar } from './components/shell/Sidebar';
+import { Sidebar, type SidebarView } from './components/shell/Sidebar';
 import { ChatThread } from './components/shell/ChatThread';
 import { RightPane } from './components/shell/RightPane';
 
 function Shell() {
+  const [activeView, setActiveView] = useState<SidebarView>('searches');
   return (
     <Box sx={{ display: 'grid', gridTemplateColumns: '280px minmax(0, 1fr) 360px', minHeight: '100vh' }}>
-      <Sidebar />
-      <ChatThread />
+      <Sidebar activeView={activeView} onViewChange={setActiveView} />
+      <ChatThread activeView={activeView} />
       <RightPane />
     </Box>
   );

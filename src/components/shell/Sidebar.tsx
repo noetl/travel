@@ -2,6 +2,8 @@ import { Avatar, Box, Button, Divider, List, ListItemButton, ListItemText, Stack
 import { useTranslation } from 'react-i18next';
 import { useMunoAuth, type MunoUser } from '../../auth/MunoAuthProvider';
 
+export type SidebarView = 'searches' | 'orders';
+
 export function SidebarAccount({
   isAuthConfigured,
   isAuthenticated,
@@ -55,7 +57,7 @@ export function SidebarAccount({
   );
 }
 
-export function Sidebar() {
+export function Sidebar({ activeView, onViewChange }: { activeView: SidebarView; onViewChange: (view: SidebarView) => void }) {
   const { t } = useTranslation();
   const auth = useMunoAuth();
   return (
@@ -71,8 +73,12 @@ export function Sidebar() {
       />
       <Divider />
       <List dense>
-        <ListItemButton><ListItemText primary={t('sidebar.searches')} /></ListItemButton>
-        <ListItemButton><ListItemText primary={t('sidebar.orders')} /></ListItemButton>
+        <ListItemButton selected={activeView === 'searches'} onClick={() => onViewChange('searches')}>
+          <ListItemText primary={t('sidebar.searches')} />
+        </ListItemButton>
+        <ListItemButton selected={activeView === 'orders'} onClick={() => onViewChange('orders')}>
+          <ListItemText primary={t('sidebar.orders')} />
+        </ListItemButton>
       </List>
     </Box>
   );
