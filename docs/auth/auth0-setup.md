@@ -30,11 +30,13 @@ VITE_ALLOW_GUEST=true
 npm run dev
 ```
 
-To run with Auth0 locally, create a private `.env.local`:
+Travel falls back to the same public Auth0 SPA domain and client id used by the
+NoETL GUI, so a missing Pages env value does not strand the sign-in pane. To
+override those defaults locally, create a private `.env.local`:
 
 ```bash
-VITE_AUTH0_DOMAIN=<auth0-domain>
-VITE_AUTH0_CLIENT_ID=<auth0-spa-client-id>
+VITE_AUTH0_DOMAIN=<auth0-domain-override>
+VITE_AUTH0_CLIENT_ID=<auth0-spa-client-id-override>
 VITE_AUTH0_AUDIENCE=<auth0-audience>
 VITE_NOETL_API_BASE_URL=http://localhost:8082/api
 VITE_GATEWAY_BASE_URL=https://gateway.mestumre.dev
