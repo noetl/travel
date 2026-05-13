@@ -18,14 +18,12 @@ gcloud secrets versions access latest --secret=auth0_client --project="$PROJECT_
 
 AUTH0_DOMAIN="$(jq -r '.data.domain' "$tmp")"
 AUTH0_CLIENT_ID="$(jq -r '.data.client_id' "$tmp")"
-AUTH0_AUDIENCE="$(jq -r '.data.audience' "$tmp")"
 GOOGLE_MAPS_KEY="$(gcloud secrets versions access latest --secret=google-maps-widget-key --project="$PROJECT_ID")"
 
 "$RUNTIME" build \
   --platform "$PLATFORM" \
   --build-arg "VITE_AUTH0_DOMAIN=$AUTH0_DOMAIN" \
   --build-arg "VITE_AUTH0_CLIENT_ID=$AUTH0_CLIENT_ID" \
-  --build-arg "VITE_AUTH0_AUDIENCE=$AUTH0_AUDIENCE" \
   --build-arg "VITE_GOOGLE_MAPS_KEY=$GOOGLE_MAPS_KEY" \
   --build-arg "VITE_NOETL_API_BASE_URL=$NOETL_API_BASE_URL" \
   -t "$IMAGE_REPO:$TAG" \

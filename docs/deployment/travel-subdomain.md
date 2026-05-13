@@ -48,7 +48,7 @@ noetl run automation/cloudflare/gke_gateway_edge.yaml \
 ```
 
 For Muno we keep the same Wrangler Pages deployment primitive, but the app uses
-different Vite variables (`VITE_NOETL_API_BASE_URL`, Auth0 audience, and Maps
+different Vite variables (`VITE_NOETL_API_BASE_URL`, Auth0 SPA fields, and Maps
 key), so the GitHub Actions workflow is the canonical automated path.
 
 ## GitHub Secrets and Vars
@@ -59,7 +59,6 @@ Required GitHub Actions secrets:
 - `CLOUDFLARE_ACCOUNT_ID`
 - `VITE_AUTH0_DOMAIN`
 - `VITE_AUTH0_CLIENT_ID`
-- `VITE_AUTH0_AUDIENCE`
 - `VITE_GOOGLE_MAPS_KEY`
 
 Optional GitHub Actions variable:

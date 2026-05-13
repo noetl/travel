@@ -9,8 +9,10 @@ workers, and storage.
 ## Auth0 Build Values
 
 GKE builds read the existing `auth0_client` Secret Manager JSON payload. The
-frontend uses only `.data.domain`, `.data.client_id`, and `.data.audience`.
-Never inject `.data.client_secret` into a Vite build.
+frontend uses only `.data.domain` and `.data.client_id`. Never inject
+`.data.client_secret` into a Vite build. Do not inject an Auth0 audience for the
+Travel SPA; the gateway-session flow mirrors the NoETL GUI and exchanges the
+Auth0 ID token with `gateway.mestumre.dev`.
 
 ## Google Maps Widget Key
 
