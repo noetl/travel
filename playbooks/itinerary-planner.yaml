@@ -225,6 +225,14 @@ workflow:
             return out
 
         globals().update({
+            "copy": copy,
+            "json": json,
+            "re": re,
+            "uuid": uuid,
+            "date": date,
+            "datetime": datetime,
+            "timezone": timezone,
+            "timedelta": timedelta,
             "_as_dict": _as_dict,
             "_text_from_event": _text_from_event,
             "_slot_from_loaded": _slot_from_loaded,
@@ -664,7 +672,17 @@ workflow:
         def _bot(text):
             return _env("bot_text", "default", {"text": text, "markdown": True})
 
-        globals().update({"_as_dict": _as_dict, "_env": _env, "_bot": _bot})
+        globals().update({
+            "json": json,
+            "uuid": uuid,
+            "date": date,
+            "datetime": datetime,
+            "timezone": timezone,
+            "timedelta": timedelta,
+            "_as_dict": _as_dict,
+            "_env": _env,
+            "_bot": _bot,
+        })
 
         slot_state = _as_dict(slot_state_post_tool) or _as_dict(slot_state_pre_tool)
         intent = _as_dict(render_intent).get("kind") or "collect_missing"
