@@ -3,7 +3,7 @@
 ## Muno Frontend
 
 Muno's browser UI is deployed to Cloudflare Pages, not GKE. See
-[Muno Subdomain](./muno-subdomain.md). GKE remains the runtime for NoETL APIs,
+[Travel Subdomain](./travel-subdomain.md). GKE remains the runtime for NoETL APIs,
 workers, and storage.
 
 ## Auth0 Build Values
