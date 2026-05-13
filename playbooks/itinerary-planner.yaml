@@ -224,6 +224,16 @@ workflow:
                     out[key] = value
             return out
 
+        globals().update({
+            "_as_dict": _as_dict,
+            "_text_from_event": _text_from_event,
+            "_slot_from_loaded": _slot_from_loaded,
+            "_city_hint": _city_hint,
+            "_date_hint": _date_hint,
+            "_party_hint": _party_hint,
+            "_deep_merge": _deep_merge,
+        })
+
         slot_state = _slot_from_loaded(loaded_slot_state)
         text = _text_from_event(event_payload)
         updates = {}
@@ -643,7 +653,7 @@ workflow:
       code: |
         import json
         import uuid
-        from datetime import date, timedelta
+        from datetime import date, datetime, timezone, timedelta
 
         def _as_dict(value):
             return value if isinstance(value, dict) else {}
@@ -653,6 +663,8 @@ workflow:
 
         def _bot(text):
             return _env("bot_text", "default", {"text": text, "markdown": True})
+
+        globals().update({"_as_dict": _as_dict, "_env": _env, "_bot": _bot})
 
         slot_state = _as_dict(slot_state_post_tool) or _as_dict(slot_state_pre_tool)
         intent = _as_dict(render_intent).get("kind") or "collect_missing"
