@@ -1,4 +1,4 @@
-import { Alert, Box, CircularProgress, Typography } from '@mui/material';
+import { Alert, Box, Button, CircularProgress, Stack, Typography } from '@mui/material';
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -7,11 +7,11 @@ import { useMunoAuth } from './MunoAuthProvider';
 export function AuthCallback() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { isAuthConfigured, isLoading, isAuthenticated } = useMunoAuth();
+  const { isAuthConfigured, isLoading, canUseApp, gatewayError, login } = useMunoAuth();
 
   useEffect(() => {
-    if (!isLoading && isAuthenticated) navigate('/', { replace: true });
-  }, [isAuthenticated, isLoading, navigate]);
+    if (!isLoading && canUseApp) navigate('/', { replace: true });
+  }, [canUseApp, isLoading, navigate]);
 
   if (!isAuthConfigured) {
     return (
@@ -23,10 +23,19 @@ export function AuthCallback() {
 
   return (
     <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
-      <Box sx={{ textAlign: 'center' }}>
-        <CircularProgress sx={{ mb: 2 }} />
-        <Typography>{t('auth.loading')}</Typography>
-      </Box>
+      <Stack spacing={2} alignItems="center" sx={{ textAlign: 'center' }}>
+        {gatewayError ? (
+          <>
+            <Alert severity="error">{gatewayError}</Alert>
+            <Button variant="contained" onClick={() => void login()}>{t('sidebar.signin')}</Button>
+          </>
+        ) : (
+          <>
+            <CircularProgress />
+            <Typography>{t('auth.linking_gateway')}</Typography>
+          </>
+        )}
+      </Stack>
     </Box>
   );
 }

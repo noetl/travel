@@ -1,11 +1,13 @@
 # Guest Mode
 
-Guest mode is the v1 default. Durable identity mapping lands with Firebase Auth later.
+Guest mode is a local-development convenience. Production builds default to the
+gateway-session auth flow and should not expose the chat shell before sign-in.
 
-When Auth0 build variables are absent, the app intentionally stays usable as a
-guest surface. The NoETL playbook workload receives no authenticated `user_uid`
-in that mode.
+Set `VITE_ALLOW_GUEST=true` in `.env.local` to keep the unauthenticated shell
+for fast local iteration. When guest mode is enabled, the NoETL playbook
+workload receives no authenticated `user_uid`.
 
-When Auth0 is configured and the user signs in, Muno forwards the Auth0 `sub` as
-`user_uid` in playbook workloads and attaches the access token to NoETL API
-requests. Backend JWT enforcement is deliberately deferred.
+When Auth0 is configured and the user signs in, Muno exchanges the Auth0 ID
+token with the NoETL gateway for a `session_token`, stores it in localStorage,
+and sends it as `Authorization: Bearer <session_token>` on gateway calls. The
+gateway session is the production auth boundary.

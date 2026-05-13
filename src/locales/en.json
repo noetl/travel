@@ -12,6 +12,7 @@
   "auth": {
     "callback_error": "We could not complete sign-in. Try again.",
     "loading": "Completing sign-in...",
+    "linking_gateway": "Linking to gateway...",
     "not_configured": "Auth0 is not configured for this build."
   },
   "chat": {
