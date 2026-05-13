@@ -12,11 +12,22 @@ npm run build
 npm run smoke:widgets
 ```
 
-The first shipped surface is intentionally skeletal: widget components validate the wire envelope and render JSON stubs. Round 6b replaces those stubs with real Material renderers.
+Auth0 is optional in local development. Without `VITE_AUTH0_DOMAIN` and
+`VITE_AUTH0_CLIENT_ID`, Muno runs in guest mode. Deployed builds inject the
+existing `auth0_client` Secret Manager payload plus the restricted Google Maps
+widget key at container build time.
+
+For a production-style container build:
+
+```bash
+TAG="$(date -u +%Y%m%d-%H%M%S)" ./scripts/build_container.sh
+```
 
 ## Source of Truth
 
 - Widget schemas: `playbooks/widget-contract/*.schema.json`
 - Generated TypeScript types: `src/contracts/widgets.ts`
 - Architecture: `docs/architecture/widget-contract.md`
+- Auth0 setup: `docs/auth/auth0-setup.md`
+- GKE deployment: `docs/deployment/muno-subdomain.md`
 - Scoping context: `noetl/ai-meta sync/issues/2026-05-12-trip-planner-app-scoping.md`

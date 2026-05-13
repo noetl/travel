@@ -1,5 +1,16 @@
 # GKE Setup
 
+## Muno Subdomain
+
+See [Muno Subdomain](./muno-subdomain.md) for the GKE Ingress, managed
+certificate, Cloudflare DNS, and Auth0 callback flow.
+
+## Auth0 Build Values
+
+GKE builds read the existing `auth0_client` Secret Manager JSON payload. The
+frontend uses only `.data.domain`, `.data.client_id`, and `.data.audience`.
+Never inject `.data.client_secret` into a Vite build.
+
 ## Google Maps Widget Key
 
 GKE/Cloudflare builds should inject the restricted browser key before the Vite

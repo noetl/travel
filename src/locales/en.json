@@ -1,9 +1,18 @@
 {
   "app_name": "Muno",
   "sidebar": {
+    "auth_unconfigured": "Guest mode (Auth0 not configured)",
     "guest": "Guest mode",
     "orders": "Orders",
-    "searches": "Searches"
+    "searches": "Searches",
+    "signin": "Sign in",
+    "signout": "Sign out",
+    "signed_in": "Signed in"
+  },
+  "auth": {
+    "callback_error": "We could not complete sign-in. Try again.",
+    "loading": "Completing sign-in...",
+    "not_configured": "Auth0 is not configured for this build."
   },
   "chat": {
     "start_search_again": "Start search again",
