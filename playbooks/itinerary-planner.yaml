@@ -764,7 +764,7 @@ workflow:
         if user_uid and user_uid != "guest":
             events_path = f"users/{user_uid}/trips/{trip_id}/events"
         else:
-            events_path = f"{thread_path}/trip/events"
+            events_path = f"{thread_path}/trip/current/events"
         globals().update({
             "slot_state": slot_state,
             "default_from": default_from,

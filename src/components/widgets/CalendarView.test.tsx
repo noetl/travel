@@ -22,7 +22,7 @@ describe('CalendarView', () => {
       <CalendarView
         payload={{
           trip_id: 'trip_1',
-          events_path: 'chat_threads/_smoke-calendar/trip/events',
+          events_path: 'chat_threads/_smoke-calendar/trip/current/events',
           display_events: [sampleEvent],
           editable: true
         }}
@@ -39,7 +39,7 @@ describe('CalendarView', () => {
       <CalendarView
         payload={{
           trip_id: 'trip_1',
-          events_path: 'chat_threads/_smoke-calendar/trip/events',
+          events_path: 'chat_threads/_smoke-calendar/trip/current/events',
           editable: false,
           empty_state_text: 'No schedule yet'
         }}
