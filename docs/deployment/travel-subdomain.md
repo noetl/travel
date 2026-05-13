@@ -1,6 +1,6 @@
-# Muno Subdomain Deployment
+# Travel Subdomain Deployment
 
-This runbook deploys Muno at `https://muno.mestumre.dev` on Cloudflare Pages.
+This runbook deploys Muno at `https://travel.mestumre.dev` on Cloudflare Pages.
 This matches the `adiona/team4` pattern: static Vite assets go to Pages, while
 NoETL APIs and workers stay in GKE behind `gateway.mestumre.dev`.
 
@@ -17,12 +17,12 @@ Pull requests run:
 - `npm run build`
 
 Pushes to `main` run the same checks, then deploy `dist/` to the Cloudflare
-Pages project `muno`.
+Pages project `travel`.
 
 The repository also includes a Team4-style `wrangler.toml`:
 
 ```toml
-name = "muno"
+name = "travel"
 pages_build_output_dir = "dist"
 ```
 
@@ -76,7 +76,7 @@ skips the Pages upload while still keeping the build/test checks green.
 
 Create or connect a Pages project:
 
-- Project name: `muno`
+- Project name: `travel`
 - Production branch: `main`
 - Build command: `npm ci && npm run build`
 - Output directory: `dist`
@@ -90,8 +90,8 @@ and API token are configured.
 
 After the first Pages deployment, add the custom domain:
 
-- Domain: `muno.mestumre.dev`
-- DNS shape: `CNAME muno -> <muno-project>.pages.dev`
+- Domain: `travel.mestumre.dev`
+- DNS shape: `CNAME travel -> <travel-project>.pages.dev`
 - Proxy: enabled
 
 ## Build
@@ -115,21 +115,21 @@ Only browser-safe values are compiled into the Vite bundle.
 
 The existing Auth0 SPA application must allow:
 
-- `https://muno.mestumre.dev/callback`
-- `https://muno.mestumre.dev/`
-- `https://muno.mestumre.dev`
+- `https://travel.mestumre.dev/callback`
+- `https://travel.mestumre.dev/`
+- `https://travel.mestumre.dev`
 
 Local development also uses `http://localhost:5173/callback`.
 
 ## Verification
 
 ```bash
-curl -I https://muno.mestumre.dev/
+curl -I https://travel.mestumre.dev/
 ```
 
 In the browser:
 
-1. Open `https://muno.mestumre.dev`.
+1. Open `https://travel.mestumre.dev`.
 2. Sign in with Auth0.
 3. Confirm the profile chip appears in the sidebar.
 4. Run a small trip-planner prompt and confirm a widget renders.

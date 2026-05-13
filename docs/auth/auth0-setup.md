@@ -48,9 +48,9 @@ TAG="$(date -u +%Y%m%d-%H%M%S)" ./scripts/build_container.sh
 
 The Auth0 application must allow these URLs:
 
-- Callback: `https://muno.mestumre.dev/callback`
-- Logout: `https://muno.mestumre.dev/`
-- Web origin: `https://muno.mestumre.dev`
+- Callback: `https://travel.mestumre.dev/callback`
+- Logout: `https://travel.mestumre.dev/`
+- Web origin: `https://travel.mestumre.dev`
 - Local callback: `http://localhost:5173/callback`
 
 ## Current Limits
