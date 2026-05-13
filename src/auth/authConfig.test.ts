@@ -18,8 +18,7 @@ describe('getAuthConfig', () => {
       } as unknown as ImportMetaEnv)
     ).toEqual({
       domain: 'example.auth0.com',
-      clientId: 'client-id',
-      audience: 'https://api.example.test'
+      clientId: 'client-id'
     });
   });
 });

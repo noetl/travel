@@ -100,10 +100,6 @@ function buildAuthorizeUrl(returnTo: string): string {
     scope: 'openid profile email',
     nonce
   });
-  if (config.audience) {
-    params.set('audience', config.audience);
-  }
-
   return `https://${config.domain}/authorize?${params.toString()}`;
 }
 

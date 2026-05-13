@@ -14,11 +14,12 @@ JSON payload whose `.data` object contains:
 
 - `domain`
 - `client_id`
-- `audience`
 
 `client_secret` may exist in the same payload because the Auth0 application is
 shared with other automation, but Muno never reads it and never ships it to the
-browser.
+browser. `audience` may also exist for other clients; Muno intentionally ignores
+it because the NoETL GUI-style gateway-session flow requests only an Auth0 ID
+token and exchanges that token with the gateway.
 
 ## Local Development
 
@@ -37,7 +38,6 @@ override those defaults locally, create a private `.env.local`:
 ```bash
 VITE_AUTH0_DOMAIN=<auth0-domain-override>
 VITE_AUTH0_CLIENT_ID=<auth0-spa-client-id-override>
-VITE_AUTH0_AUDIENCE=<auth0-audience>
 VITE_NOETL_API_BASE_URL=http://localhost:8082/api
 VITE_GATEWAY_BASE_URL=https://gateway.mestumre.dev
 ```
