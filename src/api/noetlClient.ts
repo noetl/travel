@@ -113,3 +113,8 @@ export async function executePlaybook(
   }
   throw new Error('Sign in is required before executing playbooks');
 }
+
+export async function getExecution(id: string) {
+  const { data } = await noetlClient.get(`/executions/${id}`, { params: { page_size: 20 } });
+  return data;
+}
