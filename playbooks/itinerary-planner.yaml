@@ -308,6 +308,7 @@ workflow:
                 updates["picked_hotel_id"] = submitted.get("hotel_id") or action_id.replace("pick_hotel:", "")
 
         wants_calendar = "show" in lowered_text and ("schedule" in lowered_text or "calendar" in lowered_text)
+        wants_order = any(word in lowered_text for word in ("order", "book", "booking", "confirm", "purchase"))
 
         if any(word in lowered_text for word in ("meeting", "appointment", "reminder", "note")) and "add" in lowered_text:
             updates["pending_calendar_events"] = [{
@@ -330,6 +331,34 @@ workflow:
         party_ready = isinstance(next_state.get("party"), dict)
         picked_flight = bool(next_state.get("picked_flight_offer_id"))
         picked_hotel = bool(next_state.get("picked_hotel_id"))
+
+        def _test_passengers(party):
+            party = party if isinstance(party, dict) else {}
+            adults = max(1, int(party.get("adults") or 1))
+            children = party.get("children") if isinstance(party.get("children"), list) else []
+            passengers = []
+            for idx in range(adults):
+                passengers.append({
+                    "given_name": f"TestAdult{idx + 1}",
+                    "family_name": "Traveler",
+                    "born_on": "1988-01-01",
+                    "email": "test@example.com",
+                    "phone_number": "+15555550100",
+                })
+            for idx, child in enumerate(children):
+                age = child.get("age") if isinstance(child, dict) else None
+                try:
+                    birth_year = date.today().year - int(age or 8)
+                except Exception:
+                    birth_year = date.today().year - 8
+                passengers.append({
+                    "given_name": f"TestChild{idx + 1}",
+                    "family_name": "Traveler",
+                    "born_on": f"{birth_year}-01-01",
+                    "email": "test@example.com",
+                    "phone_number": "+15555550100",
+                })
+            return passengers
 
         tool_requests = []
         render_intent = {"kind": "collect_missing", "missing": []}
@@ -360,6 +389,16 @@ workflow:
                 },
             })
             render_intent = {"kind": "show_flights"}
+        elif picked_flight and wants_order and not next_state.get("order_id"):
+            tool_requests.append({
+                "tool": "mcp/duffel.create_order",
+                "arguments": {
+                    "offer_id": next_state.get("picked_flight_offer_id"),
+                    "passengers": _test_passengers(next_state.get("party")),
+                    "duffel_env": "test",
+                },
+            })
+            render_intent = {"kind": "order_confirmation"}
         elif picked_flight and not next_state.get("hotel_search_results"):
             tool_requests.append({
                 "tool": "mcp/amadeus.search_hotels",
@@ -579,6 +618,111 @@ workflow:
         def _as_list(value):
             return value if isinstance(value, list) else []
 
+        def _display_name(place):
+            display = place.get("displayName") if isinstance(place, dict) else {}
+            if isinstance(display, dict):
+                return display.get("text") or ""
+            return str(display or place.get("name") or "")
+
+        def _place_photo(place):
+            google = _as_dict(place.get("_google")) if isinstance(place, dict) else {}
+            for key in ("image_url", "maps_static_url", "photo_url"):
+                if google.get(key):
+                    return google.get(key)
+            photos = place.get("photos") if isinstance(place, dict) else []
+            if isinstance(photos, list):
+                for photo in photos:
+                    if isinstance(photo, str) and photo.startswith("http"):
+                        return photo
+                    if isinstance(photo, dict):
+                        for key in ("url", "image_url", "maps_static_url"):
+                            if photo.get(key):
+                                return photo.get(key)
+            return None
+
+        def _place_card(place):
+            google = _as_dict(place.get("_google")) if isinstance(place, dict) else {}
+            photo = _place_photo(place)
+            return {
+                "place_id": str(google.get("place_id") or place.get("id") or place.get("place_id") or ""),
+                "name": google.get("name") or _display_name(place) or "Place",
+                "types": place.get("types") if isinstance(place.get("types"), list) else google.get("types", ["destination"]),
+                "photos": [photo] if photo else [],
+                "rating": google.get("rating") or place.get("rating"),
+                "rating_count": google.get("user_rating_count") or place.get("userRatingCount") or place.get("rating_count"),
+                "address": google.get("address") or place.get("formattedAddress") or place.get("address") or "Suggested destination",
+                "ctas": ["add_to_itinerary"],
+            }
+
+        def _hotel_photos(hotel):
+            photos = []
+            for key in ("photos", "media"):
+                values = hotel.get(key) if isinstance(hotel, dict) else []
+                if isinstance(values, list):
+                    for item in values:
+                        if isinstance(item, str) and item.startswith("http"):
+                            photos.append(item)
+                        elif isinstance(item, dict):
+                            url = item.get("uri") or item.get("url") or item.get("href") or item.get("image_url")
+                            if url:
+                                photos.append(url)
+            return photos[:8]
+
+        def _hotel_card(hotel):
+            hotel_id = hotel.get("hotel_id") or hotel.get("hotelId") or hotel.get("id") or hotel.get("name") or "hotel"
+            address = hotel.get("address")
+            if isinstance(address, dict):
+                address = ", ".join(str(address.get(key)) for key in ("lines", "cityName", "countryName") if address.get(key))
+            geo = hotel.get("geoCode") if isinstance(hotel.get("geoCode"), dict) else hotel.get("location") if isinstance(hotel.get("location"), dict) else {}
+            location = {
+                "city": hotel.get("city") or hotel.get("cityName") or (address if isinstance(address, str) else ""),
+            }
+            if isinstance(geo, dict):
+                lat = geo.get("latitude") or geo.get("lat")
+                lng = geo.get("longitude") or geo.get("lng")
+                if lat is not None:
+                    location["lat"] = lat
+                if lng is not None:
+                    location["lng"] = lng
+            return {
+                "hotel_id": str(hotel_id),
+                "name": hotel.get("name") or "Hotel",
+                "location": location,
+                "star_rating": hotel.get("rating") or hotel.get("star_rating"),
+                "score": hotel.get("score") or hotel.get("rating") or 8.0,
+                "score_count": hotel.get("score_count") or hotel.get("reviews_count"),
+                "photos": _hotel_photos(hotel),
+                "amenities": hotel.get("amenities") if isinstance(hotel.get("amenities"), list) else [],
+                "price_per_night": hotel.get("price_per_night") or hotel.get("price"),
+                "currency": hotel.get("currency") or "USD",
+                "address": address if isinstance(address, str) else "",
+                "rooms_matching": hotel.get("rooms_matching") or hotel.get("available_rooms"),
+                "ctas": ["watch_in_detail", "show_numbers"],
+            }
+
+        def _offer_card(offer):
+            return {
+                "offer_id": offer.get("offer_id") or offer.get("id") or "offer",
+                "price": offer.get("price") if isinstance(offer.get("price"), dict) else {"total": str(offer.get("total_amount") or "0"), "currency": offer.get("total_currency") or "USD"},
+                "itineraries": offer.get("itineraries") if isinstance(offer.get("itineraries"), list) and offer.get("itineraries") else [{"segments": []}],
+                "carriers": offer.get("carriers") if isinstance(offer.get("carriers"), list) else offer.get("validatingAirlineCodes") if isinstance(offer.get("validatingAirlineCodes"), list) else [],
+                "duration": offer.get("duration") or ((offer.get("itineraries") or [{}])[0].get("duration") if isinstance(offer.get("itineraries"), list) and offer.get("itineraries") else "PT0H"),
+                "stops": offer.get("stops") if offer.get("stops") is not None else 0,
+                "validating_airline": offer.get("validating_airline") or (offer.get("validatingAirlineCodes") or ["DU"])[0],
+                "ctas": ["view_details", "book_this"],
+            }
+
+        def _order_payload(order):
+            return {
+                "order_id": str(order.get("id") or order.get("order_id") or ""),
+                "booking_reference": str(order.get("booking_reference") or order.get("bookingReference") or order.get("id") or ""),
+                "total_amount": str(order.get("total_amount") or order.get("base_amount") or "0.00"),
+                "total_currency": str(order.get("total_currency") or order.get("base_currency") or "USD"),
+                "passengers": order.get("passengers") if isinstance(order.get("passengers"), list) else [],
+                "slices": order.get("slices") if isinstance(order.get("slices"), list) else [],
+                "ctas": ["view_full", "new_search"],
+            }
+
         by_tool = {
             "mcp/google-places.search_text": places_result,
             "mcp/duffel.search_offers": offers_result,
@@ -592,6 +736,7 @@ workflow:
         next_state = copy.deepcopy(_as_dict(slot_state))
         if first_tool == "mcp/google-places.search_text":
             places = _as_list(inner.get("places") or inner.get("items") or inner.get("results"))
+            normalised_places = [_place_card(place) for place in places[:5] if isinstance(place, dict)]
             places_seen = []
             for place in places[:5]:
                 if isinstance(place, dict):
@@ -600,6 +745,7 @@ workflow:
             next_state["total_results_seen"] = len(places)
         elif first_tool == "mcp/duffel.search_offers":
             offers = _as_list(inner.get("offers") or inner.get("items") or inner.get("data"))
+            normalised_offers = [_offer_card(offer) for offer in offers[:10] if isinstance(offer, dict)]
             offer_ids = []
             for offer in offers[:10]:
                 if isinstance(offer, dict):
@@ -608,6 +754,7 @@ workflow:
             next_state["total_results_seen"] = len(offers)
         elif first_tool == "mcp/amadeus.search_hotels":
             hotels = _as_list(inner.get("hotels") or inner.get("items") or inner.get("data"))
+            normalised_hotels = [_hotel_card(hotel) for hotel in hotels[:10] if isinstance(hotel, dict)]
             hotel_ids = []
             for hotel in hotels[:10]:
                 if isinstance(hotel, dict):
@@ -616,6 +763,7 @@ workflow:
             next_state["matching_with_current_filters"] = len(hotels)
         elif first_tool == "mcp/duffel.create_order":
             order = _as_dict(inner.get("order") or inner)
+            normalised_order = _order_payload(order)
             next_state["order_id"] = order.get("id")
             next_state["booking_reference"] = order.get("booking_reference") or order.get("bookingReference")
 
@@ -627,6 +775,14 @@ workflow:
             "response_summary": envelope.get("summary") or envelope.get("text") or f"{first_tool} response",
             "response_excerpt": json.dumps(inner, default=str)[:1200],
         }
+        if first_tool == "mcp/google-places.search_text":
+            summary["places"] = normalised_places
+        elif first_tool == "mcp/duffel.search_offers":
+            summary["offers"] = normalised_offers
+        elif first_tool == "mcp/amadeus.search_hotels":
+            summary["hotels"] = normalised_hotels
+        elif first_tool == "mcp/duffel.create_order":
+            summary["order"] = normalised_order
         result = {"summary": summary, "slot_state": next_state, "raw": envelope}
         globals().update({"result": result})
     next:
@@ -755,8 +911,9 @@ workflow:
         slot_state = {**slot_state, **_as_dict(extraction.get("slot_updates"))}
         render_intent = _as_dict(render_intent) or _as_dict(extraction.get("render_intent"))
         intent = render_intent.get("kind") or "collect_missing"
-        tool = _as_dict(tool_summary).get("tool", "")
-        ok = not _as_dict(tool_summary).get("isError", False)
+        tool_summary = _as_dict(tool_summary)
+        tool = tool_summary.get("tool", "")
+        ok = not tool_summary.get("isError", False)
         tomorrow = date.today() + timedelta(days=30)
         default_from = slot_state.get("check_in_date") or tomorrow.isoformat()
         default_to = slot_state.get("check_out_date") or (tomorrow + timedelta(days=4)).isoformat()
@@ -861,9 +1018,10 @@ workflow:
             }))
             bot_message = "That provider hiccuped, but the itinerary thread is still intact."
         elif intent == "show_places":
+            places = tool_summary.get("places") if isinstance(tool_summary.get("places"), list) else []
             widgets.append(_env("place_list", "default", {
                 "title": "Places to start from",
-                "items": [{
+                "items": places[:5] or [{
                     "place_id": "synthetic-miami",
                     "name": slot_state.get("region", {}).get("label", "Miami"),
                     "types": ["city", "destination"],
@@ -876,9 +1034,10 @@ workflow:
             }))
             bot_message = "I found a destination anchor. Next I need dates and travellers."
         elif intent == "show_flights":
+            offers = tool_summary.get("offers") if isinstance(tool_summary.get("offers"), list) else []
             widgets.append(_env("flight_list", "default", {
                 "title": "Flight options",
-                "items": [{
+                "items": offers[:10] or [{
                     "offer_id": "synthetic-offer-1",
                     "price": {"total": "220.00", "currency": "USD"},
                     "itineraries": [{"duration": "PT5H30M", "segments": [{
@@ -898,9 +1057,10 @@ workflow:
             }))
             bot_message = "Here is the first flight batch. Pick one and I will look for hotels."
         elif intent == "show_hotels":
+            hotels = tool_summary.get("hotels") if isinstance(tool_summary.get("hotels"), list) else []
             widgets.append(_env("hotel_list", "default", {
                 "title": "Hotels matching the trip",
-                "items": [{
+                "items": hotels[:10] or [{
                     "hotel_id": "synthetic-hotel-1",
                     "name": "Adiona Central Stay",
                     "location": {"city": slot_state.get("region", {}).get("label", "Miami"), "lat": 25.7617, "lng": -80.1918},
@@ -918,6 +1078,18 @@ workflow:
                 "filter_summary": "4 star, central, available for selected dates",
             }))
             bot_message = "Hotel options are ready."
+        elif intent == "order_confirmation":
+            order = _as_dict(tool_summary.get("order"))
+            widgets.append(_env("order_confirmation", "default", {
+                "order_id": order.get("order_id") or slot_state.get("order_id") or "order-pending",
+                "booking_reference": order.get("booking_reference") or slot_state.get("booking_reference") or "pending",
+                "total_amount": order.get("total_amount") or "0.00",
+                "total_currency": order.get("total_currency") or "USD",
+                "passengers": order.get("passengers") if isinstance(order.get("passengers"), list) else [],
+                "slices": order.get("slices") if isinstance(order.get("slices"), list) else [],
+                "ctas": ["view_full", "new_search"],
+            }))
+            bot_message = "Your Duffel test order is confirmed."
         elif intent == "summary":
             calendar_events = _calendar_events()
             widgets.append(_env("itinerary_summary", "default", {

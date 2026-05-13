@@ -3,6 +3,7 @@ import type { ItinerarySummaryPayload } from '../../contracts/widgets';
 import { WidgetCard, asPayload, emitWidgetEvent, money, type WidgetComponentProps } from './widgetUtils';
 import { FlightCard } from './FlightCard';
 import { HotelCard } from './HotelCard';
+import { formatParty } from '../../utils/formatParty';
 
 export function ItinerarySummary({ payload, onWidgetEvent }: WidgetComponentProps) {
   const data = asPayload<ItinerarySummaryPayload>(payload);
@@ -16,7 +17,7 @@ export function ItinerarySummary({ payload, onWidgetEvent }: WidgetComponentProp
           </Stack>
           <Typography variant="h6" color="primary">{money(data.total_cost?.amount, data.total_cost?.currency)}</Typography>
         </Stack>
-        <Typography variant="body2" color="text.secondary">Party: {JSON.stringify(data.traveller_party)}</Typography>
+        <Typography variant="body2" color="text.secondary">Party: {formatParty(data.traveller_party)}</Typography>
         {data.picked_flight ? <FlightCard payload={data.picked_flight} variantId="compact" onWidgetEvent={onWidgetEvent} /> : null}
         {data.picked_hotel ? <HotelCard payload={data.picked_hotel} variantId="compact" onWidgetEvent={onWidgetEvent} /> : null}
         {data.notes ? <Typography variant="body2">{data.notes}</Typography> : null}

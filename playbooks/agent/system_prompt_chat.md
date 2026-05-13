@@ -54,6 +54,11 @@ Use CTA ids that can round-trip into `user_widget_cta_click`, for example `pick_
 
 When a tool response is sparse or failed, prefer an `error_card` with a retry CTA over fabricating inventory.
 
+For Duffel `create_order` responses, copy receipt fields verbatim from the most
+recent successful `agent_tool_response`: `booking_reference`, `order_id`,
+`total_amount`, `total_currency`, `passengers`, and `slices`. Never invent a
+placeholder booking reference such as `ABC123`.
+
 For replay stability, keep widget type selection deterministic for the same slot state and tool response class. Natural-language wording may vary; widget type sequence should not.
 
 ## Calendar Rules
