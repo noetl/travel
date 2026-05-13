@@ -21,6 +21,7 @@ export interface GatewayLoginResult {
 
 export const SESSION_TOKEN_KEY = 'session_token';
 export const USER_INFO_KEY = 'user_info';
+const GATEWAY_AUTH_TIMEOUT_MS = 15_000;
 
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '');
@@ -111,8 +112,27 @@ export function withSessionHeader(headers: HeadersInit = {}, token: string): Hea
   return { ...headers, Authorization: `Bearer ${token}` };
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+async function fetchGatewayAuth(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), GATEWAY_AUTH_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`Gateway auth request timed out after ${GATEWAY_AUTH_TIMEOUT_MS / 1000}s`);
+    }
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+}
+
 export async function loginToGateway(auth0Token: string, auth0Domain: string): Promise<GatewayLoginResult> {
-  const response = await fetch(`${getGatewayBaseUrl()}/api/auth/login`, {
+  const response = await fetchGatewayAuth(`${getGatewayBaseUrl()}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -154,7 +174,7 @@ export async function loginToGateway(auth0Token: string, auth0Domain: string): P
 }
 
 export async function validateGatewaySession(token: string): Promise<GatewayUser | null> {
-  const response = await fetch(`${getGatewayBaseUrl()}/api/auth/validate`, {
+  const response = await fetchGatewayAuth(`${getGatewayBaseUrl()}/api/auth/validate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_token: token })

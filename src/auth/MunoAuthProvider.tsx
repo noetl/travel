@@ -48,6 +48,23 @@ const guestAuth: MunoAuthState = {
 };
 
 const MunoAuthContext = createContext<MunoAuthState>(guestAuth);
+const AUTH0_ID_TOKEN_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = globalThis.setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        globalThis.clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        globalThis.clearTimeout(timeout);
+        reject(error);
+      }
+    );
+  });
+}
 
 function AuthBridge({ children }: { children: ReactNode }) {
   const config = getAuthConfig();
@@ -123,7 +140,11 @@ function AuthBridge({ children }: { children: ReactNode }) {
           clearSession();
         }
 
-        const claims = await getIdTokenClaims();
+        const claims = await withTimeout(
+          getIdTokenClaims(),
+          AUTH0_ID_TOKEN_TIMEOUT_MS,
+          `Auth0 ID token lookup timed out after ${AUTH0_ID_TOKEN_TIMEOUT_MS / 1000}s`
+        );
         const rawIdToken = claims?.__raw;
         if (!rawIdToken) {
           throw new Error('Auth0 did not return an ID token for gateway login');
