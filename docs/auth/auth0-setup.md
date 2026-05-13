@@ -66,7 +66,8 @@ The gateway exchange follows the same pattern documented in
 [`gateway-session-pattern.md`](./gateway-session-pattern.md):
 
 1. Auth0 SPA login completes in the browser.
-2. Muno reads the Auth0 ID token from `getIdTokenClaims().__raw`.
+2. Muno reads the Auth0 `id_token` directly from the `/callback#...` URL hash,
+   matching the NoETL GUI flow.
 3. Muno posts `{ auth0_token, auth0_domain }` to
    `https://gateway.mestumre.dev/api/auth/login`.
 4. The gateway validates the token through the existing Auth0 login playbook and
