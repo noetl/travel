@@ -262,6 +262,7 @@ workflow:
 
         payload = _as_dict(event_payload)
         lowered_text = text.lower()
+        globals().update({"lowered_text": lowered_text})
         if event_type in ("user_widget_submit", "user_widget_cta_click"):
             submitted = _as_dict(payload.get("submitted_value") or payload.get("value"))
             action_id = str(payload.get("action_id") or submitted.get("action_id") or "").strip()
@@ -552,15 +553,27 @@ workflow:
         next_state = copy.deepcopy(_as_dict(slot_state))
         if first_tool == "mcp/google-places.search_text":
             places = _as_list(inner.get("places") or inner.get("items") or inner.get("results"))
-            next_state["places_seen"] = [p.get("place_id") or p.get("id") for p in places[:5] if isinstance(p, dict)]
+            places_seen = []
+            for place in places[:5]:
+                if isinstance(place, dict):
+                    places_seen.append(place.get("place_id") or place.get("id"))
+            next_state["places_seen"] = places_seen
             next_state["total_results_seen"] = len(places)
         elif first_tool == "mcp/duffel.search_offers":
             offers = _as_list(inner.get("offers") or inner.get("items") or inner.get("data"))
-            next_state["flight_search_results"] = [o.get("id") or o.get("offer_id") for o in offers[:10] if isinstance(o, dict)]
+            offer_ids = []
+            for offer in offers[:10]:
+                if isinstance(offer, dict):
+                    offer_ids.append(offer.get("id") or offer.get("offer_id"))
+            next_state["flight_search_results"] = offer_ids
             next_state["total_results_seen"] = len(offers)
         elif first_tool == "mcp/amadeus.search_hotels":
             hotels = _as_list(inner.get("hotels") or inner.get("items") or inner.get("data"))
-            next_state["hotel_search_results"] = [h.get("hotel_id") or h.get("hotelId") or h.get("id") for h in hotels[:10] if isinstance(h, dict)]
+            hotel_ids = []
+            for hotel in hotels[:10]:
+                if isinstance(hotel, dict):
+                    hotel_ids.append(hotel.get("hotel_id") or hotel.get("hotelId") or hotel.get("id"))
+            next_state["hotel_search_results"] = hotel_ids
             next_state["matching_with_current_filters"] = len(hotels)
         elif first_tool == "mcp/duffel.create_order":
             order = _as_dict(inner.get("order") or inner)
