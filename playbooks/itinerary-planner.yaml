@@ -647,16 +647,25 @@ workflow:
         def _place_card(place):
             google = _as_dict(place.get("_google")) if isinstance(place, dict) else {}
             photo = _place_photo(place)
-            return {
+            card = {
                 "place_id": str(google.get("place_id") or place.get("id") or place.get("place_id") or ""),
                 "name": google.get("name") or _display_name(place) or "Place",
                 "types": place.get("types") if isinstance(place.get("types"), list) else google.get("types", ["destination"]),
                 "photos": [photo] if photo else [],
-                "rating": google.get("rating") or place.get("rating"),
-                "rating_count": google.get("user_rating_count") or place.get("userRatingCount") or place.get("rating_count"),
                 "address": google.get("address") or place.get("formattedAddress") or place.get("address") or "Suggested destination",
                 "ctas": ["add_to_itinerary"],
             }
+            rating = google.get("rating") if google.get("rating") is not None else place.get("rating")
+            rating_count = (
+                google.get("user_rating_count")
+                if google.get("user_rating_count") is not None
+                else place.get("userRatingCount") if place.get("userRatingCount") is not None else place.get("rating_count")
+            )
+            if isinstance(rating, (int, float)):
+                card["rating"] = rating
+            if isinstance(rating_count, int):
+                card["rating_count"] = rating_count
+            return card
 
         def _hotel_photos(hotel):
             photos = []
