@@ -2,7 +2,7 @@ import { Alert, Box, Button, CircularProgress, Paper, Stack, TextField, Typograp
 import { useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { WidgetEnvelope } from '../../contracts/widgets';
-import { executePlaybook, getExecution } from '../../api/noetlClient';
+import { cancelExecution, executePlaybook, getExecution } from '../../api/noetlClient';
 import { useMunoAuth } from '../../auth/MunoAuthProvider';
 import { WidgetRenderer } from '../WidgetRenderer';
 import type { SidebarView } from './Sidebar';
@@ -52,11 +52,46 @@ function extractBotMessage(execution: unknown): string {
 function hasFinalPayload(execution: unknown): boolean {
   const item = execution as Record<string, unknown>;
   const data = item?.data as Record<string, unknown> | undefined;
-  return Boolean(extractEnvelope(execution) || extractSlotState(execution) || data?.bot_message);
+  const result = item?.result as Record<string, unknown> | undefined;
+  return Boolean(extractEnvelope(execution) || extractSlotState(execution) || result?.bot_message || data?.bot_message);
 }
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function extractExecutionError(execution: unknown, executionId: string, status: string): string {
+  const item = execution as Record<string, unknown>;
+  const data = item?.data as Record<string, unknown> | undefined;
+  const result = item?.result as Record<string, unknown> | undefined;
+  const error = item?.error as Record<string, unknown> | string | undefined;
+  const dataError = data?.error as Record<string, unknown> | string | undefined;
+  const resultError = result?.error as Record<string, unknown> | string | undefined;
+
+  return (
+    firstString(
+      typeof error === 'string' ? error : error?.message,
+      typeof dataError === 'string' ? dataError : dataError?.message,
+      typeof resultError === 'string' ? resultError : resultError?.message,
+      item?.message,
+      data?.message,
+      result?.message,
+      item?.detail,
+      data?.detail,
+      result?.detail,
+      data?.text,
+      result?.text,
+      data?.summary,
+      result?.summary
+    ) || `Execution ${executionId} ${status}`
+  );
 }
 
 function slotStateFromWidgetEvent(event: WidgetEvent): Record<string, unknown> | undefined {
@@ -103,7 +138,8 @@ async function waitForExecution(executionId: string, signal: AbortSignal): Promi
     const status = String((execution as Record<string, unknown>)?.status || '').toLowerCase();
     if (status === 'completed' || status === 'succeeded') return execution;
     if (status === 'failed' || status === 'error' || status === 'cancelled') {
-      throw new Error(`Execution ${executionId} ${status}`);
+      if (hasFinalPayload(execution)) return execution;
+      throw new Error(extractExecutionError(execution, executionId, status));
     }
   }
   throw new Error(`Execution ${executionId} did not complete in time`);
@@ -131,6 +167,7 @@ export function ChatThread({
   const [error, setError] = useState<string | undefined>();
   const threadId = useRef(`travel-ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
   const activeRequest = useRef<AbortController | null>(null);
+  const activeExecutionId = useRef<string | undefined>();
 
   const visibleMessages = useMemo(
     () =>
@@ -160,6 +197,7 @@ export function ChatThread({
         { userUid: auth.user?.sub, signal: controller.signal }
       );
       const executionId = extractExecutionId(start);
+      activeExecutionId.current = executionId;
       const execution = hasFinalPayload(start) || !executionId ? start : await waitForExecution(executionId, controller.signal);
       const envelope = extractEnvelope(execution);
       const slotState = extractSlotState(execution);
@@ -186,6 +224,7 @@ export function ChatThread({
     } finally {
       if (activeRequest.current === controller) {
         activeRequest.current = null;
+        activeExecutionId.current = undefined;
         setSubmitting(false);
       }
     }
@@ -212,8 +251,13 @@ export function ChatThread({
   };
 
   const cancelRequest = () => {
+    const executionId = activeExecutionId.current;
+    if (executionId) {
+      void cancelExecution(executionId).catch(() => undefined);
+    }
     activeRequest.current?.abort();
     activeRequest.current = null;
+    activeExecutionId.current = undefined;
     setSubmitting(false);
     setError('Request cancelled. You can send another message.');
   };
