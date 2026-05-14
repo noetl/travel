@@ -40,7 +40,7 @@ export function PartyPicker({ payload, onWidgetEvent }: WidgetComponentProps) {
             </Select>
           </Stack>
         ))}
-        <Button variant="contained" onClick={() => emitWidgetEvent(onWidgetEvent, { type: 'widget_submit', value: { rooms, adults, children } })}>
+        <Button variant="contained" onClick={() => emitWidgetEvent(onWidgetEvent, { type: 'widget_submit', action_id: 'submit_party', value: { rooms, adults, children } })}>
           Submit
         </Button>
       </Stack>

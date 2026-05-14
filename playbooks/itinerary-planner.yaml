@@ -201,9 +201,17 @@ workflow:
             return str(payload.get("text") or payload.get("message") or payload.get("label") or "").strip()
 
         def _slot_from_loaded(value):
-            data = _as_dict(value).get("data")
+            item = _as_dict(value)
+            data = item.get("data")
             if isinstance(data, dict):
                 return copy.deepcopy(data)
+            document = item.get("document")
+            if isinstance(document, dict):
+                document_data = document.get("data")
+                if isinstance(document_data, dict):
+                    return copy.deepcopy(document_data)
+            if any(key in item for key in ("region", "region_label", "check_in_date", "party", "places_seen")):
+                return copy.deepcopy(item)
             return {}
 
         def _city_hint(text):
