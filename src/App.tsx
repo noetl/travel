@@ -7,13 +7,25 @@ import { Sidebar, type SidebarView } from './components/shell/Sidebar';
 import { ChatThread } from './components/shell/ChatThread';
 import { RightPane } from './components/shell/RightPane';
 
+function mergeSlotState(
+  current: Record<string, unknown>,
+  next: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    ...current,
+    ...next,
+    region: next.region || current.region,
+    party: next.party || current.party
+  };
+}
+
 function Shell() {
   const [activeView, setActiveView] = useState<SidebarView>('searches');
   const [slotState, setSlotState] = useState<Record<string, unknown>>({});
   return (
     <Box sx={{ display: 'grid', gridTemplateColumns: '280px minmax(0, 1fr) 360px', minHeight: '100vh' }}>
       <Sidebar activeView={activeView} onViewChange={setActiveView} />
-      <ChatThread activeView={activeView} onSlotStateChange={setSlotState} />
+      <ChatThread activeView={activeView} onSlotStateChange={(next) => setSlotState((current) => mergeSlotState(current, next))} />
       <RightPane slotState={slotState} />
     </Box>
   );

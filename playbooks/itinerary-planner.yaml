@@ -252,6 +252,24 @@ workflow:
                     out[key] = value
             return out
 
+        def _normalise_region_fields(state):
+            state = state if isinstance(state, dict) else {}
+            region = state.get("region") if isinstance(state.get("region"), dict) else {}
+            if not region and state.get("region_label"):
+                region = {
+                    "label": state.get("region_label"),
+                    "city_code": state.get("region_city_code") or "",
+                    "country_code": state.get("region_country_code") or "",
+                    "kind": state.get("region_kind") or "city",
+                }
+                state["region"] = region
+            if region:
+                state["region_label"] = region.get("label") or state.get("region_label") or ""
+                state["region_city_code"] = region.get("city_code") or state.get("region_city_code") or ""
+                state["region_country_code"] = region.get("country_code") or state.get("region_country_code") or ""
+                state["region_kind"] = region.get("kind") or state.get("region_kind") or "city"
+            return state
+
         globals().update({
             "copy": copy,
             "json": json,
@@ -268,9 +286,10 @@ workflow:
             "_date_hint": _date_hint,
             "_party_hint": _party_hint,
             "_deep_merge": _deep_merge,
+            "_normalise_region_fields": _normalise_region_fields,
         })
 
-        slot_state = _slot_from_loaded(loaded_slot_state)
+        slot_state = _normalise_region_fields(_slot_from_loaded(loaded_slot_state))
         text = _text_from_event(event_payload)
         updates = {}
         region = _city_hint(text)
@@ -304,6 +323,19 @@ workflow:
                     "adults": submitted.get("adults", 1),
                     "children": submitted.get("children", []),
                 }
+            if "place" in action_id or submitted.get("kind") in ("airport", "city", "landmark"):
+                label = str(submitted.get("label") or submitted.get("name") or submitted.get("id") or "").strip()
+                place_id = str(submitted.get("id") or action_id.replace("add_place:", "")).strip()
+                if label:
+                    updates["region"] = _city_hint(label) or {
+                        "label": label,
+                        "city_code": place_id if submitted.get("kind") == "airport" else "",
+                        "country_code": "",
+                        "kind": submitted.get("kind") or "city",
+                    }
+                if place_id:
+                    updates["picked_place_id"] = place_id
+                    updates["places_seen"] = [place_id]
             if "offer" in action_id or submitted.get("offer_id"):
                 updates["picked_flight_offer_id"] = submitted.get("offer_id") or action_id.replace("pick_offer:", "")
             if "hotel" in action_id or submitted.get("hotel_id"):
@@ -327,7 +359,7 @@ workflow:
                 "google_calendar_event_id": None,
             }]
 
-        next_state = _deep_merge(slot_state, updates)
+        next_state = _normalise_region_fields(_deep_merge(slot_state, updates))
         region_ready = isinstance(next_state.get("region"), dict)
         dates_ready = bool(next_state.get("check_in_date") and next_state.get("check_out_date"))
         party_ready = isinstance(next_state.get("party"), dict)
@@ -628,6 +660,22 @@ workflow:
                 return display.get("text") or ""
             return str(display or place.get("name") or "")
 
+        def _city_hint(text):
+            lowered = str(text or "").lower()
+            known = {
+                "miami": ("Miami", "MIA", "US"),
+                "paris": ("Paris", "PAR", "FR"),
+                "boston": ("Boston", "BOS", "US"),
+                "new york": ("New York", "NYC", "US"),
+                "nyc": ("New York", "NYC", "US"),
+                "london": ("London", "LON", "GB"),
+            }
+            for key, item in known.items():
+                if key in lowered:
+                    label, code, country = item
+                    return {"label": label, "city_code": code, "country_code": country, "kind": "city"}
+            return None
+
         def _place_photo(place):
             google = _as_dict(place.get("_google")) if isinstance(place, dict) else {}
             for key in ("image_url", "maps_static_url", "photo_url"):
@@ -736,16 +784,36 @@ workflow:
                 "ctas": ["view_full", "new_search"],
             }
 
+        def _normalise_region_fields(state):
+            state = state if isinstance(state, dict) else {}
+            region = state.get("region") if isinstance(state.get("region"), dict) else {}
+            if not region and state.get("region_label"):
+                region = {
+                    "label": state.get("region_label"),
+                    "city_code": state.get("region_city_code") or "",
+                    "country_code": state.get("region_country_code") or "",
+                    "kind": state.get("region_kind") or "city",
+                }
+                state["region"] = region
+            if region:
+                state["region_label"] = region.get("label") or state.get("region_label") or ""
+                state["region_city_code"] = region.get("city_code") or state.get("region_city_code") or ""
+                state["region_country_code"] = region.get("country_code") or state.get("region_country_code") or ""
+                state["region_kind"] = region.get("kind") or state.get("region_kind") or "city"
+            return state
+
         globals().update({
             "_as_dict": _as_dict,
             "_as_list": _as_list,
             "_display_name": _display_name,
+            "_city_hint": _city_hint,
             "_place_photo": _place_photo,
             "_place_card": _place_card,
             "_hotel_photos": _hotel_photos,
             "_hotel_card": _hotel_card,
             "_offer_card": _offer_card,
             "_order_payload": _order_payload,
+            "_normalise_region_fields": _normalise_region_fields,
         })
 
         by_tool = {
@@ -758,7 +826,7 @@ workflow:
         data = _as_dict(envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope)
         inner = _as_dict(data.get("data") if isinstance(data.get("data"), dict) else data)
         ok = bool(inner.get("ok", data.get("ok", not envelope.get("isError"))))
-        next_state = copy.deepcopy(_as_dict(slot_state))
+        next_state = _normalise_region_fields(copy.deepcopy(_as_dict(slot_state)))
         if first_tool == "mcp/google-places.search_text":
             places = _as_list(inner.get("places") or inner.get("items") or inner.get("results"))
             normalised_places = [_place_card(place) for place in places[:5] if isinstance(place, dict)]
@@ -768,6 +836,15 @@ workflow:
                     places_seen.append(place.get("place_id") or place.get("id"))
             next_state["places_seen"] = places_seen
             next_state["total_results_seen"] = len(places)
+            if not isinstance(next_state.get("region"), dict) and normalised_places:
+                first_place = normalised_places[0]
+                next_state["region"] = _city_hint(first_place.get("name", "")) or {
+                    "label": first_place.get("name", "Destination"),
+                    "city_code": "",
+                    "country_code": "",
+                    "kind": "city" if "locality" in first_place.get("types", []) else "landmark",
+                }
+                _normalise_region_fields(next_state)
         elif first_tool == "mcp/duffel.search_offers":
             offers = _as_list(inner.get("offers") or inner.get("items") or inner.get("data"))
             normalised_offers = [_offer_card(offer) for offer in offers[:10] if isinstance(offer, dict)]

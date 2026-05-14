@@ -6,6 +6,11 @@ export function PlaceCard({ payload, variantId = 'compact', onWidgetEvent }: Wid
   const data = asPayload<PlaceCardPayload>(payload);
   const compact = variantId === 'compact';
   const typeLabels = data.types.map((type) => type.replace(/_/g, ' ')).slice(0, compact ? 3 : 6);
+  const placeKind = data.types.some((type) => ['airport', 'airport_terminal'].includes(type))
+    ? 'airport'
+    : data.types.some((type) => ['locality', 'political', 'city'].includes(type))
+      ? 'city'
+      : 'landmark';
   return (
     <WidgetCard dense={compact} sx={{ width: '100%' }}>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems="stretch">
@@ -50,7 +55,13 @@ export function PlaceCard({ payload, variantId = 'compact', onWidgetEvent }: Wid
           {!compact && data.opening_hours ? <Typography variant="body2" color="text.secondary">{data.opening_hours}</Typography> : null}
           {data.ctas?.includes('add_to_itinerary') ? (
             <Stack direction="row" spacing={1} sx={{ pt: 0.5 }}>
-              <ActionButton label="Add to itinerary" actionId={`add_place:${data.place_id}`} onWidgetEvent={onWidgetEvent} variant="contained" />
+              <ActionButton
+                label="Add to itinerary"
+                actionId={`add_place:${data.place_id}`}
+                onWidgetEvent={onWidgetEvent}
+                variant="contained"
+                value={{ label: data.name, id: data.place_id, kind: placeKind }}
+              />
             </Stack>
           ) : null}
         </Stack>
