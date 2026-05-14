@@ -11,8 +11,8 @@ export function PlaceAutocompleteInput({ payload, onWidgetEvent }: WidgetCompone
     if (submitted) emitWidgetEvent(onWidgetEvent, { type: 'widget_submit', value: submitted });
   };
   return (
-    <WidgetCard>
-      <Stack direction="row" spacing={1.25} alignItems="center">
+    <WidgetCard sx={{ width: '100%', maxWidth: 560 }}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25} alignItems={{ xs: 'stretch', sm: 'center' }}>
         <Autocomplete
           fullWidth
           freeSolo
