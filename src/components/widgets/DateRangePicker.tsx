@@ -19,7 +19,7 @@ export function DateRangePicker({ payload, onWidgetEvent }: WidgetComponentProps
         </Stack>
         <Stack direction="row" justifyContent="space-between" alignItems="center">
           <Typography variant="body2" color="text.secondary">{nights} nights</Typography>
-          <Button variant="contained" onClick={() => emitWidgetEvent(onWidgetEvent, { type: 'widget_submit', value: { from, to, nights } })}>
+          <Button variant="contained" onClick={() => emitWidgetEvent(onWidgetEvent, { type: 'widget_submit', action_id: 'submit_dates', value: { from, to, nights } })}>
             Submit
           </Button>
         </Stack>
