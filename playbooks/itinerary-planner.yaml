@@ -31,6 +31,8 @@ workload:
   anthropic_secret_path: projects/1014428265962/secrets/anthropic-api-key/versions/1
   thread_id: ""
   user_uid: guest
+  request_id: ""
+  gateway_url: ""
   event_type: user_message
   event_payload: {}
   firestore_database: "(default)"
@@ -421,6 +423,8 @@ workflow:
             "thread_path": thread_path,
             "slot_updates": updates,
             "slot_state": next_state,
+            "captured_changes": updates,
+            "captured_slots": next_state,
             "tool_requests": tool_requests,
             "first_tool": first_tool.get("tool", ""),
             "first_tool_arguments": first_tool.get("arguments", {}),
@@ -453,7 +457,7 @@ workflow:
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
           path: "{{ normalize_input.thread_path }}/slot_state/current"
-          data: "{{ extract_turn.slot_state }}"
+          data: "{{ extract_turn.context.captured_slots }}"
           merge: false
     next:
       spec: { mode: exclusive }
@@ -475,17 +479,17 @@ workflow:
           event:
             type: agent_slot_update
             payload:
-              changes: "{{ extract_turn.slot_updates }}"
-              slot_state: "{{ extract_turn.slot_state }}"
-              llm_contract: "{{ extract_turn.llm_contract }}"
+              changes: "{{ extract_turn.context.captured_changes }}"
+              slot_state: "{{ extract_turn.context.captured_slots }}"
+              llm_contract: "{{ extract_turn.context.llm_contract }}"
             actor: { kind: agent, name: muno-itinerary-planner }
     next:
       spec: { mode: exclusive }
       arcs:
         - step: append_tool_call_event
-          when: "{{ extract_turn.first_tool != '' }}"
+          when: "{{ extract_turn.context.first_tool != '' }}"
         - step: render_widget_chat
-          when: "{{ extract_turn.first_tool == '' }}"
+          when: "{{ extract_turn.context.first_tool == '' }}"
 
   - step: append_tool_call_event
     desc: Append agent_tool_call before dispatching to a tool MCP
@@ -502,21 +506,21 @@ workflow:
           event:
             type: agent_tool_call
             payload:
-              call_id: "{{ extract_turn.call_id }}"
-              tool: "{{ extract_turn.first_tool }}"
-              arguments: "{{ extract_turn.first_tool_arguments }}"
+              call_id: "{{ extract_turn.context.call_id }}"
+              tool: "{{ extract_turn.context.first_tool }}"
+              arguments: "{{ extract_turn.context.first_tool_arguments }}"
             actor: { kind: agent, name: muno-itinerary-planner }
     next:
       spec: { mode: exclusive }
       arcs:
         - step: call_google_places
-          when: "{{ extract_turn.first_tool == 'mcp/google-places.search_text' }}"
+          when: "{{ extract_turn.context.first_tool == 'mcp/google-places.search_text' }}"
         - step: call_duffel_offers
-          when: "{{ extract_turn.first_tool == 'mcp/duffel.search_offers' }}"
+          when: "{{ extract_turn.context.first_tool == 'mcp/duffel.search_offers' }}"
         - step: call_amadeus_hotels
-          when: "{{ extract_turn.first_tool == 'mcp/amadeus.search_hotels' }}"
+          when: "{{ extract_turn.context.first_tool == 'mcp/amadeus.search_hotels' }}"
         - step: call_duffel_create_order
-          when: "{{ extract_turn.first_tool == 'mcp/duffel.create_order' }}"
+          when: "{{ extract_turn.context.first_tool == 'mcp/duffel.create_order' }}"
 
   - step: call_google_places
     desc: Dispatch a Google Places text search through the MCP playbook
@@ -527,7 +531,7 @@ workflow:
       payload:
         method: tools/call
         tool: search_text
-        arguments: "{{ extract_turn.first_tool_arguments }}"
+        arguments: "{{ extract_turn.context.first_tool_arguments }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -543,7 +547,7 @@ workflow:
         method: tools/call
         tool: search_offers
         duffel_env: test
-        arguments: "{{ extract_turn.first_tool_arguments }}"
+        arguments: "{{ extract_turn.context.first_tool_arguments }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -559,7 +563,7 @@ workflow:
         method: tools/call
         tool: search_hotels
         amadeus_env: test
-        arguments: "{{ extract_turn.first_tool_arguments }}"
+        arguments: "{{ extract_turn.context.first_tool_arguments }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -575,7 +579,7 @@ workflow:
         method: tools/call
         tool: create_order
         duffel_env: test
-        arguments: "{{ extract_turn.first_tool_arguments }}"
+        arguments: "{{ extract_turn.context.first_tool_arguments }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -586,9 +590,9 @@ workflow:
     tool:
       kind: python
       input:
-        first_tool: "{{ extract_turn.first_tool }}"
-        call_id: "{{ extract_turn.call_id }}"
-        slot_state: "{{ extract_turn.slot_state }}"
+        first_tool: "{{ extract_turn.context.first_tool }}"
+        call_id: "{{ extract_turn.context.call_id }}"
+        slot_state: "{{ extract_turn.context.captured_slots }}"
         thread_path: "{{ normalize_input.thread_path }}"
         user_uid: "{{ workload.user_uid | default('guest') }}"
         places_result: "{{ call_google_places | default({}) }}"
@@ -723,6 +727,18 @@ workflow:
                 "ctas": ["view_full", "new_search"],
             }
 
+        globals().update({
+            "_as_dict": _as_dict,
+            "_as_list": _as_list,
+            "_display_name": _display_name,
+            "_place_photo": _place_photo,
+            "_place_card": _place_card,
+            "_hotel_photos": _hotel_photos,
+            "_hotel_card": _hotel_card,
+            "_offer_card": _offer_card,
+            "_order_payload": _order_payload,
+        })
+
         by_tool = {
             "mcp/google-places.search_text": places_result,
             "mcp/duffel.search_offers": offers_result,
@@ -802,7 +818,7 @@ workflow:
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
           path: "{{ normalize_input.thread_path }}/slot_state/current"
-          data: "{{ normalize_tool_response.slot_state }}"
+          data: "{{ normalize_tool_response.context.slot_state }}"
           merge: false
     next:
       spec: { mode: exclusive }
@@ -820,12 +836,12 @@ workflow:
         tool: set_doc
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          path: "{{ normalize_input.thread_path }}/api_calls/{{ extract_turn.call_id }}"
+          path: "{{ normalize_input.thread_path }}/api_calls/{{ extract_turn.context.call_id }}"
           data:
-            call_id: "{{ extract_turn.call_id }}"
-            tool: "{{ extract_turn.first_tool }}"
-            arguments: "{{ extract_turn.first_tool_arguments }}"
-            response: "{{ normalize_tool_response.raw }}"
+            call_id: "{{ extract_turn.context.call_id }}"
+            tool: "{{ extract_turn.context.first_tool }}"
+            arguments: "{{ extract_turn.context.first_tool_arguments }}"
+            response: "{{ normalize_tool_response.context.raw }}"
           merge: false
     next:
       spec: { mode: exclusive }
@@ -846,7 +862,7 @@ workflow:
           thread_path: "{{ normalize_input.thread_path }}"
           event:
             type: agent_tool_response
-            payload: "{{ normalize_tool_response.summary }}"
+            payload: "{{ normalize_tool_response.context.summary }}"
             actor: { kind: agent, name: muno-itinerary-planner }
     next:
       spec: { mode: exclusive }
@@ -859,13 +875,14 @@ workflow:
       kind: python
       input:
         thread_path: "{{ normalize_input.thread_path }}"
-        event_type: "{{ normalize_input.event_type }}"
-        event_payload: "{{ normalize_input.event_payload }}"
-        render_intent: "{{ extract_turn.render_intent }}"
-        extraction_json: "{{ extract_turn.json_str | default('{}') }}"
-        slot_state_pre_tool: "{{ extract_turn.slot_state }}"
-        slot_state_post_tool: "{{ normalize_tool_response.slot_state | default({}) }}"
-        tool_summary: "{{ normalize_tool_response.summary | default({}) }}"
+        event_type: "{{ normalize_input.context.event_type }}"
+        event_payload: "{{ normalize_input.context.event_payload }}"
+        extraction_context: "{{ extract_turn.context }}"
+        render_intent: "{{ extract_turn.context.render_intent }}"
+        extraction_json: "{{ extract_turn.context.json_str | default('{}') }}"
+        slot_state_pre_tool: "{{ extract_turn.context.captured_slots }}"
+        slot_state_post_tool: "{{ normalize_tool_response.context.slot_state | default({}) }}"
+        tool_summary: "{{ normalize_tool_response.context.summary | default({}) }}"
         user_uid: "{{ workload.user_uid | default('guest') }}"
       code: |
         import json
@@ -906,10 +923,23 @@ workflow:
             "_bot": _bot,
         })
 
-        extraction = _as_dict(extraction_json)
-        slot_state = _as_dict(slot_state_post_tool) or _as_dict(slot_state_pre_tool)
-        slot_state = {**slot_state, **_as_dict(extraction.get("slot_updates"))}
-        render_intent = _as_dict(render_intent) or _as_dict(extraction.get("render_intent"))
+        extraction_context = _as_dict(extraction_context)
+        extraction = _as_dict(extraction_json) or _as_dict(extraction_context.get("json_str"))
+        if not extraction.get("slot_updates"):
+            extraction = {
+                **extraction,
+                "slot_updates": _as_dict(extraction_context.get("slot_updates")),
+            }
+        slot_state = {
+            **_as_dict(slot_state_pre_tool),
+            **_as_dict(slot_state_post_tool),
+            **_as_dict(extraction.get("slot_updates")),
+        }
+        render_intent = (
+            _as_dict(render_intent)
+            or _as_dict(extraction_context.get("render_intent"))
+            or _as_dict(extraction.get("render_intent"))
+        )
         intent = render_intent.get("kind") or "collect_missing"
         tool_summary = _as_dict(tool_summary)
         tool = tool_summary.get("tool", "")
@@ -1349,7 +1379,12 @@ workflow:
         extraction: "{{ extract_turn.context }}"
         widget: "{{ render_widget_chat.context.first_widget }}"
         bot_message: "{{ render_widget_chat.context.bot_message }}"
+        request_id: "{{ workload.request_id | default('') }}"
+        gateway_url: "{{ workload.gateway_url | default('') }}"
       code: |
+        import json
+        import urllib.request
+
         result = {
             "status": "completed",
             "thread_id": thread_path.split("/", 1)[1] if "/" in str(thread_path) else thread_path,
@@ -1365,3 +1400,28 @@ workflow:
                 "drift_policy": "slot_updates and widget_type sequence are stable; chat wording drift is tolerated",
             },
         }
+
+        if request_id and gateway_url:
+            try:
+                callback_url = gateway_url.rstrip("/") + "/api/internal/callback/async"
+                body = json.dumps({
+                    "request_id": request_id,
+                    "status": "COMPLETED",
+                    "data": result,
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    callback_url,
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result["gateway_callback"] = {
+                        "delivered": 200 <= response.status < 300,
+                        "status_code": response.status,
+                    }
+            except Exception as exc:
+                result["gateway_callback"] = {
+                    "delivered": False,
+                    "error": str(exc)[:300],
+                }
