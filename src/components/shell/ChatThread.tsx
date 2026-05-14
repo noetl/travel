@@ -25,18 +25,34 @@ function extractExecutionId(response: unknown): string | undefined {
 
 function extractEnvelope(execution: unknown): WidgetEnvelope | undefined {
   const item = execution as Record<string, unknown>;
+  const data = item?.data as Record<string, unknown> | undefined;
   const result = item?.result as Record<string, unknown> | undefined;
-  const render = result?.render || item?.render;
+  const render = result?.render || data?.render || item?.render;
   if (render && typeof render === 'object' && (render as Record<string, unknown>).widget_type) {
     return render as WidgetEnvelope;
   }
   return undefined;
 }
 
+function extractSlotState(execution: unknown): Record<string, unknown> | undefined {
+  const item = execution as Record<string, unknown>;
+  const data = item?.data as Record<string, unknown> | undefined;
+  const result = item?.result as Record<string, unknown> | undefined;
+  const slotState = result?.final_slot_state || data?.final_slot_state || result?.slot_state || data?.slot_state;
+  return slotState && typeof slotState === 'object' ? (slotState as Record<string, unknown>) : undefined;
+}
+
 function extractBotMessage(execution: unknown): string {
   const item = execution as Record<string, unknown>;
+  const data = item?.data as Record<string, unknown> | undefined;
   const result = item?.result as Record<string, unknown> | undefined;
-  return String(result?.bot_message || result?.text || result?.summary || item?.status || 'Ready.');
+  return String(result?.bot_message || data?.bot_message || result?.text || data?.text || result?.summary || data?.summary || item?.status || 'Ready.');
+}
+
+function hasFinalPayload(execution: unknown): boolean {
+  const item = execution as Record<string, unknown>;
+  const data = item?.data as Record<string, unknown> | undefined;
+  return Boolean(extractEnvelope(execution) || extractSlotState(execution) || data?.bot_message);
 }
 
 async function waitForExecution(executionId: string): Promise<unknown> {
@@ -52,7 +68,13 @@ async function waitForExecution(executionId: string): Promise<unknown> {
   throw new Error(`Execution ${executionId} did not complete in time`);
 }
 
-export function ChatThread({ activeView }: { activeView: SidebarView }) {
+export function ChatThread({
+  activeView,
+  onSlotStateChange
+}: {
+  activeView: SidebarView;
+  onSlotStateChange?: (slotState: Record<string, unknown>) => void;
+}) {
   const { t } = useTranslation();
   const auth = useMunoAuth();
   const [input, setInput] = useState('');
@@ -93,8 +115,12 @@ export function ChatThread({ activeView }: { activeView: SidebarView }) {
         { userUid: auth.user?.sub }
       );
       const executionId = extractExecutionId(start);
-      const execution = executionId ? await waitForExecution(executionId) : start;
+      const execution = hasFinalPayload(start) || !executionId ? start : await waitForExecution(executionId);
       const envelope = extractEnvelope(execution);
+      const slotState = extractSlotState(execution);
+      if (slotState) {
+        onSlotStateChange?.(slotState);
+      }
       setMessages((current) => [
         ...current,
         {

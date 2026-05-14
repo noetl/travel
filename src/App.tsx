@@ -9,11 +9,12 @@ import { RightPane } from './components/shell/RightPane';
 
 function Shell() {
   const [activeView, setActiveView] = useState<SidebarView>('searches');
+  const [slotState, setSlotState] = useState<Record<string, unknown>>({});
   return (
     <Box sx={{ display: 'grid', gridTemplateColumns: '280px minmax(0, 1fr) 360px', minHeight: '100vh' }}>
       <Sidebar activeView={activeView} onViewChange={setActiveView} />
-      <ChatThread activeView={activeView} />
-      <RightPane />
+      <ChatThread activeView={activeView} onSlotStateChange={setSlotState} />
+      <RightPane slotState={slotState} />
     </Box>
   );
 }

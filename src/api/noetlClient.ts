@@ -2,6 +2,19 @@ import axios from 'axios';
 import { clearSession, getGatewayApiBaseUrl, getGatewayBaseUrl, getStoredSession, isGuestAllowed } from './gatewaySession';
 
 let sessionExpiredHandler: (() => void) | undefined;
+let eventSource: EventSource | null = null;
+let sseConnected = false;
+let clientId: string | null = null;
+const pendingCallbacks = new Map<
+  string,
+  {
+    resolve: (value: Record<string, unknown>) => void;
+    reject: (error: Error) => void;
+    timeoutId: number;
+  }
+>();
+const SSE_TIMEOUT_MS = 10_000;
+const CALLBACK_TIMEOUT_MS = 120_000;
 
 export const noetlClient = axios.create({
   baseURL: getGatewayApiBaseUrl(),
@@ -47,15 +60,114 @@ async function checkPlaybookAccess(playbookPath: string, token: string): Promise
   return Boolean(data.allowed);
 }
 
+function handlePlaybookResult(message: unknown) {
+  const params = ((message as Record<string, unknown>)?.params || {}) as Record<string, unknown>;
+  const requestId = String(params.requestId || '');
+  if (!requestId) return;
+
+  const pending = pendingCallbacks.get(requestId);
+  if (!pending) return;
+
+  pendingCallbacks.delete(requestId);
+  window.clearTimeout(pending.timeoutId);
+
+  if (params.status === 'FAILED' || params.error) {
+    const error = params.error as { message?: string } | undefined;
+    pending.reject(new Error(error?.message || 'Playbook execution failed'));
+    return;
+  }
+
+  pending.resolve({
+    id: params.executionId,
+    executionId: params.executionId,
+    requestId,
+    status: params.status,
+    data: (params.data || {}) as Record<string, unknown>
+  });
+}
+
+function connectSSE(token: string): void {
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+
+  const url =
+    `${getGatewayBaseUrl()}/events?session_token=${encodeURIComponent(token)}` +
+    (clientId ? `&client_id=${encodeURIComponent(clientId)}` : '');
+  eventSource = new EventSource(url);
+
+  eventSource.addEventListener('message', (event) => {
+    try {
+      const message = JSON.parse(event.data);
+      if (message?.result?.clientId) {
+        clientId = message.result.clientId;
+        sseConnected = true;
+      }
+    } catch {
+      // Ignore heartbeat/noise frames.
+    }
+  });
+
+  eventSource.addEventListener('playbook/result', (event) => {
+    try {
+      handlePlaybookResult(JSON.parse(event.data));
+    } catch {
+      // Ignore malformed result frames.
+    }
+  });
+
+  eventSource.onerror = () => {
+    sseConnected = false;
+  };
+}
+
+async function waitForSSEConnection(token: string): Promise<void> {
+  if (sseConnected && eventSource?.readyState === EventSource.OPEN) return;
+
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      unsubscribe();
+      reject(new Error('Gateway callback connection timed out'));
+    }, SSE_TIMEOUT_MS);
+
+    const intervalId = window.setInterval(() => {
+      if (sseConnected && eventSource?.readyState === EventSource.OPEN) {
+        unsubscribe();
+        resolve();
+      }
+    }, 100);
+
+    const unsubscribe = () => {
+      window.clearTimeout(timeoutId);
+      window.clearInterval(intervalId);
+    };
+
+    connectSSE(token);
+  });
+}
+
+function waitForPlaybookCallback(requestId: string): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      pendingCallbacks.delete(requestId);
+      reject(new Error('Playbook callback timed out'));
+    }, CALLBACK_TIMEOUT_MS);
+    pendingCallbacks.set(requestId, { resolve, reject, timeoutId });
+  });
+}
+
 async function executeViaGatewayGraphQL(path: string, workload: Record<string, unknown>, token: string) {
   const hasAccess = await checkPlaybookAccess(path, token);
   if (!hasAccess) {
     throw new Error('You do not have permission to execute this playbook');
   }
 
+  await waitForSSEConnection(token);
+
   const mutation = `
-    mutation ExecutePlaybook($name: String!, $vars: JSON) {
-      executePlaybook(name: $name, variables: $vars) {
+    mutation ExecutePlaybook($name: String!, $vars: JSON, $clientId: String) {
+      executePlaybook(name: $name, variables: $vars, clientId: $clientId) {
         id
         executionId
         requestId
@@ -73,7 +185,7 @@ async function executeViaGatewayGraphQL(path: string, workload: Record<string, u
     },
     body: JSON.stringify({
       query: mutation,
-      variables: { name: path, vars: workload }
+      variables: { name: path, vars: workload, clientId }
     })
   });
 
@@ -90,7 +202,11 @@ async function executeViaGatewayGraphQL(path: string, workload: Record<string, u
   if (body.errors?.length) {
     throw new Error(body.errors[0].message || 'GraphQL error');
   }
-  return body.data?.executePlaybook;
+  const execution = body.data?.executePlaybook || {};
+  if (execution.requestId) {
+    return waitForPlaybookCallback(execution.requestId);
+  }
+  return execution;
 }
 
 async function executeDirect(path: string, workload: Record<string, unknown>) {
