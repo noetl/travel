@@ -336,7 +336,10 @@ export async function executePlaybook(
 export async function getExecution(id: string, signal?: AbortSignal) {
   const { data } = await noetlClient.get(`/executions/${id}`, {
     baseURL: getNoetlApiBaseUrl(),
-    params: { page_size: 20 },
+    // Widget payloads are emitted before the terminal final_result event. A
+    // small event page can contain the final bot text but miss the full
+    // append_widget_event envelope, leaving the UI with text only.
+    params: { page_size: 100 },
     signal
   });
   return data;
