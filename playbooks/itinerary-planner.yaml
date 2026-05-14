@@ -387,12 +387,15 @@ workflow:
             party = party if isinstance(party, dict) else {}
             adults = max(1, int(party.get("adults") or 1))
             children = party.get("children") if isinstance(party.get("children"), list) else []
+            adult_given_names = ["Alex", "Jordan", "Morgan", "Casey", "Taylor", "Riley", "Avery", "Jamie"]
+            child_given_names = ["Sam", "Robin", "Quinn", "Skyler", "Rowan", "Reese", "Elliot", "Harper"]
             passengers = []
             for idx in range(adults):
                 passengers.append({
-                    "given_name": f"TestAdult{idx + 1}",
+                    "given_name": adult_given_names[idx % len(adult_given_names)],
                     "family_name": "Traveler",
                     "born_on": "1988-01-01",
+                    "gender": "m" if idx % 2 == 0 else "f",
                     "email": "test@example.com",
                     "phone_number": "+15555550100",
                 })
@@ -403,9 +406,10 @@ workflow:
                 except Exception:
                     birth_year = date.today().year - 8
                 passengers.append({
-                    "given_name": f"TestChild{idx + 1}",
+                    "given_name": child_given_names[idx % len(child_given_names)],
                     "family_name": "Traveler",
                     "born_on": f"{birth_year}-01-01",
+                    "gender": "f" if idx % 2 == 0 else "m",
                     "email": "test@example.com",
                     "phone_number": "+15555550100",
                 })
@@ -1241,7 +1245,11 @@ workflow:
         elif intent == "flight_detail":
             offers = slot_state.get("flight_offers") if isinstance(slot_state.get("flight_offers"), list) else []
             picked_offer_id = str(slot_state.get("picked_flight_offer_id") or "")
-            offer = next((item for item in offers if isinstance(item, dict) and str(item.get("offer_id")) == picked_offer_id), None)
+            offer = None
+            for item in offers:
+                if isinstance(item, dict) and str(item.get("offer_id")) == picked_offer_id:
+                    offer = item
+                    break
             if not offer:
                 offer = {
                     "offer_id": picked_offer_id or "selected-offer",
