@@ -35,7 +35,31 @@ function getEventContext(event: Record<string, unknown>): Record<string, unknown
 }
 
 function contextHasPayload(context: Record<string, unknown>): boolean {
-  return Boolean(context.render || context.first_widget || context.final_slot_state || context.slot_state || context.bot_message);
+  return Boolean(context.render || context.first_widget || extractEnvelopeFromContext(context) || context.final_slot_state || context.slot_state || context.bot_message);
+}
+
+function isWidgetEnvelope(value: unknown): value is WidgetEnvelope {
+  if (!isRecord(value)) return false;
+  return Boolean(value.schema_version === 1 && value.widget_type && isRecord(value.payload));
+}
+
+function extractEnvelopeFromContext(context: Record<string, unknown>): WidgetEnvelope | undefined {
+  const data = isRecord(context.data) ? context.data : undefined;
+  const event = isRecord(data?.event) ? data.event : undefined;
+  const eventPayload = isRecord(event?.payload) ? event.payload : undefined;
+  const toolConfig = isRecord(context.tool_config) ? context.tool_config : undefined;
+  const toolPayload = isRecord(toolConfig?.payload) ? toolConfig.payload : undefined;
+  const argumentsPayload = isRecord(toolPayload?.arguments) ? toolPayload.arguments : undefined;
+  const commandEvent = isRecord(argumentsPayload?.event) ? argumentsPayload.event : undefined;
+  const commandEventPayload = isRecord(commandEvent?.payload) ? commandEvent.payload : undefined;
+
+  const candidates = [
+    context.render,
+    context.first_widget,
+    eventPayload?.envelope,
+    commandEventPayload?.envelope
+  ];
+  return candidates.find(isWidgetEnvelope);
 }
 
 function eventIdRank(event: Record<string, unknown>): string {
@@ -47,6 +71,7 @@ function eventPayloadPriority(event: Record<string, unknown>, context: Record<st
   const nodeName = String(event.node_name || '');
   const eventType = String(event.event_type || '');
   let priority = 0;
+  if (extractEnvelopeFromContext(context)) priority += 200;
   if (nodeName === 'final_result') priority += 100;
   if (eventType === 'workflow.completed' || eventType === 'playbook.completed') priority += 90;
   if (nodeName === 'render_widget_chat') priority += 50;
@@ -80,11 +105,25 @@ function extractPayloadContext(execution: unknown): Record<string, unknown> {
 
 function extractEnvelope(execution: unknown): WidgetEnvelope | undefined {
   const payload = extractPayloadContext(execution);
-  const render = payload.render || payload.first_widget;
-  if (render && typeof render === 'object' && (render as Record<string, unknown>).widget_type) {
-    return render as WidgetEnvelope;
+  const payloadEnvelope = extractEnvelopeFromContext(payload);
+  if (payloadEnvelope) return payloadEnvelope;
+
+  const item = isRecord(execution) ? execution : {};
+  const events = Array.isArray(item.events) ? item.events : [];
+  let best: { priority: number; eventId: string; envelope: WidgetEnvelope } | undefined;
+  for (const event of events) {
+    if (!isRecord(event)) continue;
+    const context = getEventContext(event);
+    if (!context) continue;
+    const envelope = extractEnvelopeFromContext(context);
+    if (!envelope) continue;
+    const priority = eventPayloadPriority(event, context);
+    const eventId = eventIdRank(event);
+    if (!best || priority > best.priority || (priority === best.priority && eventId > best.eventId)) {
+      best = { priority, eventId, envelope };
+    }
   }
-  return undefined;
+  return best?.envelope;
 }
 
 function extractSlotState(execution: unknown): Record<string, unknown> | undefined {
