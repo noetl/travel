@@ -769,15 +769,58 @@ workflow:
                 "ctas": ["watch_in_detail", "show_numbers"],
             }
 
+        def _airport_iata(value):
+            value = value if isinstance(value, dict) else {}
+            return str(value.get("iata") or value.get("iataCode") or value.get("iata_code") or value.get("code") or "").strip()
+
+        def _segment_card(segment):
+            segment = segment if isinstance(segment, dict) else {}
+            departure = segment.get("departure") if isinstance(segment.get("departure"), dict) else {}
+            arrival = segment.get("arrival") if isinstance(segment.get("arrival"), dict) else {}
+            carrier = str(segment.get("carrier") or segment.get("carrierCode") or segment.get("carrier_code") or "").strip()
+            return {
+                "departure": {
+                    "iata": _airport_iata(departure),
+                    "at": str(departure.get("at") or departure.get("time") or departure.get("datetime") or ""),
+                },
+                "arrival": {
+                    "iata": _airport_iata(arrival),
+                    "at": str(arrival.get("at") or arrival.get("time") or arrival.get("datetime") or ""),
+                },
+                "carrier": carrier or "DU",
+                "flight_number": str(segment.get("flight_number") or segment.get("number") or ""),
+                "duration": str(segment.get("duration") or "PT0H"),
+                "stops": int(segment.get("stops") if segment.get("stops") is not None else segment.get("numberOfStops") if segment.get("numberOfStops") is not None else 0),
+            }
+
+        def _itinerary_card(itinerary):
+            itinerary = itinerary if isinstance(itinerary, dict) else {}
+            segments = itinerary.get("segments") if isinstance(itinerary.get("segments"), list) else []
+            return {
+                "duration": str(itinerary.get("duration") or "PT0H"),
+                "segments": [_segment_card(segment) for segment in segments],
+            }
+
         def _offer_card(offer):
+            itineraries = [_itinerary_card(item) for item in offer.get("itineraries", [])] if isinstance(offer.get("itineraries"), list) else []
+            carriers = offer.get("carriers") if isinstance(offer.get("carriers"), list) else offer.get("validatingAirlineCodes") if isinstance(offer.get("validatingAirlineCodes"), list) else []
+            if not carriers:
+                for itinerary in itineraries:
+                    for segment in itinerary.get("segments", []):
+                        carrier = segment.get("carrier")
+                        if carrier and carrier not in carriers:
+                            carriers.append(carrier)
+            stops = 0
+            if itineraries:
+                stops = max(0, sum(len(itinerary.get("segments", [])) for itinerary in itineraries) - len(itineraries))
             return {
                 "offer_id": offer.get("offer_id") or offer.get("id") or "offer",
                 "price": offer.get("price") if isinstance(offer.get("price"), dict) else {"total": str(offer.get("total_amount") or "0"), "currency": offer.get("total_currency") or "USD"},
-                "itineraries": offer.get("itineraries") if isinstance(offer.get("itineraries"), list) and offer.get("itineraries") else [{"segments": []}],
-                "carriers": offer.get("carriers") if isinstance(offer.get("carriers"), list) else offer.get("validatingAirlineCodes") if isinstance(offer.get("validatingAirlineCodes"), list) else [],
-                "duration": offer.get("duration") or ((offer.get("itineraries") or [{}])[0].get("duration") if isinstance(offer.get("itineraries"), list) and offer.get("itineraries") else "PT0H"),
-                "stops": offer.get("stops") if offer.get("stops") is not None else 0,
-                "validating_airline": offer.get("validating_airline") or (offer.get("validatingAirlineCodes") or ["DU"])[0],
+                "itineraries": itineraries or [{"duration": "PT0H", "segments": []}],
+                "carriers": [str(carrier) for carrier in carriers],
+                "duration": str(offer.get("duration") or (itineraries[0].get("duration") if itineraries else "PT0H")),
+                "stops": int(offer.get("stops") if offer.get("stops") is not None else stops),
+                "validating_airline": str(offer.get("validating_airline") or (carriers[0] if carriers else "DU")),
                 "ctas": ["view_details", "book_this"],
             }
 
