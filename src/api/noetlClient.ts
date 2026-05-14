@@ -15,6 +15,7 @@ const pendingCallbacks = new Map<
 >();
 const SSE_TIMEOUT_MS = 10_000;
 const CALLBACK_TIMEOUT_MS = 120_000;
+const CALLBACK_GRACE_MS = 8_000;
 
 export const noetlClient = axios.create({
   baseURL: getGatewayApiBaseUrl(),
@@ -46,6 +47,10 @@ export function setSessionExpiredHandler(handler?: () => void) {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function isCallbackTimeout(error: unknown): boolean {
+  return error instanceof Error && error.message === 'Playbook callback timed out';
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -83,8 +88,14 @@ function handlePlaybookResult(message: unknown) {
   window.clearTimeout(pending.timeoutId);
 
   if (params.status === 'FAILED' || params.error) {
-    const error = params.error as { message?: string } | undefined;
-    pending.reject(new Error(error?.message || 'Playbook execution failed'));
+    pending.resolve({
+      id: params.executionId,
+      executionId: params.executionId,
+      requestId,
+      status: params.status,
+      error: params.error,
+      data: (params.data || {}) as Record<string, unknown>
+    });
     return;
   }
 
@@ -166,7 +177,11 @@ async function waitForSSEConnection(token: string, signal?: AbortSignal): Promis
   });
 }
 
-function waitForPlaybookCallback(requestId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+function waitForPlaybookCallback(
+  requestId: string,
+  signal?: AbortSignal,
+  timeoutMs = CALLBACK_TIMEOUT_MS
+): Promise<Record<string, unknown>> {
   throwIfAborted(signal);
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -185,7 +200,7 @@ function waitForPlaybookCallback(requestId: string, signal?: AbortSignal): Promi
       signal?.removeEventListener('abort', abort);
       pendingCallbacks.delete(requestId);
       reject(new Error('Playbook callback timed out'));
-    }, CALLBACK_TIMEOUT_MS);
+    }, timeoutMs);
     pendingCallbacks.set(requestId, {
       resolve: (value) => {
         signal?.removeEventListener('abort', abort);
@@ -201,13 +216,37 @@ function waitForPlaybookCallback(requestId: string, signal?: AbortSignal): Promi
   });
 }
 
+function getExecutionId(execution: Record<string, unknown>): string {
+  return String(execution.executionId || execution.execution_id || execution.id || '').trim();
+}
+
+function callbackFallback(execution: Record<string, unknown>, requestId: string): Record<string, unknown> {
+  const executionId = getExecutionId(execution);
+  return {
+    ...execution,
+    id: executionId || execution.id,
+    executionId: executionId || execution.executionId,
+    execution_id: executionId || execution.execution_id,
+    requestId,
+    status: execution.status || 'started',
+    callbackTimedOut: true
+  };
+}
+
 async function executeViaGatewayGraphQL(path: string, workload: Record<string, unknown>, token: string, signal?: AbortSignal) {
   const hasAccess = await checkPlaybookAccess(path, token, signal);
   if (!hasAccess) {
     throw new Error('You do not have permission to execute this playbook');
   }
 
-  await waitForSSEConnection(token, signal);
+  try {
+    await waitForSSEConnection(token, signal);
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    // The execution id returned by GraphQL is enough for status polling. Do not
+    // block a user turn just because the browser callback channel is unavailable.
+    sseConnected = false;
+  }
 
   const mutation = `
     mutation ExecutePlaybook($name: String!, $vars: JSON, $clientId: String) {
@@ -254,7 +293,17 @@ async function executeViaGatewayGraphQL(path: string, workload: Record<string, u
   }
   const execution = body.data?.executePlaybook || {};
   if (execution.requestId) {
-    return waitForPlaybookCallback(execution.requestId, signal);
+    const requestId = String(execution.requestId);
+    const executionId = getExecutionId(execution);
+    try {
+      return await waitForPlaybookCallback(requestId, signal, executionId ? CALLBACK_GRACE_MS : CALLBACK_TIMEOUT_MS);
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      if (executionId && isCallbackTimeout(error)) {
+        return callbackFallback(execution, requestId);
+      }
+      throw error;
+    }
   }
   return execution;
 }
@@ -282,5 +331,14 @@ export async function executePlaybook(
 
 export async function getExecution(id: string, signal?: AbortSignal) {
   const { data } = await noetlClient.get(`/executions/${id}`, { params: { page_size: 20 }, signal });
+  return data;
+}
+
+export async function cancelExecution(id: string, signal?: AbortSignal) {
+  const { data } = await noetlClient.post(
+    `/executions/${id}/cancel`,
+    { reason: 'Cancelled from Muno UI', cascade: true },
+    { signal }
+  );
   return data;
 }
