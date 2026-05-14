@@ -178,12 +178,14 @@ export function ActionButton({
   label,
   actionId,
   onWidgetEvent,
-  variant = 'outlined'
+  variant = 'outlined',
+  value
 }: {
   label: string;
   actionId: string;
   onWidgetEvent?: WidgetComponentProps['onWidgetEvent'];
   variant?: 'text' | 'outlined' | 'contained';
+  value?: unknown;
 }) {
   return (
     <Button
@@ -193,7 +195,7 @@ export function ActionButton({
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
-        emitWidgetEvent(onWidgetEvent, { type: 'widget_cta_click', action_id: actionId });
+        emitWidgetEvent(onWidgetEvent, { type: 'widget_cta_click', action_id: actionId, value });
       }}
     >
       {label}

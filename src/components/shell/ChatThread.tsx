@@ -59,6 +59,28 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
+function slotStateFromWidgetEvent(event: WidgetEvent): Record<string, unknown> | undefined {
+  const value = event.value as Record<string, unknown> | undefined;
+  if (event.action_id?.startsWith('add_place:') && value && typeof value === 'object') {
+    const label = String(value.label || value.name || '').trim();
+    const id = String(value.id || event.action_id.replace('add_place:', '')).trim();
+    if (!label) return undefined;
+    return {
+      region: {
+        label,
+        city_code: '',
+        country_code: '',
+        kind: value.kind || 'city'
+      },
+      region_label: label,
+      region_kind: value.kind || 'city',
+      picked_place_id: id,
+      places_seen: id ? [id] : []
+    };
+  }
+  return undefined;
+}
+
 function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
   return new Promise((resolve, reject) => {
@@ -178,6 +200,10 @@ export function ChatThread({
 
   const handleWidgetEvent = (event: WidgetEvent) => {
     if (submitting) return;
+    const optimisticSlotState = slotStateFromWidgetEvent(event);
+    if (optimisticSlotState) {
+      onSlotStateChange?.(optimisticSlotState);
+    }
     void runTurn(event.type === 'widget_submit' ? 'user_widget_submit' : 'user_widget_cta_click', {
       action_id: event.action_id,
       value: event.value,
