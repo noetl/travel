@@ -44,10 +44,21 @@ export function setSessionExpiredHandler(handler?: () => void) {
   sessionExpiredHandler = handler;
 }
 
-async function checkPlaybookAccess(playbookPath: string, token: string): Promise<boolean> {
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
+}
+
+async function checkPlaybookAccess(playbookPath: string, token: string, signal?: AbortSignal): Promise<boolean> {
   const response = await fetch(`${getGatewayBaseUrl()}/api/auth/check-access`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal,
     body: JSON.stringify({
       session_token: token,
       playbook_path: playbookPath,
@@ -122,14 +133,20 @@ function connectSSE(token: string): void {
   };
 }
 
-async function waitForSSEConnection(token: string): Promise<void> {
+async function waitForSSEConnection(token: string, signal?: AbortSignal): Promise<void> {
   if (sseConnected && eventSource?.readyState === EventSource.OPEN) return;
+  throwIfAborted(signal);
 
   return new Promise((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
       unsubscribe();
       reject(new Error('Gateway callback connection timed out'));
     }, SSE_TIMEOUT_MS);
+
+    const abort = () => {
+      unsubscribe();
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
 
     const intervalId = window.setInterval(() => {
       if (sseConnected && eventSource?.readyState === EventSource.OPEN) {
@@ -141,29 +158,56 @@ async function waitForSSEConnection(token: string): Promise<void> {
     const unsubscribe = () => {
       window.clearTimeout(timeoutId);
       window.clearInterval(intervalId);
+      signal?.removeEventListener('abort', abort);
     };
 
+    signal?.addEventListener('abort', abort, { once: true });
     connectSSE(token);
   });
 }
 
-function waitForPlaybookCallback(requestId: string): Promise<Record<string, unknown>> {
+function waitForPlaybookCallback(requestId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  throwIfAborted(signal);
   return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      const pending = pendingCallbacks.get(requestId);
+      if (pending) {
+        window.clearTimeout(pending.timeoutId);
+        pendingCallbacks.delete(requestId);
+      }
+      signal?.removeEventListener('abort', abort);
+    };
+    const abort = () => {
+      cleanup();
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
     const timeoutId = window.setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
       pendingCallbacks.delete(requestId);
       reject(new Error('Playbook callback timed out'));
     }, CALLBACK_TIMEOUT_MS);
-    pendingCallbacks.set(requestId, { resolve, reject, timeoutId });
+    pendingCallbacks.set(requestId, {
+      resolve: (value) => {
+        signal?.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      reject: (error) => {
+        signal?.removeEventListener('abort', abort);
+        reject(error);
+      },
+      timeoutId
+    });
+    signal?.addEventListener('abort', abort, { once: true });
   });
 }
 
-async function executeViaGatewayGraphQL(path: string, workload: Record<string, unknown>, token: string) {
-  const hasAccess = await checkPlaybookAccess(path, token);
+async function executeViaGatewayGraphQL(path: string, workload: Record<string, unknown>, token: string, signal?: AbortSignal) {
+  const hasAccess = await checkPlaybookAccess(path, token, signal);
   if (!hasAccess) {
     throw new Error('You do not have permission to execute this playbook');
   }
 
-  await waitForSSEConnection(token);
+  await waitForSSEConnection(token, signal);
 
   const mutation = `
     mutation ExecutePlaybook($name: String!, $vars: JSON, $clientId: String) {
@@ -183,10 +227,16 @@ async function executeViaGatewayGraphQL(path: string, workload: Record<string, u
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`
     },
+    signal,
     body: JSON.stringify({
       query: mutation,
       variables: { name: path, vars: workload, clientId }
     })
+  }).catch((error) => {
+    if (isAbortError(error)) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    throw error;
   });
 
   if (response.status === 401) {
@@ -204,33 +254,33 @@ async function executeViaGatewayGraphQL(path: string, workload: Record<string, u
   }
   const execution = body.data?.executePlaybook || {};
   if (execution.requestId) {
-    return waitForPlaybookCallback(execution.requestId);
+    return waitForPlaybookCallback(execution.requestId, signal);
   }
   return execution;
 }
 
-async function executeDirect(path: string, workload: Record<string, unknown>) {
-  const { data } = await noetlClient.post('/execute', { path, workload });
+async function executeDirect(path: string, workload: Record<string, unknown>, signal?: AbortSignal) {
+  const { data } = await noetlClient.post('/execute', { path, workload }, { signal });
   return data;
 }
 
 export async function executePlaybook(
   path: string,
   workload: Record<string, unknown>,
-  options: { userUid?: string } = {}
+  options: { userUid?: string; signal?: AbortSignal } = {}
 ) {
   const finalWorkload = options.userUid ? { ...workload, user_uid: options.userUid } : workload;
   const session = getStoredSession();
   if (session?.token) {
-    return executeViaGatewayGraphQL(path, finalWorkload, session.token);
+    return executeViaGatewayGraphQL(path, finalWorkload, session.token, options.signal);
   }
   if (isGuestAllowed()) {
-    return executeDirect(path, finalWorkload);
+    return executeDirect(path, finalWorkload, options.signal);
   }
   throw new Error('Sign in is required before executing playbooks');
 }
 
-export async function getExecution(id: string) {
-  const { data } = await noetlClient.get(`/executions/${id}`, { params: { page_size: 20 } });
+export async function getExecution(id: string, signal?: AbortSignal) {
+  const { data } = await noetlClient.get(`/executions/${id}`, { params: { page_size: 20 }, signal });
   return data;
 }

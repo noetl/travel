@@ -55,10 +55,29 @@ function hasFinalPayload(execution: unknown): boolean {
   return Boolean(extractEnvelope(execution) || extractSlotState(execution) || data?.bot_message);
 }
 
-async function waitForExecution(executionId: string): Promise<unknown> {
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      window.clearTimeout(timeoutId);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
+async function waitForExecution(executionId: string, signal: AbortSignal): Promise<unknown> {
   for (let attempt = 0; attempt < 60; attempt += 1) {
-    await new Promise((resolve) => window.setTimeout(resolve, 1500));
-    const execution = await getExecution(executionId);
+    await abortableDelay(1500, signal);
+    const execution = await getExecution(executionId, signal);
     const status = String((execution as Record<string, unknown>)?.status || '').toLowerCase();
     if (status === 'completed' || status === 'succeeded') return execution;
     if (status === 'failed' || status === 'error' || status === 'cancelled') {
@@ -89,6 +108,7 @@ export function ChatThread({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const threadId = useRef(`travel-ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
+  const activeRequest = useRef<AbortController | null>(null);
 
   const visibleMessages = useMemo(
     () =>
@@ -99,6 +119,9 @@ export function ChatThread({
   );
 
   const runTurn = async (eventType: string, eventPayload: Record<string, unknown>, userText?: string) => {
+    const controller = new AbortController();
+    activeRequest.current?.abort();
+    activeRequest.current = controller;
     setError(undefined);
     setSubmitting(true);
     try {
@@ -112,10 +135,10 @@ export function ChatThread({
           event_type: eventType,
           event_payload: eventPayload
         },
-        { userUid: auth.user?.sub }
+        { userUid: auth.user?.sub, signal: controller.signal }
       );
       const executionId = extractExecutionId(start);
-      const execution = hasFinalPayload(start) || !executionId ? start : await waitForExecution(executionId);
+      const execution = hasFinalPayload(start) || !executionId ? start : await waitForExecution(executionId, controller.signal);
       const envelope = extractEnvelope(execution);
       const slotState = extractSlotState(execution);
       if (slotState) {
@@ -133,9 +156,16 @@ export function ChatThread({
         }
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Could not submit message');
+      if (isAbortError(caught)) {
+        setError('Request cancelled. You can send another message.');
+      } else {
+        setError(caught instanceof Error ? caught.message : 'Could not submit message');
+      }
     } finally {
-      setSubmitting(false);
+      if (activeRequest.current === controller) {
+        activeRequest.current = null;
+        setSubmitting(false);
+      }
     }
   };
 
@@ -153,6 +183,13 @@ export function ChatThread({
       value: event.value,
       submitted_value: event.value
     });
+  };
+
+  const cancelRequest = () => {
+    activeRequest.current?.abort();
+    activeRequest.current = null;
+    setSubmitting(false);
+    setError('Request cancelled. You can send another message.');
   };
 
   return (
@@ -191,6 +228,9 @@ export function ChatThread({
           <Stack direction="row" spacing={1} alignItems="center">
             <CircularProgress size={18} />
             <Typography variant="body2" color="text.secondary">Muno is planning...</Typography>
+            <Button size="small" variant="outlined" color="inherit" onClick={cancelRequest}>
+              Cancel
+            </Button>
           </Stack>
         ) : null}
         {error ? <Alert severity="error">{error}</Alert> : null}
