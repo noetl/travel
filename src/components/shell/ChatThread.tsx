@@ -207,6 +207,7 @@ export function ChatThread({
               elevation={message.role === 'user' ? 2 : 0}
               sx={{
                 maxWidth: message.role === 'user' ? '70%' : '100%',
+                width: message.role === 'assistant' && message.envelope ? 'min(100%, 920px)' : 'auto',
                 p: message.role === 'user' ? 1.25 : 0,
                 bgcolor: message.role === 'user' ? 'primary.main' : 'transparent',
                 color: message.role === 'user' ? 'primary.contrastText' : 'text.primary'
