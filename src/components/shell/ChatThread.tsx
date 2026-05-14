@@ -23,11 +23,64 @@ function extractExecutionId(response: unknown): string | undefined {
   return String(item?.execution_id || item?.executionId || item?.id || '').trim() || undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function getEventContext(event: Record<string, unknown>): Record<string, unknown> | undefined {
+  const result = event.result as Record<string, unknown> | undefined;
+  const outputResult = event.output_result as Record<string, unknown> | undefined;
+  const candidates = [result?.context, outputResult?.context, event.context, result, outputResult];
+  return candidates.find(isRecord);
+}
+
+function contextHasPayload(context: Record<string, unknown>): boolean {
+  return Boolean(context.render || context.first_widget || context.final_slot_state || context.slot_state || context.bot_message);
+}
+
+function eventIdRank(event: Record<string, unknown>): string {
+  const value = String(event.event_id || '').replace(/\D/g, '');
+  return value.padStart(24, '0');
+}
+
+function eventPayloadPriority(event: Record<string, unknown>, context: Record<string, unknown>): number {
+  const nodeName = String(event.node_name || '');
+  const eventType = String(event.event_type || '');
+  let priority = 0;
+  if (nodeName === 'final_result') priority += 100;
+  if (eventType === 'workflow.completed' || eventType === 'playbook.completed') priority += 90;
+  if (nodeName === 'render_widget_chat') priority += 50;
+  if (context.render) priority += 10;
+  if (context.first_widget) priority += 5;
+  return priority;
+}
+
+function extractPayloadContext(execution: unknown): Record<string, unknown> {
+  const item = isRecord(execution) ? execution : {};
+  const result = item.result;
+  if (isRecord(result) && contextHasPayload(result)) return result;
+
+  const data = item.data;
+  if (isRecord(data) && contextHasPayload(data)) return data;
+
+  let best: { priority: number; eventId: string; context: Record<string, unknown> } | undefined;
+  const events = Array.isArray(item.events) ? item.events : [];
+  for (const event of events) {
+    if (!isRecord(event)) continue;
+    const context = getEventContext(event);
+    if (!context || !contextHasPayload(context)) continue;
+    const priority = eventPayloadPriority(event, context);
+    const eventId = eventIdRank(event);
+    if (!best || priority > best.priority || (priority === best.priority && eventId > best.eventId)) {
+      best = { priority, eventId, context };
+    }
+  }
+  return best?.context || item;
+}
+
 function extractEnvelope(execution: unknown): WidgetEnvelope | undefined {
-  const item = execution as Record<string, unknown>;
-  const data = item?.data as Record<string, unknown> | undefined;
-  const result = item?.result as Record<string, unknown> | undefined;
-  const render = result?.render || data?.render || item?.render;
+  const payload = extractPayloadContext(execution);
+  const render = payload.render || payload.first_widget;
   if (render && typeof render === 'object' && (render as Record<string, unknown>).widget_type) {
     return render as WidgetEnvelope;
   }
@@ -35,25 +88,19 @@ function extractEnvelope(execution: unknown): WidgetEnvelope | undefined {
 }
 
 function extractSlotState(execution: unknown): Record<string, unknown> | undefined {
-  const item = execution as Record<string, unknown>;
-  const data = item?.data as Record<string, unknown> | undefined;
-  const result = item?.result as Record<string, unknown> | undefined;
-  const slotState = result?.final_slot_state || data?.final_slot_state || result?.slot_state || data?.slot_state;
+  const payload = extractPayloadContext(execution);
+  const slotState = payload.final_slot_state || payload.slot_state;
   return slotState && typeof slotState === 'object' ? (slotState as Record<string, unknown>) : undefined;
 }
 
 function extractBotMessage(execution: unknown): string {
-  const item = execution as Record<string, unknown>;
-  const data = item?.data as Record<string, unknown> | undefined;
-  const result = item?.result as Record<string, unknown> | undefined;
-  return String(result?.bot_message || data?.bot_message || result?.text || data?.text || result?.summary || data?.summary || item?.status || 'Ready.');
+  const payload = extractPayloadContext(execution);
+  return String(payload.bot_message || payload.text || payload.summary || 'Ready.');
 }
 
 function hasFinalPayload(execution: unknown): boolean {
-  const item = execution as Record<string, unknown>;
-  const data = item?.data as Record<string, unknown> | undefined;
-  const result = item?.result as Record<string, unknown> | undefined;
-  return Boolean(extractEnvelope(execution) || extractSlotState(execution) || result?.bot_message || data?.bot_message);
+  const payload = extractPayloadContext(execution);
+  return Boolean(extractEnvelope(execution) || extractSlotState(execution) || payload.bot_message);
 }
 
 function isAbortError(error: unknown): boolean {
