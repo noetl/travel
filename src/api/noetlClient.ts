@@ -22,6 +22,10 @@ export const noetlClient = axios.create({
   timeout: 30000
 });
 
+function getNoetlApiBaseUrl(): string {
+  return getStoredSession()?.token ? `${getGatewayBaseUrl()}/noetl` : getGatewayApiBaseUrl();
+}
+
 noetlClient.interceptors.request.use((config) => {
   const session = getStoredSession();
   if (session?.token) {
@@ -330,7 +334,11 @@ export async function executePlaybook(
 }
 
 export async function getExecution(id: string, signal?: AbortSignal) {
-  const { data } = await noetlClient.get(`/executions/${id}`, { params: { page_size: 20 }, signal });
+  const { data } = await noetlClient.get(`/executions/${id}`, {
+    baseURL: getNoetlApiBaseUrl(),
+    params: { page_size: 20 },
+    signal
+  });
   return data;
 }
 
@@ -338,7 +346,7 @@ export async function cancelExecution(id: string, signal?: AbortSignal) {
   const { data } = await noetlClient.post(
     `/executions/${id}/cancel`,
     { reason: 'Cancelled from Muno UI', cascade: true },
-    { signal }
+    { baseURL: getNoetlApiBaseUrl(), signal }
   );
   return data;
 }
