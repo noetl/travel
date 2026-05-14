@@ -40,8 +40,16 @@ export function FlightCard({ payload, variantId = 'compact', onWidgetEvent }: Wi
         ) : null}
         {data.ctas?.length ? (
           <Stack direction="row" spacing={1}>
-            {data.ctas.includes('view_details') ? <ActionButton label="Watch In Detail" actionId={`view_offer:${data.offer_id}`} onWidgetEvent={onWidgetEvent} /> : null}
-            {data.ctas.includes('book_this') ? <ActionButton label="Book This" actionId={`pick_offer:${data.offer_id}`} onWidgetEvent={onWidgetEvent} variant="contained" /> : null}
+            {data.ctas.includes('view_details') ? <ActionButton label="View" actionId={`view_offer:${data.offer_id}`} onWidgetEvent={onWidgetEvent} /> : null}
+            {data.ctas.includes('book_this') ? (
+              <ActionButton
+                label="Book"
+                actionId={`book_offer:${data.offer_id}`}
+                value={{ offer_id: data.offer_id, action: 'book_offer' }}
+                onWidgetEvent={onWidgetEvent}
+                variant="contained"
+              />
+            ) : null}
           </Stack>
         ) : null}
       </Stack>

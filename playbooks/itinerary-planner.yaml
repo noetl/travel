@@ -318,6 +318,8 @@ workflow:
         payload = _as_dict(event_payload)
         lowered_text = text.lower()
         globals().update({"lowered_text": lowered_text})
+        book_flight_now = False
+        view_flight_now = False
         if event_type in ("user_widget_submit", "user_widget_cta_click"):
             submitted = _as_dict(payload.get("submitted_value") or payload.get("value"))
             action_id = str(payload.get("action_id") or submitted.get("action_id") or "").strip()
@@ -344,13 +346,20 @@ workflow:
                 if place_id:
                     updates["picked_place_id"] = place_id
                     updates["places_seen"] = [place_id]
-            if "offer" in action_id or submitted.get("offer_id"):
-                updates["picked_flight_offer_id"] = submitted.get("offer_id") or action_id.replace("pick_offer:", "")
+            if action_id.startswith(("book_offer:", "pick_offer:")) or submitted.get("offer_id"):
+                offer_id_from_action = action_id.split(":", 1)[1] if ":" in action_id else action_id
+                updates["picked_flight_offer_id"] = submitted.get("offer_id") or offer_id_from_action
+                # Back-compat: earlier flight cards labelled the CTA "Book This"
+                # but emitted pick_offer:<id>. Treat those clicks as booking.
+                book_flight_now = True
+            elif action_id.startswith("view_offer:"):
+                updates["picked_flight_offer_id"] = action_id.split(":", 1)[1] if ":" in action_id else action_id
+                view_flight_now = True
             if "hotel" in action_id or submitted.get("hotel_id"):
                 updates["picked_hotel_id"] = submitted.get("hotel_id") or action_id.replace("pick_hotel:", "")
 
         wants_calendar = "show" in lowered_text and ("schedule" in lowered_text or "calendar" in lowered_text)
-        wants_order = any(word in lowered_text for word in ("order", "book", "booking", "confirm", "purchase"))
+        wants_order = book_flight_now or any(word in lowered_text for word in ("order", "book", "booking", "confirm", "purchase"))
 
         if any(word in lowered_text for word in ("meeting", "appointment", "reminder", "note")) and "add" in lowered_text:
             updates["pending_calendar_events"] = [{
@@ -431,6 +440,8 @@ workflow:
                 },
             })
             render_intent = {"kind": "show_flights"}
+        elif picked_flight and view_flight_now:
+            render_intent = {"kind": "flight_detail"}
         elif picked_flight and wants_order and not next_state.get("order_id"):
             tool_requests.append({
                 "tool": "mcp/duffel.create_order",
@@ -907,6 +918,7 @@ workflow:
                 if isinstance(offer, dict):
                     offer_ids.append(offer.get("id") or offer.get("offer_id"))
             next_state["flight_search_results"] = offer_ids
+            next_state["flight_offers"] = normalised_offers
             next_state["total_results_seen"] = len(offers)
         elif first_tool == "mcp/amadeus.search_hotels":
             hotels = _as_list(inner.get("hotels") or inner.get("items") or inner.get("data"))
@@ -1225,7 +1237,24 @@ workflow:
                 "total_count": 1,
                 "currency": "USD",
             }))
-            bot_message = "Here is the first flight batch. Pick one and I will look for hotels."
+            bot_message = "Here is the first flight batch. Book one to create a Duffel test order."
+        elif intent == "flight_detail":
+            offers = slot_state.get("flight_offers") if isinstance(slot_state.get("flight_offers"), list) else []
+            picked_offer_id = str(slot_state.get("picked_flight_offer_id") or "")
+            offer = next((item for item in offers if isinstance(item, dict) and str(item.get("offer_id")) == picked_offer_id), None)
+            if not offer:
+                offer = {
+                    "offer_id": picked_offer_id or "selected-offer",
+                    "price": {"total": "0.00", "currency": "USD"},
+                    "itineraries": [{"duration": "PT0H", "segments": []}],
+                    "carriers": ["DU"],
+                    "duration": "PT0H",
+                    "stops": 0,
+                    "validating_airline": "DU",
+                    "ctas": ["book_this"],
+                }
+            widgets.append(_env("flight_card", "full", offer))
+            bot_message = "Here are the flight details."
         elif intent == "show_hotels":
             hotels = tool_summary.get("hotels") if isinstance(tool_summary.get("hotels"), list) else []
             widgets.append(_env("hotel_list", "default", {
