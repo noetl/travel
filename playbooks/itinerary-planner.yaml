@@ -1164,9 +1164,11 @@ workflow:
         result = {
             "thread_path": thread_path,
             "bot_message": bot_message,
+            "final_slot_state": slot_state,
             "widgets": safe_widgets,
             "first_widget": safe_widgets[0] if safe_widgets else _bot(bot_message or "Ready."),
             "second_widget": safe_widgets[1] if len(safe_widgets) > 1 else {},
+            "has_second_widget": len(safe_widgets) > 1,
             "calendar_events_path": events_path,
             "calendar_events": calendar_events,
             "first_calendar_event": calendar_events[0] if calendar_events else {},
@@ -1289,9 +1291,9 @@ workflow:
       spec: { mode: exclusive }
       arcs:
         - step: append_second_widget_event
-          when: "{{ render_widget_chat.second_widget.widget_type is defined }}"
+          when: "{{ render_widget_chat.has_second_widget | default(false) }}"
         - step: append_chat_event
-          when: "{{ render_widget_chat.second_widget.widget_type is not defined }}"
+          when: "{{ not (render_widget_chat.has_second_widget | default(false)) }}"
 
   - step: append_second_widget_event
     desc: Append the optional companion widget, such as calendar_view after itinerary_summary
@@ -1343,10 +1345,10 @@ workflow:
       kind: python
       input:
         thread_path: "{{ normalize_input.thread_path }}"
-        slot_state: "{{ normalize_tool_response.slot_state | default(extract_turn.slot_state) }}"
-        extraction: "{{ extract_turn }}"
-        widget: "{{ render_widget_chat.first_widget }}"
-        bot_message: "{{ render_widget_chat.bot_message }}"
+        slot_state: "{{ render_widget_chat.context.final_slot_state }}"
+        extraction: "{{ extract_turn.context }}"
+        widget: "{{ render_widget_chat.context.first_widget }}"
+        bot_message: "{{ render_widget_chat.context.bot_message }}"
       code: |
         result = {
             "status": "completed",
