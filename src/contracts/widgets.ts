@@ -569,6 +569,15 @@ export interface OrderConfirmationPayload {
     [k: string]: unknown;
   }[];
   ctas?: ('view_full' | 'new_search')[];
+  /**
+   * Duffel-issued documents for the order (itinerary receipt PDF, etc.). Each item has document_url that can be opened directly.
+   */
+  documents?: {
+    unique_identifier?: string;
+    type?: string;
+    document_url?: string;
+    [k: string]: unknown;
+  }[];
 }
 
 
