@@ -320,6 +320,7 @@ workflow:
         globals().update({"lowered_text": lowered_text})
         book_flight_now = False
         view_flight_now = False
+        view_order_now = False
         if event_type in ("user_widget_submit", "user_widget_cta_click"):
             submitted = _as_dict(payload.get("submitted_value") or payload.get("value"))
             action_id = str(payload.get("action_id") or submitted.get("action_id") or "").strip()
@@ -355,6 +356,11 @@ workflow:
             elif action_id.startswith("view_offer:"):
                 updates["picked_flight_offer_id"] = action_id.split(":", 1)[1] if ":" in action_id else action_id
                 view_flight_now = True
+            elif action_id.startswith("order:"):
+                # OrderConfirmation "View full order" CTA emits order:<order_id>;
+                # render the saved last_order without retriggering downstream
+                # search/booking branches.
+                view_order_now = True
             if "hotel" in action_id or submitted.get("hotel_id"):
                 updates["picked_hotel_id"] = submitted.get("hotel_id") or action_id.replace("pick_hotel:", "")
 
@@ -446,6 +452,8 @@ workflow:
             render_intent = {"kind": "show_flights"}
         elif picked_flight and view_flight_now:
             render_intent = {"kind": "flight_detail"}
+        elif picked_flight and view_order_now and next_state.get("order_id"):
+            render_intent = {"kind": "order_detail"}
         elif picked_flight and wants_order and not next_state.get("order_id"):
             tool_requests.append({
                 "tool": "mcp/duffel.create_order",
@@ -938,6 +946,9 @@ workflow:
             normalised_order = _order_payload(order)
             next_state["order_id"] = order.get("id")
             next_state["booking_reference"] = order.get("booking_reference") or order.get("bookingReference")
+            # Cache the normalised order so the OrderConfirmation
+            # "View full order" CTA can re-render without refetching.
+            next_state["last_order"] = normalised_order
 
         summary = {
             "call_id": call_id,
@@ -1297,6 +1308,21 @@ workflow:
                 "ctas": ["view_full", "new_search"],
             }))
             bot_message = "Your Duffel test order is confirmed."
+        elif intent == "order_detail":
+            # Re-render the cached order without refetching from Duffel; the
+            # widget already carries booking ref + price + passenger chips, and
+            # this avoids advancing the playbook into hotel search.
+            order = _as_dict(slot_state.get("last_order"))
+            widgets.append(_env("order_confirmation", "default", {
+                "order_id": order.get("order_id") or slot_state.get("order_id") or "order-pending",
+                "booking_reference": order.get("booking_reference") or slot_state.get("booking_reference") or "pending",
+                "total_amount": order.get("total_amount") or "0.00",
+                "total_currency": order.get("total_currency") or "USD",
+                "passengers": order.get("passengers") if isinstance(order.get("passengers"), list) else [],
+                "slices": order.get("slices") if isinstance(order.get("slices"), list) else [],
+                "ctas": ["new_search"],
+            }))
+            bot_message = "Here are the booking details."
         elif intent == "summary":
             calendar_events = _calendar_events()
             widgets.append(_env("itinerary_summary", "default", {
