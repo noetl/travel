@@ -1,14 +1,44 @@
-import { Alert, Box, Button, CircularProgress, Paper, Stack, TextField, Typography } from '@mui/material';
-import { useMemo, useRef, useState } from 'react';
+import AddCommentIcon from '@mui/icons-material/AddComment';
+import { Alert, Box, Button, CircularProgress, IconButton, Paper, Stack, TextField, Tooltip, Typography } from '@mui/material';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { WidgetEnvelope } from '../../contracts/widgets';
 import { cancelExecution, executePlaybook, getExecution } from '../../api/noetlClient';
 import { useMunoAuth } from '../../auth/MunoAuthProvider';
 import { WidgetRenderer } from '../WidgetRenderer';
-import type { SidebarView } from './Sidebar';
+import type { ChatHistorySummary, SidebarView } from './Sidebar';
 import type { WidgetEvent } from '../widgets/widgetUtils';
 
 const ITINERARY_PLAYBOOK = 'muno/playbooks/itinerary-planner';
+const THREAD_STORAGE_KEY = 'travel:current_thread_id';
+
+function mintThreadId(): string {
+  return `travel-ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function loadStoredThreadId(): string {
+  try {
+    const stored = window.localStorage.getItem(THREAD_STORAGE_KEY);
+    if (stored && stored.trim()) return stored;
+  } catch {
+    // localStorage unavailable (private mode, etc.) — fall through to a fresh id
+  }
+  const fresh = mintThreadId();
+  try {
+    window.localStorage.setItem(THREAD_STORAGE_KEY, fresh);
+  } catch {
+    /* ignore */
+  }
+  return fresh;
+}
+
+function clearStoredThreadId() {
+  try {
+    window.localStorage.removeItem(THREAD_STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
 
 type ChatMessage =
   | { id: string; role: 'user'; text: string; view: SidebarView }
@@ -233,10 +263,18 @@ async function waitForExecution(executionId: string, signal: AbortSignal): Promi
 
 export function ChatThread({
   activeView,
-  onSlotStateChange
+  onSlotStateChange,
+  onSummaryChange,
+  scrollToMessageId,
+  onScrollHandled,
+  onViewChange
 }: {
   activeView: SidebarView;
   onSlotStateChange?: (slotState: Record<string, unknown>) => void;
+  onSummaryChange?: (summary: ChatHistorySummary) => void;
+  scrollToMessageId?: string;
+  onScrollHandled?: () => void;
+  onViewChange?: (view: SidebarView) => void;
 }) {
   const { t } = useTranslation();
   const auth = useMunoAuth();
@@ -251,9 +289,11 @@ export function ChatThread({
   ]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | undefined>();
-  const threadId = useRef(`travel-ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
+  const threadId = useRef(loadStoredThreadId());
   const activeRequest = useRef<AbortController | null>(null);
   const activeExecutionId = useRef<string | undefined>();
+  const messageRefs = useRef(new Map<string, HTMLDivElement>());
+  const [highlightedId, setHighlightedId] = useState<string | undefined>();
 
   const visibleMessages = useMemo(
     () =>
@@ -262,6 +302,83 @@ export function ChatThread({
         : messages,
     [activeView, messages]
   );
+
+  // Derive the sidebar history summary from current messages.
+  const summary = useMemo<ChatHistorySummary>(() => {
+    const orders: ChatHistorySummary['orders'] = [];
+    const searches: ChatHistorySummary['searches'] = [];
+    for (const message of messages) {
+      if (message.role !== 'assistant' || !('envelope' in message) || !message.envelope) continue;
+      const widgetType = message.envelope.widget_type;
+      const payload = (message.envelope.payload || {}) as Record<string, unknown>;
+      if (widgetType === 'order_confirmation') {
+        const ref = String(payload.booking_reference || payload.order_id || 'order');
+        const amount = payload.total_amount ? `${payload.total_currency || ''} ${payload.total_amount}`.trim() : '';
+        orders.push({
+          id: message.id,
+          label: `Booking ${ref}`,
+          subtitle: amount,
+          widgetType
+        });
+      } else if (widgetType === 'flight_list' || widgetType === 'flight_card') {
+        const count = Array.isArray(payload.items) ? `${payload.items.length} options` : 'flight';
+        searches.push({ id: message.id, label: 'Flights', subtitle: count, widgetType });
+      } else if (widgetType === 'hotel_list' || widgetType === 'hotel_card') {
+        const count = Array.isArray(payload.items) ? `${payload.items.length} stays` : 'hotels';
+        searches.push({ id: message.id, label: 'Hotels', subtitle: count, widgetType });
+      } else if (widgetType === 'place_list' || widgetType === 'place_card') {
+        const count = Array.isArray(payload.items) ? `${payload.items.length} places` : 'places';
+        searches.push({ id: message.id, label: 'Places', subtitle: count, widgetType });
+      } else if (widgetType === 'itinerary_summary') {
+        searches.push({ id: message.id, label: 'Itinerary summary', subtitle: '', widgetType });
+      } else if (widgetType === 'calendar_view') {
+        searches.push({ id: message.id, label: 'Calendar', subtitle: '', widgetType });
+      }
+    }
+    return { searches, orders, threadId: threadId.current };
+  }, [messages]);
+
+  useEffect(() => {
+    onSummaryChange?.(summary);
+  }, [onSummaryChange, summary]);
+
+  // Scroll to the requested message and highlight it briefly.
+  useEffect(() => {
+    if (!scrollToMessageId) return;
+    const node = messageRefs.current.get(scrollToMessageId);
+    if (node) {
+      node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightedId(scrollToMessageId);
+      const timer = window.setTimeout(() => setHighlightedId(undefined), 1500);
+      onScrollHandled?.();
+      return () => window.clearTimeout(timer);
+    }
+    onScrollHandled?.();
+    return undefined;
+  }, [scrollToMessageId, onScrollHandled]);
+
+  const startNewSearch = () => {
+    if (submitting) {
+      activeRequest.current?.abort();
+      activeRequest.current = null;
+      activeExecutionId.current = undefined;
+      setSubmitting(false);
+    }
+    clearStoredThreadId();
+    threadId.current = loadStoredThreadId();
+    setMessages([
+      {
+        id: 'hello-' + threadId.current,
+        role: 'assistant',
+        text: 'Hello from Muno. Tell me where you want to go, and I will build a test-mode itinerary.',
+        view: 'searches'
+      }
+    ]);
+    setError(undefined);
+    setInput('');
+    onSlotStateChange?.({});
+    onViewChange?.('searches');
+  };
 
   const runTurn = async (eventType: string, eventPayload: Record<string, unknown>, userText?: string) => {
     const controller = new AbortController();
@@ -350,15 +467,44 @@ export function ChatThread({
 
   return (
     <Box sx={{ display: 'grid', gridTemplateRows: 'auto 1fr auto', minWidth: 0 }}>
-      <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
+      <Stack
+        direction="row"
+        alignItems="center"
+        justifyContent="space-between"
+        sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}
+      >
         <Typography variant="h6">{activeView === 'orders' ? 'Orders' : 'Muno trip planner'}</Typography>
-      </Box>
+        <Tooltip title="Start a new search (clears current thread)">
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<AddCommentIcon />}
+            onClick={startNewSearch}
+          >
+            New search
+          </Button>
+        </Tooltip>
+      </Stack>
       <Box sx={{ overflow: 'auto', p: 2, display: 'grid', gap: 1.5, alignContent: 'start' }}>
         {activeView === 'orders' && visibleMessages.length === 0 ? (
           <Alert severity="info">No orders yet. Pick a flight and place a Duffel test order to see it here.</Alert>
         ) : null}
         {visibleMessages.map((message) => (
-          <Stack key={message.id} spacing={1} alignItems={message.role === 'user' ? 'flex-end' : 'flex-start'}>
+          <Stack
+            key={message.id}
+            ref={(node) => {
+              if (node) messageRefs.current.set(message.id, node);
+              else messageRefs.current.delete(message.id);
+            }}
+            spacing={1}
+            alignItems={message.role === 'user' ? 'flex-end' : 'flex-start'}
+            sx={{
+              transition: 'background-color 400ms ease',
+              borderRadius: 1.5,
+              p: highlightedId === message.id ? 1 : 0,
+              bgcolor: highlightedId === message.id ? 'action.hover' : 'transparent'
+            }}
+          >
             <Paper
               elevation={message.role === 'user' ? 2 : 0}
               sx={{
