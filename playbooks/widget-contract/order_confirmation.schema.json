@@ -50,19 +50,19 @@
     },
     "documents": {
       "type": "array",
-      "description": "Duffel-issued documents for the order (itinerary receipt PDF, etc.). Each item has document_url that can be opened directly.",
+      "description": "Duffel-issued documents for the order (itinerary receipt PDF, etc.). Each item has a document_url that can be opened directly. Duffel test environment may emit entries with null document_url; the Duffel MCP filters those out, but the schema tolerates null as a defensive measure.",
       "items": {
         "type": "object",
         "additionalProperties": true,
         "properties": {
           "unique_identifier": {
-            "type": "string"
+            "type": ["string", "null"]
           },
           "type": {
-            "type": "string"
+            "type": ["string", "null"]
           },
           "document_url": {
-            "type": "string"
+            "type": ["string", "null"]
           }
         }
       }
