@@ -570,12 +570,12 @@ export interface OrderConfirmationPayload {
   }[];
   ctas?: ('view_full' | 'new_search')[];
   /**
-   * Duffel-issued documents for the order (itinerary receipt PDF, etc.). Each item has document_url that can be opened directly.
+   * Duffel-issued documents for the order (itinerary receipt PDF, etc.). Each item has a document_url that can be opened directly. Duffel test environment may emit entries with null document_url; the Duffel MCP filters those out, but the schema tolerates null as a defensive measure.
    */
   documents?: {
-    unique_identifier?: string;
-    type?: string;
-    document_url?: string;
+    unique_identifier?: string | null;
+    type?: string | null;
+    document_url?: string | null;
     [k: string]: unknown;
   }[];
 }
