@@ -1,9 +1,9 @@
 import { Alert, Box, Button, CircularProgress, Stack, Typography } from '@mui/material';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Route, Routes } from 'react-router-dom';
 import { AuthCallback } from './auth/AuthCallback';
 import { useMunoAuth } from './auth/MunoAuthProvider';
-import { Sidebar, type SidebarView } from './components/shell/Sidebar';
+import { Sidebar, type ChatHistorySummary, type SidebarView } from './components/shell/Sidebar';
 import { ChatThread } from './components/shell/ChatThread';
 import { RightPane } from './components/shell/RightPane';
 
@@ -22,10 +22,29 @@ function mergeSlotState(
 function Shell() {
   const [activeView, setActiveView] = useState<SidebarView>('searches');
   const [slotState, setSlotState] = useState<Record<string, unknown>>({});
+  const [summary, setSummary] = useState<ChatHistorySummary>({ searches: [], orders: [] });
+  const [scrollToMessageId, setScrollToMessageId] = useState<string | undefined>();
+
+  const handleSlotChange = useCallback((next: Record<string, unknown>) => {
+    setSlotState((current) => mergeSlotState(current, next));
+  }, []);
+
   return (
     <Box sx={{ display: 'grid', gridTemplateColumns: '280px minmax(0, 1fr) 360px', minHeight: '100vh' }}>
-      <Sidebar activeView={activeView} onViewChange={setActiveView} />
-      <ChatThread activeView={activeView} onSlotStateChange={(next) => setSlotState((current) => mergeSlotState(current, next))} />
+      <Sidebar
+        activeView={activeView}
+        onViewChange={setActiveView}
+        summary={summary}
+        onSelectHistoryItem={(item) => setScrollToMessageId(item.id)}
+      />
+      <ChatThread
+        activeView={activeView}
+        onSlotStateChange={handleSlotChange}
+        onSummaryChange={setSummary}
+        scrollToMessageId={scrollToMessageId}
+        onScrollHandled={() => setScrollToMessageId(undefined)}
+        onViewChange={setActiveView}
+      />
       <RightPane slotState={slotState} />
     </Box>
   );
