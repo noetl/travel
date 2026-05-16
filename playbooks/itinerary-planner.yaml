@@ -1396,8 +1396,19 @@ workflow:
             ctx.second_calendar_event: "{{ render_widget_chat.second_calendar_event }}"
             ctx.third_calendar_event: "{{ render_widget_chat.third_calendar_event }}"
             ctx.fourth_calendar_event: "{{ render_widget_chat.fourth_calendar_event }}"
+            ctx.first_widget: "{{ render_widget_chat.first_widget }}"
+            ctx.second_widget: "{{ render_widget_chat.second_widget }}"
+            ctx.has_second_widget: "{{ render_widget_chat.has_second_widget | default(false) }}"
+            ctx.bot_message: "{{ render_widget_chat.bot_message }}"
+            ctx.final_slot_state: "{{ render_widget_chat.final_slot_state }}"
         - step: append_widget_event
           when: "{{ render_widget_chat.first_calendar_event.event_id is not defined }}"
+          set:
+            ctx.first_widget: "{{ render_widget_chat.first_widget }}"
+            ctx.second_widget: "{{ render_widget_chat.second_widget }}"
+            ctx.has_second_widget: "{{ render_widget_chat.has_second_widget | default(false) }}"
+            ctx.bot_message: "{{ render_widget_chat.bot_message }}"
+            ctx.final_slot_state: "{{ render_widget_chat.final_slot_state }}"
 
   - step: persist_calendar_event_1
     desc: Write first calendar event document when this turn produced one
@@ -1499,15 +1510,15 @@ workflow:
           event:
             type: agent_widget_emit
             payload:
-              envelope: "{{ render_widget_chat.first_widget }}"
+              envelope: "{{ ctx.first_widget }}"
             actor: { kind: agent, name: muno-itinerary-planner }
     next:
       spec: { mode: exclusive }
       arcs:
         - step: append_second_widget_event
-          when: "{{ render_widget_chat.has_second_widget | default(false) }}"
+          when: "{{ ctx.has_second_widget | default(false) }}"
         - step: append_chat_event
-          when: "{{ not (render_widget_chat.has_second_widget | default(false)) }}"
+          when: "{{ not (ctx.has_second_widget | default(false)) }}"
 
   - step: append_second_widget_event
     desc: Append the optional companion widget, such as calendar_view after itinerary_summary
@@ -1524,7 +1535,7 @@ workflow:
           event:
             type: agent_widget_emit
             payload:
-              envelope: "{{ render_widget_chat.second_widget }}"
+              envelope: "{{ ctx.second_widget }}"
             actor: { kind: agent, name: muno-itinerary-planner }
     next:
       spec: { mode: exclusive }
@@ -1546,7 +1557,7 @@ workflow:
           event:
             type: agent_chat
             payload:
-              text: "{{ render_widget_chat.bot_message }}"
+              text: "{{ ctx.bot_message }}"
             actor: { kind: agent, name: muno-itinerary-planner }
     next:
       spec: { mode: exclusive }
@@ -1559,10 +1570,10 @@ workflow:
       kind: python
       input:
         thread_path: "{{ normalize_input.thread_path }}"
-        slot_state: "{{ render_widget_chat.context.final_slot_state }}"
+        slot_state: "{{ ctx.final_slot_state }}"
         extraction: "{{ extract_turn.context }}"
-        widget: "{{ render_widget_chat.context.first_widget }}"
-        bot_message: "{{ render_widget_chat.context.bot_message }}"
+        widget: "{{ ctx.first_widget }}"
+        bot_message: "{{ ctx.bot_message }}"
         request_id: "{{ workload.request_id | default('') }}"
         gateway_url: "{{ workload.gateway_url | default('') }}"
       code: |
