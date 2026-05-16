@@ -397,7 +397,7 @@ workflow:
                     "born_on": "1988-01-01",
                     "gender": "m" if idx % 2 == 0 else "f",
                     "email": "test@example.com",
-                    "phone_number": "+15555550100",
+                    "phone_number": "+442080168000",
                 })
             for idx, child in enumerate(children):
                 age = child.get("age") if isinstance(child, dict) else None
@@ -411,7 +411,7 @@ workflow:
                     "born_on": f"{birth_year}-01-01",
                     "gender": "f" if idx % 2 == 0 else "m",
                     "email": "test@example.com",
-                    "phone_number": "+15555550100",
+                    "phone_number": "+442080168000",
                 })
             return passengers
 
@@ -1389,6 +1389,13 @@ workflow:
       arcs:
         - step: persist_calendar_event_1
           when: "{{ render_widget_chat.first_calendar_event.event_id is defined }}"
+          set:
+            ctx.calendar_event_count: "{{ render_widget_chat.calendar_events | length }}"
+            ctx.calendar_events_path: "{{ render_widget_chat.calendar_events_path }}"
+            ctx.first_calendar_event: "{{ render_widget_chat.first_calendar_event }}"
+            ctx.second_calendar_event: "{{ render_widget_chat.second_calendar_event }}"
+            ctx.third_calendar_event: "{{ render_widget_chat.third_calendar_event }}"
+            ctx.fourth_calendar_event: "{{ render_widget_chat.fourth_calendar_event }}"
         - step: append_widget_event
           when: "{{ render_widget_chat.first_calendar_event.event_id is not defined }}"
 
@@ -1403,16 +1410,16 @@ workflow:
         tool: set_doc
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          path: "{{ render_widget_chat.calendar_events_path }}/{{ render_widget_chat.first_calendar_event.event_id }}"
-          data: "{{ render_widget_chat.first_calendar_event }}"
+          path: "{{ ctx.calendar_events_path }}/{{ ctx.first_calendar_event.event_id }}"
+          data: "{{ ctx.first_calendar_event }}"
           merge: false
     next:
       spec: { mode: exclusive }
       arcs:
         - step: persist_calendar_event_2
-          when: "{{ render_widget_chat.second_calendar_event.event_id is defined }}"
+          when: "{{ ctx.calendar_event_count > 1 }}"
         - step: append_widget_event
-          when: "{{ render_widget_chat.second_calendar_event.event_id is not defined }}"
+          when: "{{ ctx.calendar_event_count <= 1 }}"
 
   - step: persist_calendar_event_2
     desc: Write second calendar event document when this turn produced one
@@ -1425,16 +1432,16 @@ workflow:
         tool: set_doc
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          path: "{{ render_widget_chat.calendar_events_path }}/{{ render_widget_chat.second_calendar_event.event_id }}"
-          data: "{{ render_widget_chat.second_calendar_event }}"
+          path: "{{ ctx.calendar_events_path }}/{{ ctx.second_calendar_event.event_id }}"
+          data: "{{ ctx.second_calendar_event }}"
           merge: false
     next:
       spec: { mode: exclusive }
       arcs:
         - step: persist_calendar_event_3
-          when: "{{ render_widget_chat.third_calendar_event.event_id is defined }}"
+          when: "{{ ctx.calendar_event_count > 2 }}"
         - step: append_widget_event
-          when: "{{ render_widget_chat.third_calendar_event.event_id is not defined }}"
+          when: "{{ ctx.calendar_event_count <= 2 }}"
 
   - step: persist_calendar_event_3
     desc: Write third calendar event document when this turn produced one
@@ -1447,16 +1454,16 @@ workflow:
         tool: set_doc
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          path: "{{ render_widget_chat.calendar_events_path }}/{{ render_widget_chat.third_calendar_event.event_id }}"
-          data: "{{ render_widget_chat.third_calendar_event }}"
+          path: "{{ ctx.calendar_events_path }}/{{ ctx.third_calendar_event.event_id }}"
+          data: "{{ ctx.third_calendar_event }}"
           merge: false
     next:
       spec: { mode: exclusive }
       arcs:
         - step: persist_calendar_event_4
-          when: "{{ render_widget_chat.fourth_calendar_event.event_id is defined }}"
+          when: "{{ ctx.calendar_event_count > 3 }}"
         - step: append_widget_event
-          when: "{{ render_widget_chat.fourth_calendar_event.event_id is not defined }}"
+          when: "{{ ctx.calendar_event_count <= 3 }}"
 
   - step: persist_calendar_event_4
     desc: Write fourth calendar event document when this turn produced one
@@ -1469,8 +1476,8 @@ workflow:
         tool: set_doc
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          path: "{{ render_widget_chat.calendar_events_path }}/{{ render_widget_chat.fourth_calendar_event.event_id }}"
-          data: "{{ render_widget_chat.fourth_calendar_event }}"
+          path: "{{ ctx.calendar_events_path }}/{{ ctx.fourth_calendar_event.event_id }}"
+          data: "{{ ctx.fourth_calendar_event }}"
           merge: false
     next:
       spec: { mode: exclusive }
