@@ -47,6 +47,25 @@
           "new_search"
         ]
       }
+    },
+    "documents": {
+      "type": "array",
+      "description": "Duffel-issued documents for the order (itinerary receipt PDF, etc.). Each item has document_url that can be opened directly.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "unique_identifier": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "document_url": {
+            "type": "string"
+          }
+        }
+      }
     }
   }
 }

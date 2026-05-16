@@ -855,6 +855,7 @@ workflow:
                 "total_currency": str(order.get("total_currency") or order.get("base_currency") or "USD"),
                 "passengers": order.get("passengers") if isinstance(order.get("passengers"), list) else [],
                 "slices": order.get("slices") if isinstance(order.get("slices"), list) else [],
+                "documents": order.get("documents") if isinstance(order.get("documents"), list) else [],
                 "ctas": ["view_full", "new_search"],
             }
 
@@ -1305,13 +1306,15 @@ workflow:
                 "total_currency": order.get("total_currency") or "USD",
                 "passengers": order.get("passengers") if isinstance(order.get("passengers"), list) else [],
                 "slices": order.get("slices") if isinstance(order.get("slices"), list) else [],
+                "documents": order.get("documents") if isinstance(order.get("documents"), list) else [],
                 "ctas": ["view_full", "new_search"],
             }))
             bot_message = "Your Duffel test order is confirmed."
         elif intent == "order_detail":
-            # Re-render the cached order without refetching from Duffel; the
-            # widget already carries booking ref + price + passenger chips, and
-            # this avoids advancing the playbook into hotel search.
+            # Back-compat: re-render the cached order without refetching from
+            # Duffel. Newer travel UI handles View full order as a client-side
+            # expand on the original widget, so this path mainly exists for
+            # clients that still emit the order:<id> CTA event.
             order = _as_dict(slot_state.get("last_order"))
             widgets.append(_env("order_confirmation", "default", {
                 "order_id": order.get("order_id") or slot_state.get("order_id") or "order-pending",
@@ -1320,6 +1323,7 @@ workflow:
                 "total_currency": order.get("total_currency") or "USD",
                 "passengers": order.get("passengers") if isinstance(order.get("passengers"), list) else [],
                 "slices": order.get("slices") if isinstance(order.get("slices"), list) else [],
+                "documents": order.get("documents") if isinstance(order.get("documents"), list) else [],
                 "ctas": ["new_search"],
             }))
             bot_message = "Here are the booking details."
