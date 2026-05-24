@@ -37,13 +37,12 @@ The itinerary agent writes event documents after confirmation-style turns:
 When the agent emits `itinerary_summary`, it also emits `calendar_view` with a
 static `display_events` snapshot. When the user asks for the schedule, the
 agent emits `calendar_view` with `events_path` so the frontend subscribes live
-through the Firebase JS SDK.
+through the gateway subscription API.
 
-Live mode requires the frontend build to provide Firebase web config through
-`VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, and
-`VITE_FIREBASE_PROJECT_ID`. If those variables are absent, the component
-renders safely with the configured empty state instead of attempting a network
-read.
+Live mode requires a gateway session. The browser calls
+`POST /api/subscriptions/firestore`, then receives `subscription/event` frames
+over the existing `/events` stream. The browser does not hold Firebase web
+configuration and does not connect to Firestore directly.
 
 ## Roadmap
 

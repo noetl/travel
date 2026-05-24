@@ -3,7 +3,7 @@ import { Alert, Box, Button, CircularProgress, IconButton, Paper, Stack, TextFie
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { WidgetEnvelope } from '../../contracts/widgets';
-import { cancelExecution, executePlaybook, getExecution } from '../../api/noetlClient';
+import { cancelExecution, executePlaybook, getExecution, waitForExecutionCompletion } from '../../api/noetlClient';
 import { useMunoAuth } from '../../auth/MunoAuthProvider';
 import { WidgetRenderer } from '../WidgetRenderer';
 import type { ChatHistorySummary, SidebarView } from './Sidebar';
@@ -232,33 +232,26 @@ function slotStateFromWidgetEvent(event: WidgetEvent): Record<string, unknown> |
   return undefined;
 }
 
-function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  return new Promise((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => {
-      signal.removeEventListener('abort', abort);
-      resolve();
-    }, ms);
-    const abort = () => {
-      window.clearTimeout(timeoutId);
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    signal.addEventListener('abort', abort, { once: true });
-  });
-}
-
 async function waitForExecution(executionId: string, signal: AbortSignal): Promise<unknown> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    await abortableDelay(1500, signal);
+  try {
+    const state = await waitForExecutionCompletion(executionId, signal);
     const execution = await getExecution(executionId, signal);
     const status = String((execution as Record<string, unknown>)?.status || '').toLowerCase();
-    if (status === 'completed' || status === 'succeeded') return execution;
+    if (state.event_type === 'playbook.failed' || status === 'failed' || status === 'error' || status === 'cancelled') {
+      if (hasFinalPayload(execution)) return execution;
+      throw new Error(extractExecutionError(execution, executionId, status || 'failed'));
+    }
+    return execution;
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    const execution = await getExecution(executionId, signal);
+    const status = String((execution as Record<string, unknown>)?.status || '').toLowerCase();
     if (status === 'failed' || status === 'error' || status === 'cancelled') {
       if (hasFinalPayload(execution)) return execution;
       throw new Error(extractExecutionError(execution, executionId, status));
     }
+    return execution;
   }
-  throw new Error(`Execution ${executionId} did not complete in time`);
 }
 
 export function ChatThread({

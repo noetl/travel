@@ -5,6 +5,7 @@ let sessionExpiredHandler: (() => void) | undefined;
 let eventSource: EventSource | null = null;
 let sseConnected = false;
 let clientId: string | null = null;
+const sseListeners = new Map<string, Set<(event: MessageEvent) => void>>();
 const pendingCallbacks = new Map<
   string,
   {
@@ -13,11 +14,26 @@ const pendingCallbacks = new Map<
     timeoutId: number;
   }
 >();
+const pendingExecutionStates = new Map<
+  string,
+  {
+    resolve: (value: PlaybookStateEvent) => void;
+    reject: (error: Error) => void;
+    timeoutId?: number;
+  }
+>();
 const SSE_TIMEOUT_MS = 10_000;
 const CALLBACK_TIMEOUT_MS = 120_000;
-// Stopgap until the gateway emits playbook/state updates over SSE and the
-// polling fallback can trust execution lifecycle pushes instead.
-const CALLBACK_GRACE_MS = 30_000;
+const SSE_DROP_GRACE_MS = 15_000;
+
+export interface PlaybookStateEvent {
+  execution_id: string;
+  event_type: string;
+  step_name?: string;
+  status?: string;
+  at?: string;
+  error?: unknown;
+}
 
 export const noetlClient = axios.create({
   baseURL: getGatewayApiBaseUrl(),
@@ -53,10 +69,6 @@ export function setSessionExpiredHandler(handler?: () => void) {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
-}
-
-function isCallbackTimeout(error: unknown): boolean {
-  return error instanceof Error && error.message === 'Playbook callback timed out';
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -114,6 +126,36 @@ function handlePlaybookResult(message: unknown) {
   });
 }
 
+function handlePlaybookState(message: unknown) {
+  const params = ((message as Record<string, unknown>)?.params || {}) as Record<string, unknown>;
+  const executionId = String(params.execution_id || params.executionId || '').trim();
+  const eventType = String(params.event_type || params.eventType || '').trim();
+  if (!executionId || !eventType) return;
+  if (eventType !== 'playbook.completed' && eventType !== 'playbook.failed') return;
+
+  const pending = pendingExecutionStates.get(executionId);
+  if (!pending) return;
+
+  pendingExecutionStates.delete(executionId);
+  if (pending.timeoutId !== undefined) window.clearTimeout(pending.timeoutId);
+  pending.resolve({
+    execution_id: executionId,
+    event_type: eventType,
+    step_name: typeof params.step_name === 'string' ? params.step_name : undefined,
+    status: typeof params.status === 'string' ? params.status : undefined,
+    at: typeof params.at === 'string' ? params.at : undefined,
+    error: params.error
+  });
+}
+
+function attachRegisteredListeners(source: EventSource) {
+  for (const [eventName, listeners] of sseListeners) {
+    for (const listener of listeners) {
+      source.addEventListener(eventName, listener as EventListener);
+    }
+  }
+}
+
 function connectSSE(token: string): void {
   if (eventSource) {
     eventSource.close();
@@ -124,6 +166,7 @@ function connectSSE(token: string): void {
     `${getGatewayBaseUrl()}/events?session_token=${encodeURIComponent(token)}` +
     (clientId ? `&client_id=${encodeURIComponent(clientId)}` : '');
   eventSource = new EventSource(url);
+  attachRegisteredListeners(eventSource);
 
   eventSource.addEventListener('message', (event) => {
     try {
@@ -145,13 +188,52 @@ function connectSSE(token: string): void {
     }
   });
 
+  eventSource.addEventListener('playbook/state', (event) => {
+    try {
+      handlePlaybookState(JSON.parse(event.data));
+    } catch {
+      // Ignore malformed lifecycle frames.
+    }
+  });
+
   eventSource.onerror = () => {
     sseConnected = false;
+    for (const [executionId, pending] of pendingExecutionStates) {
+      if (pending.timeoutId !== undefined) window.clearTimeout(pending.timeoutId);
+      const timeoutId = window.setTimeout(() => {
+        pendingExecutionStates.delete(executionId);
+        pending.reject(new Error('Gateway lifecycle stream disconnected'));
+      }, SSE_DROP_GRACE_MS);
+      pendingExecutionStates.set(executionId, { ...pending, timeoutId });
+    }
+  };
+}
+
+export async function ensureGatewaySSE(signal?: AbortSignal): Promise<{ token: string; clientId: string }> {
+  const token = getStoredSession()?.token;
+  if (!token) throw new Error('Sign in is required before subscribing to gateway events');
+  await waitForSSEConnection(token, signal);
+  if (!clientId) throw new Error('Gateway callback connection did not return a client id');
+  return { token, clientId };
+}
+
+export function addGatewaySSEListener(eventName: string, listener: (event: MessageEvent) => void): () => void {
+  const listeners = sseListeners.get(eventName) || new Set();
+  listeners.add(listener);
+  sseListeners.set(eventName, listeners);
+  eventSource?.addEventListener(eventName, listener as EventListener);
+
+  return () => {
+    listeners.delete(listener);
+    if (!listeners.size) {
+      sseListeners.delete(eventName);
+    }
+    eventSource?.removeEventListener(eventName, listener as EventListener);
   };
 }
 
 async function waitForSSEConnection(token: string, signal?: AbortSignal): Promise<void> {
-  if (sseConnected && eventSource?.readyState === EventSource.OPEN) return;
+  if (sseConnected && eventSource?.readyState === EventSource.OPEN && clientId) return;
   throwIfAborted(signal);
 
   return new Promise((resolve, reject) => {
@@ -166,7 +248,7 @@ async function waitForSSEConnection(token: string, signal?: AbortSignal): Promis
     };
 
     const intervalId = window.setInterval(() => {
-      if (sseConnected && eventSource?.readyState === EventSource.OPEN) {
+      if (sseConnected && eventSource?.readyState === EventSource.OPEN && clientId) {
         unsubscribe();
         resolve();
       }
@@ -180,6 +262,27 @@ async function waitForSSEConnection(token: string, signal?: AbortSignal): Promis
 
     signal?.addEventListener('abort', abort, { once: true });
     connectSSE(token);
+  });
+}
+
+export async function waitForExecutionCompletion(executionId: string, signal?: AbortSignal): Promise<PlaybookStateEvent> {
+  throwIfAborted(signal);
+  await ensureGatewaySSE(signal);
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      const pending = pendingExecutionStates.get(executionId);
+      if (pending) {
+        window.clearTimeout(pending.timeoutId);
+        pendingExecutionStates.delete(executionId);
+      }
+      signal?.removeEventListener('abort', abort);
+    };
+    const abort = () => {
+      cleanup();
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    pendingExecutionStates.set(executionId, { resolve, reject });
+    signal?.addEventListener('abort', abort, { once: true });
   });
 }
 
@@ -301,13 +404,13 @@ async function executeViaGatewayGraphQL(path: string, workload: Record<string, u
   if (execution.requestId) {
     const requestId = String(execution.requestId);
     const executionId = getExecutionId(execution);
+    if (executionId) {
+      return callbackFallback(execution, requestId);
+    }
     try {
-      return await waitForPlaybookCallback(requestId, signal, executionId ? CALLBACK_GRACE_MS : CALLBACK_TIMEOUT_MS);
+      return await waitForPlaybookCallback(requestId, signal, CALLBACK_TIMEOUT_MS);
     } catch (error) {
       if (isAbortError(error)) throw error;
-      if (executionId && isCallbackTimeout(error)) {
-        return callbackFallback(execution, requestId);
-      }
       throw error;
     }
   }
