@@ -15,7 +15,9 @@ const pendingCallbacks = new Map<
 >();
 const SSE_TIMEOUT_MS = 10_000;
 const CALLBACK_TIMEOUT_MS = 120_000;
-const CALLBACK_GRACE_MS = 8_000;
+// Stopgap until the gateway emits playbook/state updates over SSE and the
+// polling fallback can trust execution lifecycle pushes instead.
+const CALLBACK_GRACE_MS = 30_000;
 
 export const noetlClient = axios.create({
   baseURL: getGatewayApiBaseUrl(),
