@@ -120,24 +120,6 @@ workflow:
     next:
       spec: { mode: exclusive }
       arcs:
-        - step: append_input_event
-
-  - step: append_input_event
-    desc: Append the user input event through mcp/firestore.append_event
-    tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: append_event
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          thread_path: "{{ normalize_input.thread_path }}"
-          event: "{{ normalize_input.input_event }}"
-    next:
-      spec: { mode: exclusive }
-      arcs:
         - step: load_slot_state
 
   - step: load_slot_state
@@ -165,6 +147,8 @@ workflow:
         thread_path: "{{ normalize_input.thread_path }}"
         event_type: "{{ workload.event_type | default('user_message') }}"
         event_payload: "{{ workload.event_payload | default({}) }}"
+        input_event: "{{ normalize_input.input_event }}"
+        user_uid: "{{ workload.user_uid | default('guest') }}"
         loaded_slot_state: "{{ load_slot_state.data | default({}) }}"
         ai_provider: "{{ workload.ai_provider | default('openai') }}"
         llm_extraction_model: "{{ workload.llm_extraction_model }}"
@@ -316,6 +300,15 @@ workflow:
             updates["party"] = party
 
         payload = _as_dict(event_payload)
+        input_event = _as_dict(input_event)
+        if not input_event:
+            input_event = {
+                "type": str(event_type or "user_message"),
+                "payload": payload,
+                "actor": {"kind": "user", "uid": user_uid or "guest"},
+                "created_at_ms": int(datetime.now(timezone.utc).timestamp() * 1000),
+                "source": "muno.itinerary_planner",
+            }
         lowered_text = text.lower()
         globals().update({"lowered_text": lowered_text})
         book_flight_now = False
@@ -482,6 +475,43 @@ workflow:
             render_intent = {"kind": "calendar_live"}
 
         first_tool = tool_requests[0] if tool_requests else {}
+        call_id = f"call_{uuid.uuid4().hex[:12]}"
+        llm_contract = {
+            "provider": ai_provider,
+            "model": llm_extraction_model,
+            "temperature": 0,
+            "response_format": "json_object",
+            "fallback_used": True,
+        }
+        turn_events = [
+            {"thread_path": thread_path, "event": input_event},
+            {
+                "thread_path": thread_path,
+                "event": {
+                    "type": "agent_slot_update",
+                    "payload": {
+                        "changes": updates,
+                        "slot_state": next_state,
+                        "llm_contract": llm_contract,
+                    },
+                    "actor": {"kind": "agent", "name": "muno-itinerary-planner"},
+                },
+            },
+        ]
+        if first_tool.get("tool"):
+            turn_events.append({
+                "thread_path": thread_path,
+                "event": {
+                    "type": "agent_tool_call",
+                    "payload": {
+                        "call_id": call_id,
+                        "tool": first_tool.get("tool", ""),
+                        "arguments": first_tool.get("arguments", {}),
+                    },
+                    "actor": {"kind": "agent", "name": "muno-itinerary-planner"},
+                },
+            })
+
         result = {
             "thread_path": thread_path,
             "slot_updates": updates,
@@ -492,87 +522,51 @@ workflow:
             "first_tool": first_tool.get("tool", ""),
             "first_tool_arguments": first_tool.get("arguments", {}),
             "render_intent": render_intent,
-            "llm_contract": {
-                "provider": ai_provider,
-                "model": llm_extraction_model,
-                "temperature": 0,
-                "response_format": "json_object",
-                "fallback_used": True,
-            },
-            "call_id": f"call_{uuid.uuid4().hex[:12]}",
+            "llm_contract": llm_contract,
+            "call_id": call_id,
+            "turn_docs": [{
+                "path": f"{thread_path}/slot_state/current",
+                "doc": next_state,
+                "merge": False,
+            }],
+            "turn_events": turn_events,
             "json_str": json.dumps({"slot_updates": updates, "tool_requests": tool_requests, "render_intent": render_intent}, separators=(",", ":")),
         }
         globals().update({"result": result})
     next:
       spec: { mode: exclusive }
       arcs:
-        - step: persist_slot_state
+        - step: persist_turn_docs_atomically
 
-  - step: persist_slot_state
-    desc: Write the projected slot_state document
+  - step: persist_turn_docs_atomically
+    desc: Persist projected slot state in one batched Firestore MCP call
     tool:
       kind: agent
       framework: noetl
       entrypoint: automation/agents/mcp/firestore
       payload:
         method: tools/call
-        tool: set_doc
+        tool: batch_set_docs
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          path: "{{ normalize_input.thread_path }}/slot_state/current"
-          data: "{{ extract_turn.context.captured_slots }}"
-          merge: false
+          items: "{{ extract_turn.context.turn_docs }}"
     next:
       spec: { mode: exclusive }
       arcs:
-        - step: append_slot_update_event
+        - step: append_turn_events_atomically
 
-  - step: append_slot_update_event
-    desc: Append agent_slot_update when the turn changed projected slots
+  - step: append_turn_events_atomically
+    desc: Append input, slot update, and optional tool-call events in one batched Firestore MCP call
     tool:
       kind: agent
       framework: noetl
       entrypoint: automation/agents/mcp/firestore
       payload:
         method: tools/call
-        tool: append_event
+        tool: batch_append_events
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          thread_path: "{{ normalize_input.thread_path }}"
-          event:
-            type: agent_slot_update
-            payload:
-              changes: "{{ extract_turn.context.captured_changes }}"
-              slot_state: "{{ extract_turn.context.captured_slots }}"
-              llm_contract: "{{ extract_turn.context.llm_contract }}"
-            actor: { kind: agent, name: muno-itinerary-planner }
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: append_tool_call_event
-          when: "{{ extract_turn.context.first_tool != '' }}"
-        - step: render_widget_chat
-          when: "{{ extract_turn.context.first_tool == '' }}"
-
-  - step: append_tool_call_event
-    desc: Append agent_tool_call before dispatching to a tool MCP
-    tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: append_event
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          thread_path: "{{ normalize_input.thread_path }}"
-          event:
-            type: agent_tool_call
-            payload:
-              call_id: "{{ extract_turn.context.call_id }}"
-              tool: "{{ extract_turn.context.first_tool }}"
-              arguments: "{{ extract_turn.context.first_tool_arguments }}"
-            actor: { kind: agent, name: muno-itinerary-planner }
+          items: "{{ extract_turn.context.turn_events }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -584,6 +578,8 @@ workflow:
           when: "{{ extract_turn.context.first_tool == 'mcp/amadeus.search_hotels' }}"
         - step: call_duffel_create_order
           when: "{{ extract_turn.context.first_tool == 'mcp/duffel.create_order' }}"
+        - step: render_widget_chat
+          when: "{{ extract_turn.context.first_tool == '' }}"
 
   - step: call_google_places
     desc: Dispatch a Google Places text search through the MCP playbook
@@ -967,71 +963,9 @@ workflow:
             summary["hotels"] = normalised_hotels
         elif first_tool == "mcp/duffel.create_order":
             summary["order"] = normalised_order
+        summary["raw_response"] = envelope
         result = {"summary": summary, "slot_state": next_state, "raw": envelope}
         globals().update({"result": result})
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: persist_tool_slot_state
-
-  - step: persist_tool_slot_state
-    desc: Persist slot state updates inferred from the tool response
-    tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: set_doc
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          path: "{{ normalize_input.thread_path }}/slot_state/current"
-          data: "{{ normalize_tool_response.context.slot_state }}"
-          merge: false
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: persist_api_call
-
-  - step: persist_api_call
-    desc: Store full request/response replay fixture for the tool call
-    tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: set_doc
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          path: "{{ normalize_input.thread_path }}/api_calls/{{ extract_turn.context.call_id }}"
-          data:
-            call_id: "{{ extract_turn.context.call_id }}"
-            tool: "{{ extract_turn.context.first_tool }}"
-            arguments: "{{ extract_turn.context.first_tool_arguments }}"
-            response: "{{ normalize_tool_response.context.raw }}"
-          merge: false
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: append_tool_response_event
-
-  - step: append_tool_response_event
-    desc: Append agent_tool_response after dispatching
-    tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: append_event
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          thread_path: "{{ normalize_input.thread_path }}"
-          event:
-            type: agent_tool_response
-            payload: "{{ normalize_tool_response.context.summary }}"
-            actor: { kind: agent, name: muno-itinerary-planner }
     next:
       spec: { mode: exclusive }
       arcs:
@@ -1398,6 +1332,66 @@ workflow:
             else:
                 safe_widgets.append(item)
         calendar_events = _calendar_events()
+        post_docs = []
+        if isinstance(tool_summary, dict) and tool_summary.get("tool"):
+            post_docs.extend([
+                {"path": f"{thread_path}/slot_state/current", "doc": slot_state, "merge": False},
+                {
+                    "path": f"{thread_path}/api_calls/{tool_summary.get('call_id')}",
+                    "doc": {
+                        "call_id": tool_summary.get("call_id"),
+                        "tool": tool_summary.get("tool"),
+                        "arguments": extraction_context.get("first_tool_arguments") if isinstance(extraction_context, dict) else {},
+                        "response": tool_summary.get("raw_response", {}),
+                    },
+                    "merge": False,
+                },
+            ])
+        for event in calendar_events:
+            if isinstance(event, dict) and event.get("event_id"):
+                post_docs.append({
+                    "path": f"{events_path}/{event.get('event_id')}",
+                    "doc": event,
+                    "merge": False,
+                })
+
+        post_events = []
+        if isinstance(tool_summary, dict) and tool_summary.get("tool"):
+            post_events.append({
+                "thread_path": thread_path,
+                "event": {
+                    "type": "agent_tool_response",
+                    "payload": tool_summary,
+                    "actor": {"kind": "agent", "name": "muno-itinerary-planner"},
+                },
+            })
+        if safe_widgets:
+            post_events.append({
+                "thread_path": thread_path,
+                "event": {
+                    "type": "agent_widget_emit",
+                    "payload": {"envelope": safe_widgets[0]},
+                    "actor": {"kind": "agent", "name": "muno-itinerary-planner"},
+                },
+            })
+        if len(safe_widgets) > 1:
+            post_events.append({
+                "thread_path": thread_path,
+                "event": {
+                    "type": "agent_widget_emit",
+                    "payload": {"envelope": safe_widgets[1]},
+                    "actor": {"kind": "agent", "name": "muno-itinerary-planner"},
+                },
+            })
+        post_events.append({
+            "thread_path": thread_path,
+            "event": {
+                "type": "agent_chat",
+                "payload": {"text": bot_message},
+                "actor": {"kind": "agent", "name": "muno-itinerary-planner"},
+            },
+        })
+
         result = {
             "thread_path": thread_path,
             "bot_message": bot_message,
@@ -1412,183 +1406,62 @@ workflow:
             "second_calendar_event": calendar_events[1] if len(calendar_events) > 1 else {},
             "third_calendar_event": calendar_events[2] if len(calendar_events) > 2 else {},
             "fourth_calendar_event": calendar_events[3] if len(calendar_events) > 3 else {},
+            "post_docs": post_docs,
+            "post_events": post_events,
         }
         globals().update({"result": result})
     next:
       spec: { mode: exclusive }
       arcs:
-        - step: persist_calendar_event_1
-          when: "{{ render_widget_chat.first_calendar_event.event_id is defined }}"
-          set:
-            ctx.calendar_event_count: "{{ render_widget_chat.calendar_events | length }}"
-            ctx.calendar_events_path: "{{ render_widget_chat.calendar_events_path }}"
-            ctx.first_calendar_event: "{{ render_widget_chat.first_calendar_event }}"
-            ctx.second_calendar_event: "{{ render_widget_chat.second_calendar_event }}"
-            ctx.third_calendar_event: "{{ render_widget_chat.third_calendar_event }}"
-            ctx.fourth_calendar_event: "{{ render_widget_chat.fourth_calendar_event }}"
-            ctx.first_widget: "{{ render_widget_chat.first_widget }}"
-            ctx.second_widget: "{{ render_widget_chat.second_widget }}"
-            ctx.has_second_widget: "{{ render_widget_chat.has_second_widget | default(false) }}"
-            ctx.bot_message: "{{ render_widget_chat.bot_message }}"
-            ctx.final_slot_state: "{{ render_widget_chat.final_slot_state }}"
-        - step: append_widget_event
-          when: "{{ render_widget_chat.first_calendar_event.event_id is not defined }}"
+        - step: persist_render_docs_atomically
+          when: "{{ render_widget_chat.post_docs | length > 0 }}"
           set:
             ctx.first_widget: "{{ render_widget_chat.first_widget }}"
             ctx.second_widget: "{{ render_widget_chat.second_widget }}"
             ctx.has_second_widget: "{{ render_widget_chat.has_second_widget | default(false) }}"
             ctx.bot_message: "{{ render_widget_chat.bot_message }}"
             ctx.final_slot_state: "{{ render_widget_chat.final_slot_state }}"
+            ctx.post_docs: "{{ render_widget_chat.post_docs }}"
+            ctx.post_events: "{{ render_widget_chat.post_events }}"
+        - step: append_render_events_atomically
+          when: "{{ render_widget_chat.post_docs | length == 0 }}"
+          set:
+            ctx.first_widget: "{{ render_widget_chat.first_widget }}"
+            ctx.second_widget: "{{ render_widget_chat.second_widget }}"
+            ctx.has_second_widget: "{{ render_widget_chat.has_second_widget | default(false) }}"
+            ctx.bot_message: "{{ render_widget_chat.bot_message }}"
+            ctx.final_slot_state: "{{ render_widget_chat.final_slot_state }}"
+            ctx.post_events: "{{ render_widget_chat.post_events }}"
 
-  - step: persist_calendar_event_1
-    desc: Write first calendar event document when this turn produced one
+  - step: persist_render_docs_atomically
+    desc: Persist tool replay docs, final slot state, and calendar event docs in one batched Firestore MCP call
     tool:
       kind: agent
       framework: noetl
       entrypoint: automation/agents/mcp/firestore
       payload:
         method: tools/call
-        tool: set_doc
+        tool: batch_set_docs
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          path: "{{ ctx.calendar_events_path }}/{{ ctx.first_calendar_event.event_id }}"
-          data: "{{ ctx.first_calendar_event }}"
-          merge: false
+          items: "{{ ctx.post_docs }}"
     next:
       spec: { mode: exclusive }
       arcs:
-        - step: persist_calendar_event_2
-          when: "{{ ctx.calendar_event_count > 1 }}"
-        - step: append_widget_event
-          when: "{{ ctx.calendar_event_count <= 1 }}"
+        - step: append_render_events_atomically
 
-  - step: persist_calendar_event_2
-    desc: Write second calendar event document when this turn produced one
+  - step: append_render_events_atomically
+    desc: Append tool response, widget, optional companion widget, and chat events in one batched Firestore MCP call
     tool:
       kind: agent
       framework: noetl
       entrypoint: automation/agents/mcp/firestore
       payload:
         method: tools/call
-        tool: set_doc
+        tool: batch_append_events
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          path: "{{ ctx.calendar_events_path }}/{{ ctx.second_calendar_event.event_id }}"
-          data: "{{ ctx.second_calendar_event }}"
-          merge: false
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: persist_calendar_event_3
-          when: "{{ ctx.calendar_event_count > 2 }}"
-        - step: append_widget_event
-          when: "{{ ctx.calendar_event_count <= 2 }}"
-
-  - step: persist_calendar_event_3
-    desc: Write third calendar event document when this turn produced one
-    tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: set_doc
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          path: "{{ ctx.calendar_events_path }}/{{ ctx.third_calendar_event.event_id }}"
-          data: "{{ ctx.third_calendar_event }}"
-          merge: false
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: persist_calendar_event_4
-          when: "{{ ctx.calendar_event_count > 3 }}"
-        - step: append_widget_event
-          when: "{{ ctx.calendar_event_count <= 3 }}"
-
-  - step: persist_calendar_event_4
-    desc: Write fourth calendar event document when this turn produced one
-    tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: set_doc
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          path: "{{ ctx.calendar_events_path }}/{{ ctx.fourth_calendar_event.event_id }}"
-          data: "{{ ctx.fourth_calendar_event }}"
-          merge: false
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: append_widget_event
-
-  - step: append_widget_event
-    desc: Append the validated widget emission
-    tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: append_event
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          thread_path: "{{ normalize_input.thread_path }}"
-          event:
-            type: agent_widget_emit
-            payload:
-              envelope: "{{ ctx.first_widget }}"
-            actor: { kind: agent, name: muno-itinerary-planner }
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: append_second_widget_event
-          when: "{{ ctx.has_second_widget | default(false) }}"
-        - step: append_chat_event
-          when: "{{ not (ctx.has_second_widget | default(false)) }}"
-
-  - step: append_second_widget_event
-    desc: Append the optional companion widget, such as calendar_view after itinerary_summary
-    tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: append_event
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          thread_path: "{{ normalize_input.thread_path }}"
-          event:
-            type: agent_widget_emit
-            payload:
-              envelope: "{{ ctx.second_widget }}"
-            actor: { kind: agent, name: muno-itinerary-planner }
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: append_chat_event
-
-  - step: append_chat_event
-    desc: Append the bot text companion for the widget
-    tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: append_event
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          thread_path: "{{ normalize_input.thread_path }}"
-          event:
-            type: agent_chat
-            payload:
-              text: "{{ ctx.bot_message }}"
-            actor: { kind: agent, name: muno-itinerary-planner }
+          items: "{{ ctx.post_events }}"
     next:
       spec: { mode: exclusive }
       arcs:
