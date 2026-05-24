@@ -248,7 +248,7 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 async function waitForExecution(executionId: string, signal: AbortSignal): Promise<unknown> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     await abortableDelay(1500, signal);
     const execution = await getExecution(executionId, signal);
     const status = String((execution as Record<string, unknown>)?.status || '').toLowerCase();
