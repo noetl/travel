@@ -1,3 +1,4 @@
-# Firebase Setup
+# Firestore Access
 
-TBD by the auth round. Frontend Firestore listeners are read-only helpers; privileged writes go through NoETL MCP tools.
+Frontend reads now go through the gateway subscription API. Privileged writes
+go through NoETL MCP tools.

@@ -34,7 +34,7 @@ describe('CalendarView', () => {
     expect(html).toContain('Flight departs');
   });
 
-  it('renders live events_path mode without Firestore config', () => {
+  it('renders live events_path mode while waiting for gateway events', () => {
     const html = renderToStaticMarkup(
       <CalendarView
         payload={{
