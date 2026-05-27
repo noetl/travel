@@ -474,6 +474,19 @@ workflow:
         elif next_state.get("pending_calendar_events"):
             render_intent = {"kind": "calendar_live"}
 
+        # Defense: if no branch above fired but all core slots are present,
+        # "collect_missing" with an empty missing list is contradictory.
+        # A fully-populated thread whose user sent a restatement (e.g.
+        # "trip to paris") hits this path when flight/hotel results already
+        # exist but none of the action branches matched.  Emit "summarize"
+        # so render_widget_chat selects itinerary_summary instead of bot_text.
+        if (
+            render_intent.get("kind") == "collect_missing"
+            and not render_intent.get("missing")
+            and region_ready and dates_ready and party_ready
+        ):
+            render_intent = {"kind": "summarize"}
+
         first_tool = tool_requests[0] if tool_requests else {}
         call_id = f"call_{uuid.uuid4().hex[:12]}"
         llm_contract = {
@@ -1291,9 +1304,44 @@ workflow:
                 calendar_payload["display_events"] = calendar_events
             widgets.append(_env("calendar_view", "full", calendar_payload))
             bot_message = "Here is the current trip schedule."
+        elif intent == "summarize":
+            # User restated their intent on an already-populated thread.
+            # Render the itinerary_summary so they see their current state
+            # rather than a generic bot_text fallback.
+            calendar_events = _calendar_events()
+            region = slot_state.get("region", {}) if isinstance(slot_state.get("region"), dict) else {}
+            widgets.append(_env("itinerary_summary", "default", {
+                "destination": region.get("label", "Destination"),
+                "dates": {"from": default_from, "to": default_to},
+                "traveller_party": slot_state.get("party", {"rooms": 1, "adults": 1, "children": []}),
+                "total_cost": {"amount": 0, "currency": "USD"},
+                "notes": "Current itinerary state. Add more details to refine.",
+                "ctas": ["confirm", "edit"],
+            }))
+            bot_message = "Here is the current itinerary state."
         else:
             missing = _as_dict(render_intent).get("missing") or []
-            if "region" in missing:
+            # Defense-in-depth: if the render_intent was contradictory
+            # (collect_missing with an empty missing list) but all core slots
+            # are present, treat it as "summarize" rather than emitting bot_text.
+            core_slots_present = bool(
+                slot_state.get("region")
+                and slot_state.get("check_in_date")
+                and slot_state.get("check_out_date")
+                and slot_state.get("party")
+            )
+            if not missing and core_slots_present:
+                region = slot_state.get("region", {}) if isinstance(slot_state.get("region"), dict) else {}
+                widgets.append(_env("itinerary_summary", "default", {
+                    "destination": region.get("label", "Destination"),
+                    "dates": {"from": default_from, "to": default_to},
+                    "traveller_party": slot_state.get("party", {"rooms": 1, "adults": 1, "children": []}),
+                    "total_cost": {"amount": 0, "currency": "USD"},
+                    "notes": "Current itinerary state.",
+                    "ctas": ["confirm", "edit"],
+                }))
+                bot_message = "Here is the current itinerary state."
+            elif "region" in missing:
                 widgets.append(_env("place_autocomplete_input", "default", {
                     "placeholder": "Where do you want to go?",
                     "suggestions": [{"label": "Miami", "id": "MIA", "kind": "city"}],
