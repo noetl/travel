@@ -17,7 +17,12 @@ function moneyLabel(value: unknown): string {
 
 function regionLabel(slotState: Record<string, unknown>): string {
   const region = asRecord(slotState.region);
-  return String(region.label || region.city || region.city_code || '');
+  // Playbook stores both a nested region object and flat region_label / region_city_code
+  // scalars at the top level of final_slot_state.  Read whichever is non-empty.
+  return (
+    String(region.label || region.city || region.city_code || '') ||
+    String(slotState.region_label || '')
+  );
 }
 
 function datesLabel(slotState: Record<string, unknown>): string {

@@ -38,4 +38,62 @@ describe('RightPane', () => {
     expect(html).toContain('Amenities');
     expect(html).toContain('wifi, breakfast');
   });
+
+  it('shows region label from flat region_label key when nested region object is absent', () => {
+    // Bug C: playbook final_slot_state may carry region_label / region_city_code
+    // as flat scalars without a nested region object when only the scalar path
+    // populated the state.  The panel must still show the region label.
+    const html = renderToStaticMarkup(
+      <RightPane
+        slotState={{
+          region_label: 'Paris',
+          region_city_code: 'PAR',
+          region_country_code: 'FR',
+          region_kind: 'city',
+          check_in_date: '2026-06-17',
+          check_out_date: '2026-06-21',
+          party: { adults: 1, children: [], rooms: 1 }
+        }}
+      />
+    );
+
+    expect(html).toContain('Region');
+    expect(html).toContain('Paris');
+    expect(html).toContain('Dates');
+    expect(html).toContain('2026-06-17');
+    expect(html).toContain('Party');
+  });
+
+  it('shows region label from nested region object when both nested and flat keys are present', () => {
+    // Both paths populated (normalise_region_fields sets both).
+    // The nested region.label takes precedence.
+    const html = renderToStaticMarkup(
+      <RightPane
+        slotState={{
+          region: { label: 'Paris', city_code: 'PAR', country_code: 'FR', kind: 'city' },
+          region_label: 'Paris',
+          region_city_code: 'PAR',
+          check_in_date: '2026-06-17',
+          check_out_date: '2026-06-21',
+          party: { adults: 2, children: [], rooms: 1 }
+        }}
+      />
+    );
+
+    expect(html).toContain('Paris');
+    expect(html).toContain('2026-06-17');
+  });
+
+  it('shows dates when populated', () => {
+    const html = renderToStaticMarkup(
+      <RightPane
+        slotState={{
+          check_in_date: '2026-08-10',
+          check_out_date: '2026-08-14'
+        }}
+      />
+    );
+    expect(html).toContain('2026-08-10');
+    expect(html).toContain('2026-08-14');
+  });
 });
