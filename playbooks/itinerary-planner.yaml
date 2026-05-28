@@ -1439,6 +1439,27 @@ workflow:
                 "actor": {"kind": "agent", "name": "muno-itinerary-planner"},
             },
         })
+        # Emit one calendar.event.touched signal per calendar event written to
+        # Firestore. These are appended in the same batch_append_events call
+        # (append_render_events_atomically) that runs AFTER persist_render_docs_atomically
+        # succeeds, so the signal is never emitted for a failed Firestore write.
+        uid_for_event = user_uid if (user_uid and user_uid != "guest") else None
+        for cal_evt in calendar_events:
+            if isinstance(cal_evt, dict) and cal_evt.get("event_id"):
+                post_events.append({
+                    "thread_path": thread_path,
+                    "event": {
+                        "type": "calendar.event.touched",
+                        "payload": {
+                            "trip_id": trip_id,
+                            "user_uid": uid_for_event,
+                            "thread_path": thread_path,
+                            "event_id": cal_evt.get("event_id"),
+                            "op": "added",
+                        },
+                        "actor": {"kind": "agent", "name": "muno-itinerary-planner"},
+                    },
+                })
 
         result = {
             "thread_path": thread_path,

@@ -1,0 +1,157 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: calendar_list
+  path: travel/playbooks/catalog/calendar/list
+  description: |
+    Read playbook that returns the full calendar_view widget envelope for a
+    given (user_uid, trip_id) pair by dispatching firestore_mcp.query_collection.
+
+    Called by the SPA (Phase B cutover) whenever a calendar.event.touched
+    event arrives on the NoETL SSE stream. Not exposed as an MCP or in the UI.
+
+    Collection path logic mirrors itinerary-planner.yaml line 1066-1069:
+      - user threads: users/{user_uid}/trips/{trip_id}/events
+      - anonymous threads: {thread_path}/trip/current/events
+  version: "1.0"
+  agent: false
+  exposed_in_ui: false
+  tags: [calendar, read, catalog, travel]
+
+workload:
+  gcp_auth: google_oauth
+  gcp_project: noetl-demo-19700101
+  firestore_database: "(default)"
+  # Caller must supply these three fields.
+  user_uid: null        # string or null for anonymous threads
+  trip_id: ""           # required
+  thread_path: ""       # required for anonymous threads; used when user_uid is null
+
+workflow:
+  - step: resolve_collection_path
+    desc: Derive the Firestore collection path from the workload inputs
+    tool:
+      kind: python
+      input:
+        user_uid: "{{ workload.user_uid }}"
+        trip_id: "{{ workload.trip_id }}"
+        thread_path: "{{ workload.thread_path }}"
+      code: |
+        uid = user_uid if (user_uid and str(user_uid).strip() not in ("null", "guest", "")) else None
+        tid = str(trip_id or "").strip()
+        tpath = str(thread_path or "").strip()
+
+        if not tid:
+            raise ValueError("trip_id is required")
+
+        if uid:
+            collection_path = f"users/{uid}/trips/{tid}/events"
+        else:
+            if not tpath:
+                raise ValueError("thread_path is required for anonymous threads (user_uid is null)")
+            collection_path = f"{tpath}/trip/current/events"
+
+        result = {
+            "collection_path": collection_path,
+            "user_uid": uid,
+            "trip_id": tid,
+            "thread_path": tpath,
+        }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: query_calendar_events
+
+  - step: query_calendar_events
+    desc: Read all calendar-event documents from Firestore via the MCP agent
+    tool:
+      kind: agent
+      framework: noetl
+      entrypoint: automation/agents/mcp/firestore
+      payload:
+        method: tools/call
+        tool: query_collection
+        gcp_auth: "{{ workload.gcp_auth }}"
+        gcp_project: "{{ workload.gcp_project }}"
+        firestore_database: "{{ workload.firestore_database }}"
+        arguments:
+          collection_path: "{{ resolve_collection_path.collection_path }}"
+          order_by:
+            field: start_at
+            direction: ASCENDING
+          limit: 500
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: render_calendar_widget
+
+  - step: render_calendar_widget
+    desc: Assemble the calendar_view widget envelope from the Firestore documents
+    tool:
+      kind: python
+      input:
+        trip_id: "{{ resolve_collection_path.trip_id }}"
+        collection_path: "{{ resolve_collection_path.collection_path }}"
+        query_result: "{{ query_calendar_events.result }}"
+      code: |
+        import json
+
+        def _as_dict(v):
+            if isinstance(v, dict):
+                return v
+            if isinstance(v, str):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    return {}
+            return {}
+
+        def _as_list(v):
+            if isinstance(v, list):
+                return v
+            if isinstance(v, str):
+                try:
+                    parsed = json.loads(v)
+                    return parsed if isinstance(parsed, list) else []
+                except Exception:
+                    return []
+            return []
+
+        qr = _as_dict(query_result)
+        # query_collection returns {"collection_path": ..., "count": N, "documents": [...]}
+        raw_docs = _as_list(qr.get("documents") or [])
+
+        # Each document is a plain dict with the Firestore field values already
+        # decoded by the MCP agent.
+        display_events = []
+        for doc in raw_docs:
+            d = _as_dict(doc)
+            if d.get("event_id"):
+                display_events.append(d)
+
+        # Sort by start_at (Firestore order_by may already do this, but be
+        # defensive in case the MCP returns them in creation order).
+        display_events.sort(key=lambda e: str(e.get("start_at") or ""))
+
+        widget_payload = {
+            "trip_id": trip_id,
+            "events_path": collection_path,
+            "display_events": display_events,
+            "editable": True,
+            "empty_state_text": "No events yet. Confirm a flight or hotel to populate the schedule.",
+        }
+
+        # Closed-contract envelope (schema_version: 1) matching the shape
+        # emitted by itinerary-planner.yaml around line 1287.
+        envelope = {
+            "widget_type": "calendar_view",
+            "variant": "full",
+            "payload": widget_payload,
+            "schema_version": 1,
+        }
+
+        result = {
+            "envelope": envelope,
+            "display_events": display_events,
+            "event_count": len(display_events),
+        }
