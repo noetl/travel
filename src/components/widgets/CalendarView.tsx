@@ -22,7 +22,7 @@ import {
 } from '@mui/material';
 import { format } from 'date-fns';
 import { useEffect, useMemo, useState } from 'react';
-import { subscribeToCalendarEvents } from '../../api/gatewaySubscriptions';
+import { subscribeToCalendarEvents } from '../../api/calendarSubscription';
 import type { CalendarViewPayload } from '../../contracts/widgets';
 import { WidgetCard, asPayload, emitWidgetEvent, type WidgetComponentProps } from './widgetUtils';
 
@@ -85,9 +85,13 @@ export function CalendarView({ payload, variantId = 'compact', onWidgetEvent }: 
   const editable = data.editable && variantId !== 'read_only';
 
   useEffect(() => {
-    if (staticEvents || !data.events_path) return undefined;
-    return subscribeToCalendarEvents(data.events_path, (items) => setLiveEvents(items.map((item) => toEvent(item))));
-  }, [data.events_path, staticEvents]);
+    if (staticEvents || !data.trip_id) return undefined;
+    return subscribeToCalendarEvents(
+      data.trip_id,
+      data.events_path,
+      (items) => setLiveEvents(items.map((item) => toEvent(item)))
+    );
+  }, [data.trip_id, data.events_path, staticEvents]);
 
   const emptyText = data.empty_state_text || 'No events yet. Confirm a flight or hotel to populate the schedule.';
 
