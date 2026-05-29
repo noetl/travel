@@ -1286,7 +1286,6 @@ workflow:
             }))
             widgets.append(_env("calendar_view", "compact", {
                 "trip_id": trip_id,
-                "events_path": events_path,
                 "display_events": calendar_events,
                 "editable": False,
                 "empty_state_text": "No events yet. Confirm a flight or hotel to populate the schedule.",
@@ -1296,7 +1295,6 @@ workflow:
             calendar_events = _calendar_events()
             calendar_payload = {
                 "trip_id": trip_id,
-                "events_path": events_path,
                 "editable": True,
                 "empty_state_text": "No events yet. Confirm a flight or hotel to populate the schedule.",
             }

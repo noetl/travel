@@ -1,53 +1,37 @@
 /**
  * calendarSubscription.ts
  *
- * Replaces the `subscribeToCalendarEvents` export from
- * `gatewaySubscriptions.ts` with a transport that:
+ * Playbook-mediated transport for the CalendarView widget:
  *
  * 1. Reads the current calendar-event list synchronously on mount via
  *    `executePlaybook("travel/playbooks/catalog/calendar/list", ...)`.
- * 2. Listens for `playbook/state` frames on the existing NoETL SSE
- *    channel and re-runs the read playbook whenever a
- *    `playbook.completed` event arrives.
+ * 2. Listens for `playbook/state` frames on the NoETL SSE channel and
+ *    re-runs the read playbook whenever a `calendar.event.touched`
+ *    event arrives (the specific signal the itinerary-planner emits
+ *    after writing a calendar event).  `playbook.completed` is kept
+ *    as a fallback so a turn that completes without writing a calendar
+ *    event still clears any loading state in the widget.
  *
- * ## Why `playbook/state` + `playbook.completed` instead of a named
- * `calendar.event.touched` SSE frame
+ * ## SSE signal selection
  *
- * The gateway's `playbook_state.rs` listener only forwards events
- * whose `event_type` appears in `FORWARDED_EVENT_TYPES`:
- * `["step.exit", "playbook.completed", "playbook.failed"]`.
- * `calendar.event.touched` is a Firestore domain event stored in the
- * NoETL event log but is NOT currently multicasted as a named SSE
- * frame on the gateway's `/events` channel.  `playbook.completed` is
- * the earliest reliable signal the SPA can receive that the
- * orchestrator turn (which may have written calendar events) has
- * finished.  Round 3 can add a dedicated `calendar.event.touched` SSE
- * frame to the gateway if finer-grained filtering becomes necessary.
+ * The gateway's `playbook_state.rs` `FORWARDED_EVENT_TYPES` allowlist
+ * now includes `calendar.event.touched` (added in Round 03,
+ * noetl/ai-meta#25).  The module listens on the specific signal first;
+ * `playbook.completed` remains a fallback for turns that do not write
+ * calendar events (so the widget can still refresh or clear loading
+ * state on those turns).
  *
- * ## Signature change vs old `gatewaySubscriptions.subscribeToCalendarEvents`
+ * ## Signature
  *
- * Old: `subscribeToCalendarEvents(path: string, onItems)`
- *   where `path` was the raw Firestore collection path from
- *   `data.events_path`.
+ * `subscribeToCalendarEvents(trip_id, events_path, onItems, options?)`
+ *   where `trip_id` is the primary identifier for the read playbook,
+ *   `events_path` is the optional Firestore collection path hint from
+ *   the widget payload (parsed to extract `user_uid` / `thread_path`),
+ *   `onItems` is the callback invoked with the full document list after
+ *   each successful read, and `options` carries an optional AbortSignal.
  *
- * New: `subscribeToCalendarEvents(trip_id, events_path, onItems, options?)`
- *   where `events_path` is still the raw collection path from the
- *   widget payload, kept as a fallback hint, and `trip_id` is the
- *   primary identifier the read playbook uses.  `events_path` is
- *   parsed to extract `user_uid` and `thread_path` so the read
- *   playbook can derive the correct Firestore collection path without
- *   those fields being added to `CalendarViewPayload` this round.
- *
- * `CalendarView.tsx` passes `data.trip_id` and `data.events_path`
- * (same fields it already accessed) — the swap is a one-import-line
- * change plus the extra `data.trip_id` argument.
- *
- * `events_path` may be null or missing (Round 3 will drop it from the
- * orchestrator output).  The module falls back gracefully: if
- * `events_path` is absent and `user_uid` cannot be parsed, `user_uid`
- * is sent as null and `thread_path` as '' — the read playbook will
- * raise a validation error, which is surfaced as a console.warn so the
- * widget stays in its last known state rather than crashing.
+ * `events_path` may be null or undefined — the module degrades
+ * gracefully (console.warn, widget holds last state).
  */
 
 import { addGatewaySSEListener, executePlaybook } from './noetlClient';
@@ -224,25 +208,25 @@ export function subscribeToCalendarEvents(
   // Phase 1: initial read on mount.
   void runRead();
 
-  // Phase 2: re-read whenever any playbook completes on the SSE channel.
-  // The itinerary-planner that writes calendar events emits a
-  // `playbook.completed` event when it finishes; that is the signal
-  // the SPA uses to know the calendar may need refreshing.
+  // Phase 2: re-read on specific calendar signals and on generic completion.
   //
-  // This listener is intentionally broad: any `playbook.completed`
-  // event triggers a re-read, including completions from unrelated
-  // playbooks (e.g. the calendar list playbook itself).  The read is
-  // cheap and idempotent, so extra re-reads are acceptable.  A future
-  // round can filter by checking that the completing execution belongs
-  // to the itinerary-planner, once the widget payload carries a
-  // `source_execution_id` field.
+  // Primary signal: `calendar.event.touched` — the itinerary-planner
+  // emits this for each calendar event it writes.  The gateway forwards
+  // it to the SSE channel via the `FORWARDED_EVENT_TYPES` allowlist
+  // (added in Round 03, noetl/ai-meta#25).  This is the preferred
+  // trigger because it is specific to actual calendar writes.
+  //
+  // Fallback signal: `playbook.completed` — catches turns that finish
+  // without writing a calendar event, so the widget can still clear any
+  // loading state on those turns.  The read is cheap and idempotent;
+  // extra re-reads caused by unrelated playbook completions are safe.
   const removeStateListener = addGatewaySSEListener('playbook/state', (event: MessageEvent) => {
     if (closed) return;
     try {
       const message = JSON.parse(event.data as string) as Record<string, unknown>;
       const params = (message?.params || {}) as Record<string, unknown>;
       const eventType = String(params.event_type || '').trim();
-      if (eventType !== 'playbook.completed') return;
+      if (eventType !== 'calendar.event.touched' && eventType !== 'playbook.completed') return;
       void runRead();
     } catch {
       // Ignore malformed frames — same policy as handlePlaybookState.

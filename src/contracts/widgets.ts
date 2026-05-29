@@ -76,11 +76,14 @@ export interface BotTextPayload {
 
 
 /**
- * Firestore-backed trip calendar view.
+ * Playbook-mediated trip calendar view.
  */
 export interface CalendarViewPayload {
   trip_id: string;
-  events_path: string;
+  /**
+   * Deprecated: Firestore collection path hint, no longer emitted by the orchestrator. Kept optional for backward compatibility.
+   */
+  events_path?: string;
   display_events?: CalendarEvent[];
   editable: boolean;
   empty_state_text?: string;

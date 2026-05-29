@@ -2,10 +2,10 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://noetl.github.io/muno/widget-contract/calendar_view.schema.json",
   "title": "CalendarViewPayload",
-  "description": "Firestore-backed trip calendar view.",
+  "description": "Playbook-mediated trip calendar view.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["trip_id", "events_path", "editable"],
+  "required": ["trip_id", "editable"],
   "properties": {
     "trip_id": {
       "type": "string",
@@ -13,7 +13,7 @@
     },
     "events_path": {
       "type": "string",
-      "minLength": 1
+      "description": "Deprecated: Firestore collection path hint, no longer emitted by the orchestrator. Kept optional for backward compatibility."
     },
     "display_events": {
       "type": "array",
