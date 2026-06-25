@@ -9,16 +9,18 @@ metadata:
     Processes one chat-thread input event per invocation. The thread is
     event-sourced in Firestore through mcp/firestore.append_event, state is
     projected into chat_threads/{thread_id}/slot_state, and tool calls route
-    through the existing MCP playbooks. Hotels intentionally use Amadeus in
-    test mode because Duffel Stays is not enabled on the current account.
-  version: "1.0"
+    through the existing MCP playbooks. Hotel search via Amadeus was removed
+    (Amadeus dropped developer-API support); the planner now covers
+    destinations (Google Places) and flights (Duffel) only. The mcp/amadeus
+    playbook and its GSM secret are left in place but unreferenced.
+  version: "1.1"
   agent: true
   tags: [muno, itinerary, trip-planner, event-sourced, widgets]
   terminal:
     visible: true
     workspace: muno
-    scopes: [/muno/itinerary, /mcp/firestore, /mcp/duffel, /mcp/google-places, /mcp/amadeus]
-  capabilities: [mcp:firestore, mcp:duffel, mcp:google-places, mcp:amadeus, ai:openai, ai:anthropic, ai:vertex-ai, ai:ollama]
+    scopes: [/muno/itinerary, /mcp/firestore, /mcp/duffel, /mcp/google-places]
+  capabilities: [mcp:firestore, mcp:duffel, mcp:google-places, ai:openai, ai:anthropic, ai:vertex-ai, ai:ollama]
 
 workload:
   pg_auth: pg_k8s
@@ -36,7 +38,6 @@ workload:
   event_type: user_message
   event_payload: {}
   firestore_database: "(default)"
-  amadeus_env: test
   duffel_env: test
   flight_provider: duffel
   enrich_with_google_places: true
@@ -169,7 +170,6 @@ workflow:
         openai_api_key: "{{ keychain.openai_token.api_key | default('') }}"
         anthropic_api_key: "{{ keychain.anthropic_token.api_key | default('') }}"
         flight_provider: "{{ workload.flight_provider | default('duffel') }}"
-        amadeus_env: "{{ workload.amadeus_env | default('test') }}"
         duffel_env: "{{ workload.duffel_env | default('test') }}"
       code: |
         import copy
@@ -471,19 +471,9 @@ workflow:
                 },
             })
             render_intent = {"kind": "order_confirmation"}
-        elif picked_flight and not next_state.get("hotel_search_results"):
-            tool_requests.append({
-                "tool": "mcp/amadeus.search_hotels",
-                "arguments": {
-                    "cityCode": next_state.get("region", {}).get("city_code") or "MIA",
-                    "checkInDate": next_state.get("check_in_date"),
-                    "checkOutDate": next_state.get("check_out_date"),
-                    "adults": next_state.get("party", {}).get("adults", 1),
-                    "amadeus_env": "test",
-                },
-            })
-            render_intent = {"kind": "show_hotels"}
-        elif picked_flight and picked_hotel:
+        elif picked_flight:
+            # Amadeus hotel search removed (dev API dropped). After a flight is
+            # selected the itinerary is summarised directly — no hotel hop.
             render_intent = {"kind": "summary"}
         elif next_state.get("pending_calendar_events"):
             render_intent = {"kind": "calendar_live"}
@@ -599,8 +589,6 @@ workflow:
           when: "{{ extract_turn.first_tool == 'mcp/google-places.search_text' }}"
         - step: call_duffel_offers
           when: "{{ extract_turn.first_tool == 'mcp/duffel.search_offers' }}"
-        - step: call_amadeus_hotels
-          when: "{{ extract_turn.first_tool == 'mcp/amadeus.search_hotels' }}"
         - step: call_duffel_create_order
           when: "{{ extract_turn.first_tool == 'mcp/duffel.create_order' }}"
         - step: skip_tool_dispatch
@@ -639,25 +627,6 @@ workflow:
         method: tools/call
         tool: search_offers
         duffel_env: test
-        arguments: "{{ extract_turn.first_tool_arguments }}"
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: normalize_tool_response
-
-  - step: call_amadeus_hotels
-    desc: Dispatch Amadeus test-environment hotel search
-    tool:
-      kind: playbook
-      path: automation/agents/mcp/amadeus
-      # noetl/ai-meta#136 — block for the child's real Amadeus hotels.
-      return_result: true
-      result_step: amadeus_search_hotels
-      timeout: 120
-      payload:
-        method: tools/call
-        tool: search_hotels
-        amadeus_env: test
         arguments: "{{ extract_turn.first_tool_arguments }}"
     next:
       spec: { mode: exclusive }
@@ -710,7 +679,6 @@ workflow:
         user_uid: "{{ workload.user_uid | default('guest') }}"
         places_result: "{{ call_google_places | default({}) }}"
         offers_result: "{{ call_duffel_offers | default({}) }}"
-        hotels_result: "{{ call_amadeus_hotels | default({}) }}"
         order_result: "{{ call_duffel_create_order | default({}) }}"
       code: |
         import copy
@@ -795,52 +763,6 @@ workflow:
             if isinstance(rating_count, int):
                 card["rating_count"] = rating_count
             return card
-
-        def _hotel_photos(hotel):
-            photos = []
-            for key in ("photos", "media"):
-                values = hotel.get(key) if isinstance(hotel, dict) else []
-                if isinstance(values, list):
-                    for item in values:
-                        if isinstance(item, str) and item.startswith("http"):
-                            photos.append(item)
-                        elif isinstance(item, dict):
-                            url = item.get("uri") or item.get("url") or item.get("href") or item.get("image_url")
-                            if url:
-                                photos.append(url)
-            return photos[:8]
-
-        def _hotel_card(hotel):
-            hotel_id = hotel.get("hotel_id") or hotel.get("hotelId") or hotel.get("id") or hotel.get("name") or "hotel"
-            address = hotel.get("address")
-            if isinstance(address, dict):
-                address = ", ".join(str(address.get(key)) for key in ("lines", "cityName", "countryName") if address.get(key))
-            geo = hotel.get("geoCode") if isinstance(hotel.get("geoCode"), dict) else hotel.get("location") if isinstance(hotel.get("location"), dict) else {}
-            location = {
-                "city": hotel.get("city") or hotel.get("cityName") or (address if isinstance(address, str) else ""),
-            }
-            if isinstance(geo, dict):
-                lat = geo.get("latitude") or geo.get("lat")
-                lng = geo.get("longitude") or geo.get("lng")
-                if lat is not None:
-                    location["lat"] = lat
-                if lng is not None:
-                    location["lng"] = lng
-            return {
-                "hotel_id": str(hotel_id),
-                "name": hotel.get("name") or "Hotel",
-                "location": location,
-                "star_rating": hotel.get("rating") or hotel.get("star_rating"),
-                "score": hotel.get("score") or hotel.get("rating") or 8.0,
-                "score_count": hotel.get("score_count") or hotel.get("reviews_count"),
-                "photos": _hotel_photos(hotel),
-                "amenities": hotel.get("amenities") if isinstance(hotel.get("amenities"), list) else [],
-                "price_per_night": hotel.get("price_per_night") or hotel.get("price"),
-                "currency": hotel.get("currency") or "USD",
-                "address": address if isinstance(address, str) else "",
-                "rooms_matching": hotel.get("rooms_matching") or hotel.get("available_rooms"),
-                "ctas": ["watch_in_detail", "show_numbers"],
-            }
 
         def _airport_iata(value):
             value = value if isinstance(value, dict) else {}
@@ -934,8 +856,6 @@ workflow:
             "_city_hint": _city_hint,
             "_place_photo": _place_photo,
             "_place_card": _place_card,
-            "_hotel_photos": _hotel_photos,
-            "_hotel_card": _hotel_card,
             "_airport_iata": _airport_iata,
             "_segment_card": _segment_card,
             "_itinerary_card": _itinerary_card,
@@ -947,7 +867,6 @@ workflow:
         by_tool = {
             "mcp/google-places.search_text": places_result,
             "mcp/duffel.search_offers": offers_result,
-            "mcp/amadeus.search_hotels": hotels_result,
             "mcp/duffel.create_order": order_result,
         }
         envelope = _as_dict(by_tool.get(first_tool))
@@ -983,15 +902,6 @@ workflow:
             next_state["flight_search_results"] = offer_ids
             next_state["flight_offers"] = normalised_offers
             next_state["total_results_seen"] = len(offers)
-        elif first_tool == "mcp/amadeus.search_hotels":
-            hotels = _as_list(inner.get("hotels") or inner.get("items") or inner.get("data"))
-            normalised_hotels = [_hotel_card(hotel) for hotel in hotels[:10] if isinstance(hotel, dict)]
-            hotel_ids = []
-            for hotel in hotels[:10]:
-                if isinstance(hotel, dict):
-                    hotel_ids.append(hotel.get("hotel_id") or hotel.get("hotelId") or hotel.get("id"))
-            next_state["hotel_search_results"] = hotel_ids
-            next_state["matching_with_current_filters"] = len(hotels)
         elif first_tool == "mcp/duffel.create_order":
             order = _as_dict(inner.get("order") or inner)
             normalised_order = _order_payload(order)
@@ -1013,8 +923,6 @@ workflow:
             summary["places"] = normalised_places
         elif first_tool == "mcp/duffel.search_offers":
             summary["offers"] = normalised_offers
-        elif first_tool == "mcp/amadeus.search_hotels":
-            summary["hotels"] = normalised_hotels
         elif first_tool == "mcp/duffel.create_order":
             summary["order"] = normalised_order
         summary["raw_response"] = envelope
@@ -1263,28 +1171,6 @@ workflow:
                 }
             widgets.append(_env("flight_card", "full", offer))
             bot_message = "Here are the flight details."
-        elif intent == "show_hotels":
-            hotels = tool_summary.get("hotels") if isinstance(tool_summary.get("hotels"), list) else []
-            widgets.append(_env("hotel_list", "default", {
-                "title": "Hotels matching the trip",
-                "items": hotels[:10] or [{
-                    "hotel_id": "synthetic-hotel-1",
-                    "name": "Adiona Central Stay",
-                    "location": {"city": slot_state.get("region", {}).get("label", "Miami"), "lat": 25.7617, "lng": -80.1918},
-                    "star_rating": 4,
-                    "score": 8.7,
-                    "score_count": 540,
-                    "photos": [],
-                    "amenities": ["wifi", "breakfast", "pool"],
-                    "price_per_night": 185,
-                    "currency": "USD",
-                    "rooms_matching": 12,
-                    "ctas": ["watch_in_detail", "show_numbers"],
-                }],
-                "total_count": 1,
-                "filter_summary": "4 star, central, available for selected dates",
-            }))
-            bot_message = "Hotel options are ready."
         elif intent == "order_confirmation":
             order = _as_dict(tool_summary.get("order"))
             widgets.append(_env("order_confirmation", "default", {

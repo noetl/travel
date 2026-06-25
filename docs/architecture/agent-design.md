@@ -15,7 +15,7 @@ flowchart TD
   D --> E["Persist slot_state"]
   E --> F{"Tool request?"}
   F -- yes --> G["append_event: agent_tool_call"]
-  G --> H["MCP dispatch: Duffel, Google Places, Amadeus"]
+  G --> H["MCP dispatch: Duffel, Google Places"]
   H --> I["Store api_calls/{call_id}"]
   I --> J["append_event: agent_tool_response"]
   F -- no --> K["Widget chat pass"]
@@ -60,13 +60,13 @@ request per turn in this first cut.
 | --- | --- | --- |
 | Destination newly identified or ambiguous | `mcp/google-places.search_text` | Enriches destination context and future map widgets. |
 | Region, dates, and party are complete | `mcp/duffel.search_offers` | Test environment only; `flight_provider` defaults to Duffel. |
-| Flight selected and hotels are missing | `mcp/amadeus.search_hotels` | Hotels are locked to Amadeus until Duffel Stays is commercially enabled. |
 | User confirms a synthetic offer | `mcp/duffel.create_order` | Test wallet balance only; no live orders. |
 | Projection or event writes | `mcp/firestore.*` | Event writes always use `append_event` so header redaction is mandatory. |
 
-Production endpoints are forbidden in this agent. `duffel_env` and
-`amadeus_env` remain `test`; the LLM prompt explicitly disallows overriding
-them.
+Production endpoints are forbidden in this agent. `duffel_env` remains
+`test`; the LLM prompt explicitly disallows overriding it. Hotel search via
+Amadeus was removed (Amadeus dropped developer-API support); after a flight is
+picked the planner summarises the itinerary directly.
 
 ## Widget Contract
 
