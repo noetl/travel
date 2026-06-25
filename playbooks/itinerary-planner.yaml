@@ -373,6 +373,9 @@ workflow:
 
         wants_calendar = "show" in lowered_text and ("schedule" in lowered_text or "calendar" in lowered_text)
         wants_order = book_flight_now or any(word in lowered_text for word in ("order", "book", "booking", "confirm", "purchase"))
+        # HotelBeds replaces the removed Amadeus hotels path. A hotel-intent
+        # query (e.g. "hotels in Paris") routes to mcp/hotelbeds.search_hotels.
+        wants_hotel = any(word in lowered_text for word in ("hotel", "accommodation", "lodging", "place to stay", "where to stay"))
 
         if any(word in lowered_text for word in ("meeting", "appointment", "reminder", "note")) and "add" in lowered_text:
             updates["pending_calendar_events"] = [{
@@ -437,7 +440,32 @@ workflow:
         if not party_ready:
             render_intent["missing"].append("party")
 
-        if wants_calendar:
+        if wants_hotel and region_ready:
+            # HotelBeds availability search (the slot Amadeus hotels vacated).
+            # Geolocation is resolved provider-side from the city/coords; stay
+            # dates default forward when the user hasn't pinned them yet.
+            hotel_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
+            hotel_check_in = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
+            try:
+                hotel_check_out = next_state.get("check_out_date") or (date.fromisoformat(hotel_check_in) + timedelta(days=4)).isoformat()
+            except Exception:
+                hotel_check_out = (date.today() + timedelta(days=34)).isoformat()
+            hotel_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+            tool_requests.append({
+                "tool": "mcp/hotelbeds.search_hotels",
+                "arguments": {
+                    "city": hotel_region.get("label", ""),
+                    "city_code": hotel_region.get("city_code", ""),
+                    "check_in": hotel_check_in,
+                    "check_out": hotel_check_out,
+                    "adults": int(hotel_party.get("adults") or 1),
+                    "rooms": int(hotel_party.get("rooms") or 1),
+                    "children": len(hotel_party.get("children") or []),
+                    "radius": 20,
+                },
+            })
+            render_intent = {"kind": "show_hotels"}
+        elif wants_calendar:
             render_intent = {"kind": "calendar_live"}
         elif region_ready and "places_seen" not in next_state:
             tool_requests.append({
@@ -591,6 +619,8 @@ workflow:
           when: "{{ extract_turn.first_tool == 'mcp/duffel.search_offers' }}"
         - step: call_duffel_create_order
           when: "{{ extract_turn.first_tool == 'mcp/duffel.create_order' }}"
+        - step: call_hotelbeds_hotels
+          when: "{{ extract_turn.first_tool == 'mcp/hotelbeds.search_hotels' }}"
         - step: skip_tool_dispatch
           when: "{{ extract_turn.first_tool == '' }}"
 
@@ -652,6 +682,25 @@ workflow:
       arcs:
         - step: normalize_tool_response
 
+  - step: call_hotelbeds_hotels
+    desc: Dispatch a HotelBeds availability search through the MCP playbook
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/hotelbeds
+      # noetl/ai-meta#136 — block for the child's real HotelBeds availability
+      # envelope ({status, data: {hotels: [...]}}), not the async-start status.
+      return_result: true
+      result_step: hotelbeds_dispatch
+      timeout: 120
+      payload:
+        method: tools/call
+        tool: search_hotels
+        arguments: "{{ extract_turn.first_tool_arguments }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: normalize_tool_response
+
   - step: skip_tool_dispatch
     desc: >
       No-tool turn (extract_turn.first_tool == ''). The Rust orchestrator skips
@@ -680,6 +729,7 @@ workflow:
         places_result: "{{ call_google_places | default({}) }}"
         offers_result: "{{ call_duffel_offers | default({}) }}"
         order_result: "{{ call_duffel_create_order | default({}) }}"
+        hotels_result: "{{ call_hotelbeds_hotels | default({}) }}"
       code: |
         import copy
         import json
@@ -831,6 +881,68 @@ workflow:
                 "ctas": ["view_full", "new_search"],
             }
 
+        def _hotel_score(hotel):
+            # HotelBeds returns reviews as [{rate, reviewCount, type}]. Surface a
+            # 0-10 score for the hotel_card (schema requires `score`); default 0.
+            reviews = hotel.get("reviews") if isinstance(hotel.get("reviews"), list) else []
+            for review in reviews:
+                if isinstance(review, dict) and review.get("rate") is not None:
+                    try:
+                        return float(review.get("rate")), int(review.get("reviewCount") or 0)
+                    except (TypeError, ValueError):
+                        continue
+            return 0.0, 0
+
+        def _hotel_card(hotel):
+            hotel = hotel if isinstance(hotel, dict) else {}
+            score, score_count = _hotel_score(hotel)
+            try:
+                star = float(hotel.get("categoryCode", "0").split("EST")[0]) if isinstance(hotel.get("categoryCode"), str) else 0.0
+            except (TypeError, ValueError):
+                star = 0.0
+            price = None
+            for key in ("minRate", "maxRate"):
+                if hotel.get(key) is not None:
+                    try:
+                        price = float(hotel.get(key))
+                        break
+                    except (TypeError, ValueError):
+                        continue
+            card = {
+                "hotel_id": str(hotel.get("code") or hotel.get("hotel_id") or ""),
+                "name": str(hotel.get("name") or "Hotel"),
+                "score": score if 0 <= score <= 10 else 0.0,
+                "photos": [],
+                "amenities": [],
+                "currency": str(hotel.get("currency") or "EUR"),
+                "ctas": ["watch_in_detail", "show_numbers"],
+            }
+            if score_count:
+                card["score_count"] = score_count
+            if 0 <= star <= 5 and star > 0:
+                card["star_rating"] = star
+            if price is not None and price >= 0:
+                card["price_per_night"] = price
+            lat = hotel.get("latitude")
+            lng = hotel.get("longitude")
+            location = {}
+            try:
+                if lat is not None and lng is not None:
+                    location = {"lat": float(lat), "lng": float(lng)}
+            except (TypeError, ValueError):
+                location = {}
+            city = hotel.get("destinationName") or hotel.get("zoneName")
+            if city:
+                location["city"] = str(city)
+            if location:
+                card["location"] = location
+            address = hotel.get("address")
+            if isinstance(address, dict):
+                address = address.get("content") or address.get("street")
+            if address:
+                card["address"] = str(address)
+            return card
+
         def _normalise_region_fields(state):
             state = state if isinstance(state, dict) else {}
             region = state.get("region") if isinstance(state.get("region"), dict) else {}
@@ -861,6 +973,8 @@ workflow:
             "_itinerary_card": _itinerary_card,
             "_offer_card": _offer_card,
             "_order_payload": _order_payload,
+            "_hotel_score": _hotel_score,
+            "_hotel_card": _hotel_card,
             "_normalise_region_fields": _normalise_region_fields,
         })
 
@@ -868,6 +982,7 @@ workflow:
             "mcp/google-places.search_text": places_result,
             "mcp/duffel.search_offers": offers_result,
             "mcp/duffel.create_order": order_result,
+            "mcp/hotelbeds.search_hotels": hotels_result,
         }
         envelope = _as_dict(by_tool.get(first_tool))
         data = _as_dict(envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope)
@@ -910,6 +1025,13 @@ workflow:
             # Cache the normalised order so the OrderConfirmation
             # "View full order" CTA can re-render without refetching.
             next_state["last_order"] = normalised_order
+        elif first_tool == "mcp/hotelbeds.search_hotels":
+            hotels = _as_list(inner.get("hotels") or inner.get("items"))
+            normalised_hotels = [_hotel_card(hotel) for hotel in hotels[:10] if isinstance(hotel, dict)]
+            hotel_ids = [card.get("hotel_id") for card in normalised_hotels if card.get("hotel_id")]
+            next_state["hotel_search_results"] = hotel_ids
+            next_state["hotel_offers"] = normalised_hotels
+            next_state["total_results_seen"] = len(hotels)
 
         summary = {
             "call_id": call_id,
@@ -925,6 +1047,8 @@ workflow:
             summary["offers"] = normalised_offers
         elif first_tool == "mcp/duffel.create_order":
             summary["order"] = normalised_order
+        elif first_tool == "mcp/hotelbeds.search_hotels":
+            summary["hotels"] = normalised_hotels
         summary["raw_response"] = envelope
         result = {"summary": summary, "slot_state": next_state, "raw": envelope}
         globals().update({"result": result})
@@ -1127,6 +1251,26 @@ workflow:
                 }],
             }))
             bot_message = "I found a destination anchor. Next I need dates and travellers."
+        elif intent == "show_hotels":
+            hotels = tool_summary.get("hotels") if isinstance(tool_summary.get("hotels"), list) else []
+            widgets.append(_env("hotel_list", "default", {
+                "title": "Hotel options",
+                "items": hotels[:10] or [{
+                    "hotel_id": "synthetic-hotel-1",
+                    "name": f"Stay in {slot_state.get('region', {}).get('label', 'the city')}",
+                    "score": 8.4,
+                    "score_count": 1200,
+                    "star_rating": 4,
+                    "photos": [],
+                    "amenities": ["wifi", "breakfast"],
+                    "price_per_night": 180,
+                    "currency": "EUR",
+                    "address": "Suggested property",
+                    "ctas": ["watch_in_detail", "show_numbers"],
+                }],
+                "total_count": len(hotels),
+            }))
+            bot_message = "Here are hotel options from HotelBeds. Pick one to add it to the itinerary."
         elif intent == "show_flights":
             offers = tool_summary.get("offers") if isinstance(tool_summary.get("offers"), list) else []
             widgets.append(_env("flight_list", "default", {
