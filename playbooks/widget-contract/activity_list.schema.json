@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/activity_list.schema.json",
+  "title": "ActivityListPayload",
+  "description": "List of HotelBeds activity availability cards.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "items",
+    "total_count"
+  ],
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "activity_code",
+          "name",
+          "currency"
+        ],
+        "properties": {
+          "activity_code": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "country": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "amount_from": {
+            "type": "number",
+            "minimum": 0
+          },
+          "modalities_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "modalities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "duration": {}
+              }
+            }
+          },
+          "description": {
+            "type": "string"
+          },
+          "ctas": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "view_details",
+                "add_to_itinerary"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "total_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "filter_summary": {
+      "type": "string"
+    }
+  }
+}

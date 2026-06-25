@@ -9,18 +9,20 @@ metadata:
     Processes one chat-thread input event per invocation. The thread is
     event-sourced in Firestore through mcp/firestore.append_event, state is
     projected into chat_threads/{thread_id}/slot_state, and tool calls route
-    through the existing MCP playbooks. Hotel search via Amadeus was removed
-    (Amadeus dropped developer-API support); the planner now covers
-    destinations (Google Places) and flights (Duffel) only. The mcp/amadeus
+    through the existing MCP playbooks. Providers wired into natural-language
+    routing: destinations (Google Places, OIDC/Workload-Identity), flights
+    (Duffel test env), hotels / activities / transfers (HotelBeds APITUDE,
+    SHA256 signature auth — each its own GSM secret). Hotel search via Amadeus
+    was removed (Amadeus dropped developer-API support); the mcp/amadeus
     playbook and its GSM secret are left in place but unreferenced.
-  version: "1.1"
+  version: "1.2"
   agent: true
   tags: [muno, itinerary, trip-planner, event-sourced, widgets]
   terminal:
     visible: true
     workspace: muno
-    scopes: [/muno/itinerary, /mcp/firestore, /mcp/duffel, /mcp/google-places]
-  capabilities: [mcp:firestore, mcp:duffel, mcp:google-places, ai:openai, ai:anthropic, ai:vertex-ai, ai:ollama]
+    scopes: [/muno/itinerary, /mcp/firestore, /mcp/duffel, /mcp/google-places, /mcp/hotelbeds, /mcp/hotelbeds-activities, /mcp/hotelbeds-transfers]
+  capabilities: [mcp:firestore, mcp:duffel, mcp:google-places, mcp:hotelbeds, mcp:hotelbeds-activities, mcp:hotelbeds-transfers, ai:openai, ai:anthropic, ai:vertex-ai, ai:ollama]
 
 workload:
   pg_auth: pg_k8s
@@ -276,6 +278,29 @@ workflow:
                 state["region_kind"] = region.get("kind") or state.get("region_kind") or "city"
             return state
 
+        def _city_geo(region):
+            # Coordinates + primary airport for the known-city set the planner
+            # recognises via _city_hint. Transfers need a GPS to_code in
+            # latitude,longitude order (verified HotelBeds behaviour, see
+            # noetl/ai-meta#138); activities reuse the city_code as the
+            # destination filter, so only transfers consult this map.
+            region = region if isinstance(region, dict) else {}
+            code = str(region.get("city_code") or "").upper()
+            label = str(region.get("label") or "").lower()
+            geo = {
+                "PAR": {"lat": 48.8566, "lng": 2.3522, "airport": "CDG"},
+                "MIA": {"lat": 25.7617, "lng": -80.1918, "airport": "MIA"},
+                "NYC": {"lat": 40.7128, "lng": -74.0060, "airport": "JFK"},
+                "LON": {"lat": 51.5074, "lng": -0.1278, "airport": "LHR"},
+                "BOS": {"lat": 42.3601, "lng": -71.0589, "airport": "BOS"},
+            }
+            if code in geo:
+                return geo[code]
+            for key_label, key_code in (("paris", "PAR"), ("miami", "MIA"), ("new york", "NYC"), ("nyc", "NYC"), ("london", "LON"), ("boston", "BOS")):
+                if key_label in label:
+                    return geo[key_code]
+            return {}
+
         globals().update({
             "copy": copy,
             "json": json,
@@ -293,6 +318,7 @@ workflow:
             "_party_hint": _party_hint,
             "_deep_merge": _deep_merge,
             "_normalise_region_fields": _normalise_region_fields,
+            "_city_geo": _city_geo,
         })
 
         slot_state = _normalise_region_fields(_slot_from_loaded(loaded_slot_state))
@@ -376,6 +402,10 @@ workflow:
         # HotelBeds replaces the removed Amadeus hotels path. A hotel-intent
         # query (e.g. "hotels in Paris") routes to mcp/hotelbeds.search_hotels.
         wants_hotel = any(word in lowered_text for word in ("hotel", "accommodation", "lodging", "place to stay", "where to stay"))
+        # HotelBeds Activities — "things to do", tours, excursions, sightseeing.
+        wants_activities = any(phrase in lowered_text for phrase in ("things to do", "activities", "activity", "tours", "tour", "what to do", "excursion", "sightseeing", "attractions"))
+        # HotelBeds Transfers — airport transfer / ride / shuttle / pickup.
+        wants_transfers = any(phrase in lowered_text for phrase in ("transfer", "airport pickup", "airport pick-up", "ride from", "ride to", "shuttle", "from the airport", "to the airport", "from cdg"))
 
         if any(word in lowered_text for word in ("meeting", "appointment", "reminder", "note")) and "add" in lowered_text:
             updates["pending_calendar_events"] = [{
@@ -465,6 +495,52 @@ workflow:
                 },
             })
             render_intent = {"kind": "show_hotels"}
+        elif wants_transfers and region_ready:
+            # HotelBeds Transfers availability. Airport (IATA) -> city centre
+            # (GPS to_code in latitude,longitude order, per the verified API
+            # behaviour in noetl/ai-meta#138). Coords + airport come from the
+            # known-city geo map; outbound defaults forward when undated.
+            xf_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
+            xf_geo = _city_geo(xf_region)
+            xf_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+            xf_out_date = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
+            xf_to_code = f"{xf_geo.get('lat')},{xf_geo.get('lng')}" if xf_geo.get("lat") is not None else ""
+            tool_requests.append({
+                "tool": "mcp/hotelbeds-transfers.search_transfers",
+                "arguments": {
+                    "from_type": "IATA",
+                    "from_code": xf_geo.get("airport") or (xf_region.get("city_code") or "").upper(),
+                    "to_type": "GPS",
+                    "to_code": xf_to_code,
+                    "outbound": f"{xf_out_date}T10:00:00",
+                    "adults": int(xf_party.get("adults") or 1),
+                    "children": len(xf_party.get("children") or []),
+                    "language": "en",
+                },
+            })
+            render_intent = {"kind": "show_transfers"}
+        elif wants_activities and region_ready:
+            # HotelBeds Activities availability. Destination filter reuses the
+            # city_code the planner already extracts; from/to default forward
+            # when the user hasn't pinned travel dates yet.
+            act_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
+            act_from = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
+            try:
+                act_to = next_state.get("check_out_date") or (date.fromisoformat(act_from) + timedelta(days=4)).isoformat()
+            except Exception:
+                act_to = (date.today() + timedelta(days=34)).isoformat()
+            act_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+            tool_requests.append({
+                "tool": "mcp/hotelbeds-activities.search_activities",
+                "arguments": {
+                    "destination": (act_region.get("city_code") or "").upper(),
+                    "from": act_from,
+                    "to": act_to,
+                    "adults": int(act_party.get("adults") or 1),
+                    "language": "en",
+                },
+            })
+            render_intent = {"kind": "show_activities"}
         elif wants_calendar:
             render_intent = {"kind": "calendar_live"}
         elif region_ready and "places_seen" not in next_state:
@@ -621,6 +697,10 @@ workflow:
           when: "{{ extract_turn.first_tool == 'mcp/duffel.create_order' }}"
         - step: call_hotelbeds_hotels
           when: "{{ extract_turn.first_tool == 'mcp/hotelbeds.search_hotels' }}"
+        - step: call_hotelbeds_activities
+          when: "{{ extract_turn.first_tool == 'mcp/hotelbeds-activities.search_activities' }}"
+        - step: call_hotelbeds_transfers
+          when: "{{ extract_turn.first_tool == 'mcp/hotelbeds-transfers.search_transfers' }}"
         - step: skip_tool_dispatch
           when: "{{ extract_turn.first_tool == '' }}"
 
@@ -701,6 +781,44 @@ workflow:
       arcs:
         - step: normalize_tool_response
 
+  - step: call_hotelbeds_activities
+    desc: Dispatch a HotelBeds Activities availability search through the MCP playbook
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/hotelbeds-activities
+      # noetl/ai-meta#136 — block for the child's real HotelBeds activities
+      # envelope ({status, data: {activities: [...]}}), not the async-start status.
+      return_result: true
+      result_step: activities_dispatch
+      timeout: 120
+      payload:
+        method: tools/call
+        tool: search_activities
+        arguments: "{{ extract_turn.first_tool_arguments }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: normalize_tool_response
+
+  - step: call_hotelbeds_transfers
+    desc: Dispatch a HotelBeds Transfers availability search through the MCP playbook
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/hotelbeds-transfers
+      # noetl/ai-meta#136 — block for the child's real HotelBeds transfers
+      # envelope ({status, data: {transfers: [...]}}), not the async-start status.
+      return_result: true
+      result_step: transfers_dispatch
+      timeout: 120
+      payload:
+        method: tools/call
+        tool: search_transfers
+        arguments: "{{ extract_turn.first_tool_arguments }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: normalize_tool_response
+
   - step: skip_tool_dispatch
     desc: >
       No-tool turn (extract_turn.first_tool == ''). The Rust orchestrator skips
@@ -730,6 +848,8 @@ workflow:
         offers_result: "{{ call_duffel_offers | default({}) }}"
         order_result: "{{ call_duffel_create_order | default({}) }}"
         hotels_result: "{{ call_hotelbeds_hotels | default({}) }}"
+        activities_result: "{{ call_hotelbeds_activities | default({}) }}"
+        transfers_result: "{{ call_hotelbeds_transfers | default({}) }}"
       code: |
         import copy
         import json
@@ -943,6 +1063,90 @@ workflow:
                 card["address"] = str(address)
             return card
 
+        def _activity_card(activity):
+            # HotelBeds activities_dispatch _activity_summary shape:
+            # {code, name, type, country_code, country_name, currency,
+            #  amount_from, modalities_count, modalities:[{code,name,duration}],
+            #  content}. Optional fields are only emitted when present so the
+            # activity_list schema's minimal required set always validates.
+            activity = activity if isinstance(activity, dict) else {}
+            card = {
+                "activity_code": str(activity.get("code") or activity.get("activityCode") or ""),
+                "name": str(activity.get("name") or "Activity"),
+                "currency": str(activity.get("currency") or "EUR"),
+                "ctas": ["view_details", "add_to_itinerary"],
+            }
+            a_type = activity.get("type")
+            if a_type:
+                card["type"] = str(a_type)
+            country = activity.get("country_name") or activity.get("country_code")
+            if country:
+                card["country"] = str(country)
+            amount = activity.get("amount_from")
+            try:
+                if amount is not None and float(amount) >= 0:
+                    card["amount_from"] = float(amount)
+            except (TypeError, ValueError):
+                pass
+            mcount = activity.get("modalities_count")
+            if isinstance(mcount, int) and mcount >= 0:
+                card["modalities_count"] = mcount
+            modalities = activity.get("modalities") if isinstance(activity.get("modalities"), list) else []
+            norm_modalities = []
+            for modality in modalities[:5]:
+                if not isinstance(modality, dict):
+                    continue
+                entry = {}
+                if modality.get("code") is not None:
+                    entry["code"] = str(modality.get("code"))
+                if modality.get("name") is not None:
+                    entry["name"] = str(modality.get("name"))
+                if modality.get("duration") is not None:
+                    entry["duration"] = modality.get("duration")
+                norm_modalities.append(entry)
+            if norm_modalities:
+                card["modalities"] = norm_modalities
+            desc = activity.get("content")
+            if desc:
+                card["description"] = str(desc)[:600]
+            return card
+
+        def _transfer_card(service):
+            # HotelBeds transfers_dispatch _transfer_summary shape:
+            # {id, transferType, vehicle_code, vehicle_name, category_code,
+            #  category_name, total_amount, currency, direction, rateKey,
+            #  transfer_detail_info}. total_amount may arrive as a string.
+            service = service if isinstance(service, dict) else {}
+            card = {
+                "transfer_id": str(service.get("id") or service.get("rateKey") or ""),
+                "currency": str(service.get("currency") or "EUR"),
+                "ctas": ["view_details", "add_to_itinerary"],
+            }
+            ttype = service.get("transferType")
+            if ttype:
+                card["transfer_type"] = str(ttype)
+            vehicle = service.get("vehicle_name")
+            if vehicle:
+                card["vehicle_name"] = str(vehicle)
+            category = service.get("category_name")
+            if category:
+                card["category_name"] = str(category)
+            amount = service.get("total_amount")
+            try:
+                if amount is not None and float(amount) >= 0:
+                    card["total_amount"] = float(amount)
+            except (TypeError, ValueError):
+                pass
+            direction = service.get("direction")
+            if direction:
+                card["direction"] = str(direction)
+            detail = service.get("transfer_detail_info")
+            if detail:
+                if isinstance(detail, (list, dict)):
+                    detail = json.dumps(detail, default=str)
+                card["detail"] = str(detail)[:600]
+            return card
+
         def _normalise_region_fields(state):
             state = state if isinstance(state, dict) else {}
             region = state.get("region") if isinstance(state.get("region"), dict) else {}
@@ -975,6 +1179,8 @@ workflow:
             "_order_payload": _order_payload,
             "_hotel_score": _hotel_score,
             "_hotel_card": _hotel_card,
+            "_activity_card": _activity_card,
+            "_transfer_card": _transfer_card,
             "_normalise_region_fields": _normalise_region_fields,
         })
 
@@ -983,6 +1189,8 @@ workflow:
             "mcp/duffel.search_offers": offers_result,
             "mcp/duffel.create_order": order_result,
             "mcp/hotelbeds.search_hotels": hotels_result,
+            "mcp/hotelbeds-activities.search_activities": activities_result,
+            "mcp/hotelbeds-transfers.search_transfers": transfers_result,
         }
         envelope = _as_dict(by_tool.get(first_tool))
         data = _as_dict(envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope)
@@ -1032,6 +1240,20 @@ workflow:
             next_state["hotel_search_results"] = hotel_ids
             next_state["hotel_offers"] = normalised_hotels
             next_state["total_results_seen"] = len(hotels)
+        elif first_tool == "mcp/hotelbeds-activities.search_activities":
+            activities = _as_list(inner.get("activities") or inner.get("items"))
+            normalised_activities = [_activity_card(activity) for activity in activities[:10] if isinstance(activity, dict)]
+            activity_codes = [card.get("activity_code") for card in normalised_activities if card.get("activity_code")]
+            next_state["activity_search_results"] = activity_codes
+            next_state["activity_offers"] = normalised_activities
+            next_state["total_results_seen"] = len(activities)
+        elif first_tool == "mcp/hotelbeds-transfers.search_transfers":
+            transfers = _as_list(inner.get("transfers") or inner.get("items"))
+            normalised_transfers = [_transfer_card(service) for service in transfers[:10] if isinstance(service, dict)]
+            transfer_ids = [card.get("transfer_id") for card in normalised_transfers if card.get("transfer_id")]
+            next_state["transfer_search_results"] = transfer_ids
+            next_state["transfer_offers"] = normalised_transfers
+            next_state["total_results_seen"] = len(transfers)
 
         summary = {
             "call_id": call_id,
@@ -1049,6 +1271,10 @@ workflow:
             summary["order"] = normalised_order
         elif first_tool == "mcp/hotelbeds.search_hotels":
             summary["hotels"] = normalised_hotels
+        elif first_tool == "mcp/hotelbeds-activities.search_activities":
+            summary["activities"] = normalised_activities
+        elif first_tool == "mcp/hotelbeds-transfers.search_transfers":
+            summary["transfers"] = normalised_transfers
         summary["raw_response"] = envelope
         result = {"summary": summary, "slot_state": next_state, "raw": envelope}
         globals().update({"result": result})
@@ -1271,6 +1497,35 @@ workflow:
                 "total_count": len(hotels),
             }))
             bot_message = "Here are hotel options from HotelBeds. Pick one to add it to the itinerary."
+        elif intent == "show_activities":
+            activities = tool_summary.get("activities") if isinstance(tool_summary.get("activities"), list) else []
+            widgets.append(_env("activity_list", "default", {
+                "title": "Things to do",
+                "items": activities[:10] or [{
+                    "activity_code": "synthetic-activity-1",
+                    "name": f"Top experience in {slot_state.get('region', {}).get('label', 'the city')}",
+                    "currency": "EUR",
+                    "amount_from": 45.0,
+                    "ctas": ["view_details", "add_to_itinerary"],
+                }],
+                "total_count": len(activities),
+            }))
+            bot_message = "Here are activities from HotelBeds. Add one to the itinerary."
+        elif intent == "show_transfers":
+            transfers = tool_summary.get("transfers") if isinstance(tool_summary.get("transfers"), list) else []
+            widgets.append(_env("transfer_list", "default", {
+                "title": "Airport transfers",
+                "items": transfers[:10] or [{
+                    "transfer_id": "synthetic-transfer-1",
+                    "currency": "EUR",
+                    "total_amount": 44.40,
+                    "vehicle_name": "Shared shuttle",
+                    "category_name": "Shared",
+                    "ctas": ["view_details", "add_to_itinerary"],
+                }],
+                "total_count": len(transfers),
+            }))
+            bot_message = "Here are transfer options from HotelBeds. Pick one for your trip."
         elif intent == "show_flights":
             offers = tool_summary.get("offers") if isinstance(tool_summary.get("offers"), list) else []
             widgets.append(_env("flight_list", "default", {
