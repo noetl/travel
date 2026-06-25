@@ -569,7 +569,7 @@ workflow:
         tool: batch_set_docs
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          items: "{{ extract_turn.context.turn_docs }}"
+          items: "{{ extract_turn.turn_docs }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -585,20 +585,20 @@ workflow:
         tool: batch_append_events
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          items: "{{ extract_turn.context.turn_events }}"
+          items: "{{ extract_turn.turn_events }}"
     next:
       spec: { mode: exclusive }
       arcs:
         - step: call_google_places
-          when: "{{ extract_turn.context.first_tool == 'mcp/google-places.search_text' }}"
+          when: "{{ extract_turn.first_tool == 'mcp/google-places.search_text' }}"
         - step: call_duffel_offers
-          when: "{{ extract_turn.context.first_tool == 'mcp/duffel.search_offers' }}"
+          when: "{{ extract_turn.first_tool == 'mcp/duffel.search_offers' }}"
         - step: call_amadeus_hotels
-          when: "{{ extract_turn.context.first_tool == 'mcp/amadeus.search_hotels' }}"
+          when: "{{ extract_turn.first_tool == 'mcp/amadeus.search_hotels' }}"
         - step: call_duffel_create_order
-          when: "{{ extract_turn.context.first_tool == 'mcp/duffel.create_order' }}"
-        - step: render_widget_chat
-          when: "{{ extract_turn.context.first_tool == '' }}"
+          when: "{{ extract_turn.first_tool == 'mcp/duffel.create_order' }}"
+        - step: skip_tool_dispatch
+          when: "{{ extract_turn.first_tool == '' }}"
 
   - step: call_google_places
     desc: Dispatch a Google Places text search through the MCP playbook
@@ -608,7 +608,7 @@ workflow:
       payload:
         method: tools/call
         tool: search_text
-        arguments: "{{ extract_turn.context.first_tool_arguments }}"
+        arguments: "{{ extract_turn.first_tool_arguments }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -623,7 +623,7 @@ workflow:
         method: tools/call
         tool: search_offers
         duffel_env: test
-        arguments: "{{ extract_turn.context.first_tool_arguments }}"
+        arguments: "{{ extract_turn.first_tool_arguments }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -638,7 +638,7 @@ workflow:
         method: tools/call
         tool: search_hotels
         amadeus_env: test
-        arguments: "{{ extract_turn.context.first_tool_arguments }}"
+        arguments: "{{ extract_turn.first_tool_arguments }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -653,7 +653,22 @@ workflow:
         method: tools/call
         tool: create_order
         duffel_env: test
-        arguments: "{{ extract_turn.context.first_tool_arguments }}"
+        arguments: "{{ extract_turn.first_tool_arguments }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: normalize_tool_response
+
+  - step: skip_tool_dispatch
+    desc: >
+      No-tool turn (extract_turn.first_tool == ''). The Rust orchestrator skips
+      non-selected exclusive-arc targets terminally, so render_widget_chat must
+      not be a direct arc of append_turn_events. This noop carries the no-tool
+      branch unconditionally into normalize_tool_response, which is the single
+      convergence point for every branch — matching how the four call_* steps
+      fan in. render_widget_chat then has exactly one predecessor.
+    tool:
+      kind: noop
     next:
       spec: { mode: exclusive }
       arcs:
@@ -664,9 +679,9 @@ workflow:
     tool:
       kind: python
       input:
-        first_tool: "{{ extract_turn.context.first_tool }}"
-        call_id: "{{ extract_turn.context.call_id }}"
-        slot_state: "{{ extract_turn.context.captured_slots }}"
+        first_tool: "{{ extract_turn.first_tool }}"
+        call_id: "{{ extract_turn.call_id }}"
+        slot_state: "{{ extract_turn.captured_slots }}"
         thread_path: "{{ normalize_input.thread_path }}"
         user_uid: "{{ workload.user_uid | default('guest') }}"
         places_result: "{{ call_google_places | default({}) }}"
@@ -992,14 +1007,14 @@ workflow:
       kind: python
       input:
         thread_path: "{{ normalize_input.thread_path }}"
-        event_type: "{{ normalize_input.context.event_type }}"
-        event_payload: "{{ normalize_input.context.event_payload }}"
-        extraction_context: "{{ extract_turn.context }}"
-        render_intent: "{{ extract_turn.context.render_intent }}"
-        extraction_json: "{{ extract_turn.context.json_str | default('{}') }}"
-        slot_state_pre_tool: "{{ extract_turn.context.captured_slots }}"
-        slot_state_post_tool: "{{ normalize_tool_response.context.slot_state | default({}) }}"
-        tool_summary: "{{ normalize_tool_response.context.summary | default({}) }}"
+        event_type: "{{ normalize_input.event_type }}"
+        event_payload: "{{ normalize_input.event_payload }}"
+        extraction_context: "{{ extract_turn }}"
+        render_intent: "{{ extract_turn.render_intent }}"
+        extraction_json: "{{ extract_turn.json_str | default('{}') }}"
+        slot_state_pre_tool: "{{ extract_turn.captured_slots }}"
+        slot_state_post_tool: "{{ normalize_tool_response.slot_state | default({}) }}"
+        tool_summary: "{{ normalize_tool_response.summary | default({}) }}"
         user_uid: "{{ workload.user_uid | default('guest') }}"
       code: |
         import json
@@ -1482,25 +1497,29 @@ workflow:
     next:
       spec: { mode: exclusive }
       arcs:
+        # Arc-level `set: ctx.*` is one-hop-transient under the Rust orchestrator
+        # (applied to the immediate next step's context only, never persisted as
+        # a ctx.updated event). Downstream steps therefore read render_widget_chat
+        # fields directly — its result persists in the steps map for every later
+        # step — instead of relying on ctx.* surviving multiple hops.
         - step: persist_render_docs_atomically
           when: "{{ render_widget_chat.post_docs | length > 0 }}"
-          set:
-            ctx.first_widget: "{{ render_widget_chat.first_widget }}"
-            ctx.second_widget: "{{ render_widget_chat.second_widget }}"
-            ctx.has_second_widget: "{{ render_widget_chat.has_second_widget | default(false) }}"
-            ctx.bot_message: "{{ render_widget_chat.bot_message }}"
-            ctx.final_slot_state: "{{ render_widget_chat.final_slot_state }}"
-            ctx.post_docs: "{{ render_widget_chat.post_docs }}"
-            ctx.post_events: "{{ render_widget_chat.post_events }}"
-        - step: append_render_events_atomically
+        - step: skip_render_persist
           when: "{{ render_widget_chat.post_docs | length == 0 }}"
-          set:
-            ctx.first_widget: "{{ render_widget_chat.first_widget }}"
-            ctx.second_widget: "{{ render_widget_chat.second_widget }}"
-            ctx.has_second_widget: "{{ render_widget_chat.has_second_widget | default(false) }}"
-            ctx.bot_message: "{{ render_widget_chat.bot_message }}"
-            ctx.final_slot_state: "{{ render_widget_chat.final_slot_state }}"
-            ctx.post_events: "{{ render_widget_chat.post_events }}"
+
+  - step: skip_render_persist
+    desc: >
+      No render docs to persist (post_docs empty). Same Rust convergence rule as
+      skip_tool_dispatch: append_render_events_atomically must not be a direct
+      exclusive arc of render_widget_chat, or the post_docs>0 branch would skip
+      it terminally. This noop carries the empty-docs branch unconditionally into
+      append_render_events_atomically, its single convergence point.
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: append_render_events_atomically
 
   - step: persist_render_docs_atomically
     desc: Persist tool replay docs, final slot state, and calendar event docs in one batched Firestore MCP call
@@ -1512,7 +1531,7 @@ workflow:
         tool: batch_set_docs
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          items: "{{ ctx.post_docs }}"
+          items: "{{ render_widget_chat.post_docs }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -1528,7 +1547,7 @@ workflow:
         tool: batch_append_events
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          items: "{{ ctx.post_events }}"
+          items: "{{ render_widget_chat.post_events }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -1540,10 +1559,10 @@ workflow:
       kind: python
       input:
         thread_path: "{{ normalize_input.thread_path }}"
-        slot_state: "{{ ctx.final_slot_state }}"
-        extraction: "{{ extract_turn.context }}"
-        widget: "{{ ctx.first_widget }}"
-        bot_message: "{{ ctx.bot_message }}"
+        slot_state: "{{ render_widget_chat.final_slot_state }}"
+        extraction: "{{ extract_turn }}"
+        widget: "{{ render_widget_chat.first_widget }}"
+        bot_message: "{{ render_widget_chat.bot_message }}"
         request_id: "{{ workload.request_id | default('') }}"
         gateway_url: "{{ workload.gateway_url | default('') }}"
       code: |
