@@ -297,6 +297,40 @@ Observability (per `agents/rules/observability.md`): the SLM playbook ships a sp
 
 ---
 
+## 6A. MLOps lifecycle as NoETL playbooks (dogfooding requirement)
+
+**Hard architectural requirement:** *every* stage of the SLM's MLOps lifecycle — not just serving — is itself a **NoETL playbook/agent**, never an external script. The SLM project dogfoods the platform: the same ephemeral-blueprint execution model that runs the planner runs the model's own lifecycle. Each stage is a playbook under `automation/mlops/travel-slm/`, composed by a scheduled orchestrator. This keeps the lifecycle event-sourced, replayable, observable, and authored in the same place as the rest of the system.
+
+### 6A.1 The lifecycle DAG (one playbook per stage)
+
+| Stage | Playbook | Step DAG (sketch) | Tool kinds | NoETL capability needed | Gap |
+|---|---|---|---|---|---|
+| Dataset | `automation/mlops/travel-slm/dataset_build` | `load_corpus` (event-log replay + curated seed) → fan-out over turns → per turn: `teacher_extract` (http→gpt-4o) ‖ `teacher_render` (http→gpt-4o-mini) ‖ `oracle_deterministic` (playbook→deterministic engine) → `merge+schema_validate` (python, widget schemas) → `write_record` → `aggregate` → `write_dataset_artifact` → `register_dataset` | http, python, playbook, loop | teacher API + keychain secret; event-log replay; **large-artifact storage**; **dataset registry** | G3 |
+| Train | `automation/mlops/travel-slm/finetune` | `resolve_dataset` (registry) → `dispatch_job` (GPU k8s-Job: LoRA/QLoRA, mounts dataset) → `await_completion` (callback/hook — frees the worker slot for the hours-long run) → `collect_artifact` (adapter → object store) → `register_model` (version + metrics + lineage) | **job/container**, callback, python | **GPU container/k8s-Job dispatch**; **long-running async** (hours); **large-artifact storage + model registry**; GPU node pool | G1, G2, G3 |
+| Eval | `automation/mlops/travel-slm/eval` | `resolve_model`+`resolve_eval_set` → `run_inference` (http→inference svc / job) over held-out eval → `compute_metrics` (python: tool/arg/slot/render-intent/widget-type match vs OpenAI ceiling + deterministic floor; widget-schema validity; latency p50/p95) → `gate` (pass/fail vs §7) → `write_report`+`register_eval` | http, python | model registry read/write | G3 |
+| Shadow | `automation/mlops/travel-slm/shadow_eval` | (driven by planner `slm_shadow: true`, which emits a `slm_shadow_diff` event per turn) → `aggregate_diffs` (read via server API/event log) → `compute_match_rate`+`latency` on live-shaped traffic → `report` | python, http (server API), schedule | event-log read via server API (data-access boundary) | — |
+| Package | `automation/mlops/travel-slm/package` | `resolve_model` → `merge_quantize_job` (k8s-Job: merge LoRA, quantize to GGUF / build serving image) → `write_artifact` → `register_release` (serving-ready version + image digest) | **job/container**, python | GPU/CPU job; **large-artifact storage + model registry** | G1, G3 |
+| Deploy | `automation/mlops/travel-slm/deploy` | `resolve_release` (registry) → `rollout` (deploy inference svc via the ops deploy automation; kind-validate first) → `smoke` (http health + extract/render sanity) → `flip_flag` (set planner `extraction_engine`/`render_engine` via catalog register) → `verify`+`record`. Rollback = re-flip the flag | playbook (ops deploy), http, catalog register | k8s rollout (existing ops automation); catalog/flag update; observability | — |
+| Cron | `automation/mlops/travel-slm/retrain_orchestrator` | scheduled: `dataset_build` → `eval` (drift check) → conditional `finetune` → `eval` → `package` → gated `shadow_eval` | playbook composition, schedule | **schedule/cron** (exists); conditional control flow | — |
+
+All seven honor the platform rules: external-subsystem calls (teacher API, the inference service) go direct; every `noetl.*` touch (dataset records, registry entries, event-log reads) goes through the server API per `data-access-boundary.md`; secrets (teacher API key) live in the keychain; each playbook ships span+metric+`execution_id` per `observability.md`.
+
+### 6A.2 NoETL runtime capability gaps (tracked as their own items)
+
+Playbook-based MLOps at training scale needs three platform capabilities NoETL does not have today. They are **design-flagged, not built** by this RFC, and each is its own tracked issue:
+
+- **G1 — GPU container / k8s-Job dispatch tool.** A new tool kind that submits a Kubernetes Job (or container) with a GPU node-selector + resource request and returns a job handle. Today's tool kinds (http / python / postgres / playbook / …) can't launch a training or quantization container. Lands in `noetl/tools` (new kind) + `noetl/worker` (dispatch) + `noetl/ops` (GPU node pool + RBAC to create Jobs). Blocks: `finetune`, `package`.
+- **G2 — Long-running async job orchestration.** A fine-tune runs for hours and must not hold a worker slot. The callback/hook pattern (`execution-model.md`) is the right shape, but needs concrete support: a job-completion callback/webhook + a poll/watch fallback, and long-timeout async resume so the playbook continues when the Job finishes. Lands in `noetl/server` (callback resume) + `noetl/worker` (job watch). Blocks: `finetune`, `package`.
+- **G3 — Large binary artifact storage + model/dataset registry.** The result tier (noetl/ai-meta#104) materializes large *results* to GCS as Feather; model weights and datasets are GB binaries needing arbitrary blob put/get **plus a versioned registry in the catalog** (model + dataset entries with metadata, metrics, lineage, and an object-store pointer). Lands in `noetl/server` (catalog registry resource kind + blob tool) + `noetl/noetl`. Blocks: `dataset` (registry), `finetune`, `eval`, `package`.
+
+> The GPU node pool itself is an ops/infra task (provisioned in Phase 3), not a runtime gap — but G1's dispatch tool depends on it existing.
+
+### 6A.3 What this means for sequencing
+
+`dataset_build`, `eval`, and `shadow_eval` run on **existing tool kinds today** (http + python + playbook + the planner flag from §6) — so **Phase 1 is not blocked** by the gaps, and the deterministic-floor + OpenAI-ceiling numbers can be produced immediately. `finetune` and `package` are **gated on G1–G3**; Phase 2 starts once those platform items land (they can be built in parallel with Phase 1). `deploy` reuses the existing ops deploy automation plus the catalog flag-flip.
+
+---
+
 ## 7. Evaluation + success metrics
 
 **Success metrics (vs OpenAI baseline, on the held-out eval + golden-replay set):**
@@ -314,12 +348,15 @@ Observability (per `agents/rules/observability.md`): the SLM playbook ships a sp
 
 ### Phased rollout
 
+Per the §6A dogfooding requirement, each phase below is **delivered as the named NoETL playbook(s)**, not external scripts.
+
 - **Phase 0 — RFC (this document).** Contract + plan + decisions. *No code/model/infra.*
-- **Phase 1 — Dataset + baseline.** Build the teacher-bootstrapped dataset (§5), the eval harness + metrics (§7), and measure: OpenAI (ceiling), deterministic Python (floor), and a no-fine-tune small-instruct (Option C) baseline. Decide final model size + serving mode from real numbers.
-- **Phase 2 — Train / fine-tune.** LoRA/QLoRA the chosen model on the dataset; add grammar-guided decoding; hit the §7 targets offline.
-- **Phase 3 — Serve + integrate behind flag.** Stand up the in-cluster inference service + `automation/agents/mcp/travel-slm` playbook; wire the planner flags (`extraction_engine` / `render_engine` / `slm_shadow`). Kind-validate per `agents/rules/deployment-validation.md`. *Still defaults to OpenAI.*
-- **Phase 4 — Shadow-eval vs OpenAI.** Run `slm_shadow: true` in a non-prod (or read-only-shadow) environment; collect match-rate + latency + widget-validity on live-shaped traffic; close the gaps.
-- **Phase 5 — Gated cutover.** Flip `extraction_engine`/`render_engine` to `slm` per-pass, gated on the Phase-4 metrics meeting §7 targets, with instant rollback to `openai`/`deterministic` via the flag.
+- **Phase 1 — Dataset + baseline** → `automation/mlops/travel-slm/dataset_build` + `eval`. Build the teacher-bootstrapped dataset (§5) and the eval harness + metrics (§7) **as playbooks** (existing tool kinds — not gated on G1–G3); measure OpenAI (ceiling), deterministic Python (floor), and a no-fine-tune small-instruct (Option C) baseline. Decide final model size + serving mode from real numbers.
+- **Phase 2 — Train / fine-tune** → `automation/mlops/travel-slm/finetune` + `package`. LoRA/QLoRA the chosen model + grammar-guided decoding; hit the §7 targets offline. **Gated on G1–G3** (capability gaps, §6A.2) — buildable in parallel with Phase 1.
+- **Phase 3 — Serve + integrate behind flag** → `automation/mlops/travel-slm/deploy`. Stand up the in-cluster inference service + `automation/agents/mcp/travel-slm` playbook; wire the planner flags (`extraction_engine` / `render_engine` / `slm_shadow`). Kind-validate per `agents/rules/deployment-validation.md`. *Still defaults to OpenAI.*
+- **Phase 4 — Shadow-eval vs OpenAI** → `automation/mlops/travel-slm/shadow_eval`. Run `slm_shadow: true` in a non-prod (or read-only-shadow) environment; collect match-rate + latency + widget-validity on live-shaped traffic; close the gaps.
+- **Phase 5 — Gated cutover** → `automation/mlops/travel-slm/deploy` (flag-flip path). Flip `extraction_engine`/`render_engine` to `slm` per-pass, gated on the Phase-4 metrics meeting §7 targets, with instant rollback to `openai`/`deterministic` via the flag.
+- **Ongoing — Scheduled retrain/eval** → `automation/mlops/travel-slm/retrain_orchestrator` on the schedule/cron mechanism, composing the above.
 
 Each of Phases 1–5 is a child issue under the umbrella (§9).
 
@@ -338,8 +375,9 @@ Each of Phases 1–5 is a child issue under the umbrella (§9).
 ## 9. Tracking
 
 - **Umbrella:** noetl/travel#63 — "Travel domain SLM (replace OpenAI for intent + query construction + widget generation)" — labels `slm`, `ml`, `epic`, `enhancement`, `ai-task`.
-- **Child issues (one per phase):** #64 dataset+baseline (P1), #65 train/fine-tune (P2), #66 serve+playbook+flag (P3), #67 shadow-eval (P4), #68 gated cutover (P5).
-- Links: noetl/travel#60 (planner migration), noetl/ai-meta#137 (provider auth), noetl/ai-meta#130/#136 (latency).
+- **Child issues (one per phase):** #64 dataset+baseline (P1), #65 train/fine-tune (P2), #66 serve+playbook+flag (P3), #67 shadow-eval (P4), #68 gated cutover (P5). Each phase is delivered as its named `automation/mlops/travel-slm/*` playbook (§6A, §7 rollout).
+- **Capability-gap issues (§6A.2):** #70 G1 GPU container/k8s-Job dispatch tool, #71 G2 long-running async job orchestration, #72 G3 large-artifact storage + model/dataset registry. G1–G3 gate Phase 2 (`finetune`/`package`); Phase 1 (`dataset_build`/`eval`) is not blocked.
+- Links: noetl/travel#60 (planner migration), noetl/ai-meta#137 (provider auth), noetl/ai-meta#130/#136 (latency), noetl/ai-meta#104 (result tier — basis for G3).
 - Wiki: `travel-slm` page on the [travel wiki](https://github.com/noetl/travel/wiki/travel-slm).
 
 ---
