@@ -136,6 +136,12 @@ workflow:
     tool:
       kind: playbook
       path: automation/agents/mcp/firestore
+      # noetl/ai-meta#136 — block for the child's real result so
+      # `load_slot_state.data` carries the actual Firestore projection
+      # instead of the async-start envelope.
+      return_result: true
+      result_step: firestore_dispatch
+      timeout: 90
       payload:
         method: tools/call
         tool: get_doc
@@ -605,6 +611,12 @@ workflow:
     tool:
       kind: playbook
       path: automation/agents/mcp/google-places
+      # noetl/ai-meta#136 — block for the child's real result so
+      # `call_google_places` is the actual Places search envelope
+      # (`{status, data: {items: [...]}}`), not the async-start status.
+      return_result: true
+      result_step: google_places_dispatch
+      timeout: 120
       payload:
         method: tools/call
         tool: search_text
@@ -619,6 +631,10 @@ workflow:
     tool:
       kind: playbook
       path: automation/agents/mcp/duffel
+      # noetl/ai-meta#136 — block for the child's real Duffel offers.
+      return_result: true
+      result_step: duffel_dispatch
+      timeout: 120
       payload:
         method: tools/call
         tool: search_offers
@@ -634,6 +650,10 @@ workflow:
     tool:
       kind: playbook
       path: automation/agents/mcp/amadeus
+      # noetl/ai-meta#136 — block for the child's real Amadeus hotels.
+      return_result: true
+      result_step: amadeus_search_hotels
+      timeout: 120
       payload:
         method: tools/call
         tool: search_hotels
@@ -649,6 +669,10 @@ workflow:
     tool:
       kind: playbook
       path: automation/agents/mcp/duffel
+      # noetl/ai-meta#136 — block for the child's real Duffel order.
+      return_result: true
+      result_step: duffel_dispatch
+      timeout: 120
       payload:
         method: tools/call
         tool: create_order
