@@ -63,6 +63,15 @@ keychain:
       api_key: "{{ anthropic_secret_path }}"
 
 workflow:
+  - step: start
+    desc: Entry point — the Rust runtime requires a step named `start`; routes to normalize_input
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: normalize_input
+
   - step: normalize_input
     desc: Normalize caller input and generate a thread id when needed
     tool:
@@ -125,9 +134,8 @@ workflow:
   - step: load_slot_state
     desc: Load current slot projection from Firestore
     tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
+      kind: playbook
+      path: automation/agents/mcp/firestore
       payload:
         method: tools/call
         tool: get_doc
@@ -554,9 +562,8 @@ workflow:
   - step: persist_turn_docs_atomically
     desc: Persist projected slot state in one batched Firestore MCP call
     tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
+      kind: playbook
+      path: automation/agents/mcp/firestore
       payload:
         method: tools/call
         tool: batch_set_docs
@@ -571,9 +578,8 @@ workflow:
   - step: append_turn_events_atomically
     desc: Append input, slot update, and optional tool-call events in one batched Firestore MCP call
     tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
+      kind: playbook
+      path: automation/agents/mcp/firestore
       payload:
         method: tools/call
         tool: batch_append_events
@@ -597,9 +603,8 @@ workflow:
   - step: call_google_places
     desc: Dispatch a Google Places text search through the MCP playbook
     tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/google-places
+      kind: playbook
+      path: automation/agents/mcp/google-places
       payload:
         method: tools/call
         tool: search_text
@@ -612,9 +617,8 @@ workflow:
   - step: call_duffel_offers
     desc: Dispatch Duffel test-environment flight offers search
     tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/duffel
+      kind: playbook
+      path: automation/agents/mcp/duffel
       payload:
         method: tools/call
         tool: search_offers
@@ -628,9 +632,8 @@ workflow:
   - step: call_amadeus_hotels
     desc: Dispatch Amadeus test-environment hotel search
     tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/amadeus
+      kind: playbook
+      path: automation/agents/mcp/amadeus
       payload:
         method: tools/call
         tool: search_hotels
@@ -644,9 +647,8 @@ workflow:
   - step: call_duffel_create_order
     desc: Dispatch Duffel test-environment wallet order creation
     tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/duffel
+      kind: playbook
+      path: automation/agents/mcp/duffel
       payload:
         method: tools/call
         tool: create_order
@@ -1503,9 +1505,8 @@ workflow:
   - step: persist_render_docs_atomically
     desc: Persist tool replay docs, final slot state, and calendar event docs in one batched Firestore MCP call
     tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
+      kind: playbook
+      path: automation/agents/mcp/firestore
       payload:
         method: tools/call
         tool: batch_set_docs
@@ -1520,9 +1521,8 @@ workflow:
   - step: append_render_events_atomically
     desc: Append tool response, widget, optional companion widget, and chat events in one batched Firestore MCP call
     tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
+      kind: playbook
+      path: automation/agents/mcp/firestore
       payload:
         method: tools/call
         tool: batch_append_events
