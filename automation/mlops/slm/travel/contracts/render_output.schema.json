@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/slm/render_output.schema.json",
+  "title": "RenderWidgetChatOutput",
+  "description": "Strict output contract for the chat-render pass: a short bot message plus one or more widget envelopes. Each envelope is validated against playbooks/widget-contract/_envelope.schema.json and its widget_type payload schema (the eval harness does the per-envelope schema check via the configured widget_schema_dir).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bot_message", "widgets"],
+  "properties": {
+    "bot_message": {
+      "type": "string",
+      "description": "Short conversational text; structured info lives in widgets."
+    },
+    "widgets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["schema_version", "widget_type", "variant", "payload"],
+        "properties": {
+          "schema_version": { "type": "integer", "const": 1 },
+          "widget_type": { "type": "string" },
+          "variant": { "type": "string" },
+          "payload": { "type": "object" }
+        }
+      }
+    }
+  }
+}

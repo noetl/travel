@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/slm/extract_output.schema.json",
+  "title": "ExtractTurnOutput",
+  "description": "Strict output contract for the extraction pass: slot patch + tool selection + render intent. Mirrors playbooks/agent/system_prompt_extraction.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["slot_updates", "tool_requests", "render_intent"],
+  "properties": {
+    "slot_updates": {
+      "type": "object",
+      "description": "Partial deep patch for slot_state; omit unchanged fields."
+    },
+    "tool_requests": {
+      "type": "array",
+      "description": "At most one is dispatched per turn; most important first.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tool", "arguments"],
+        "properties": {
+          "tool": {
+            "type": "string",
+            "enum": [
+              "mcp/google-places.search_text",
+              "mcp/duffel.search_offers",
+              "mcp/duffel.create_order",
+              "mcp/amadeus.search_hotels"
+            ]
+          },
+          "arguments": { "type": "object" }
+        }
+      }
+    },
+    "render_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "collect_missing",
+            "show_places",
+            "show_flights",
+            "show_hotels",
+            "flight_detail",
+            "order_confirmation",
+            "order_detail",
+            "summary",
+            "summarize",
+            "calendar_live",
+            "clarify",
+            "error"
+          ]
+        },
+        "missing": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["region", "dates", "party"] }
+        }
+      }
+    }
+  }
+}

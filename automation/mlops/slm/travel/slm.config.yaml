@@ -1,0 +1,139 @@
+# Travel-domain SLM instance config — slm.config.yaml
+#
+# This is the ONE object the travel domain writes to instantiate the generic
+# `automation/mlops/slm/<stage>` template pack (noetl/ops).  It is the worked
+# example proving the platform RFC §2.2 config surface (noetl/ai-meta#139) is
+# expressive enough for a real domain.  Travel is slm.config.yaml instance #1.
+#
+# Phase A (noetl/ai-meta#140 / noetl/travel#64) consumes the `roles`, `data`,
+# `dataset_build`, and `eval` blocks (dataset_build + eval run on existing tool
+# kinds).  The `teachers`, `model`, `serving`, and `improvement` blocks are
+# present to prove the schema is complete, but are GATED:
+#   * teachers  -> needs teacher-token budget (RFC decision #6)
+#   * model     -> finetune gated on platform foundations G1/G2/G3
+#   * serving   -> deploy gated on G1; model-choice deferred until this baseline
+#   * improvement -> the continuous-improvement loop is Phase C (#142/#150)
+#
+# All paths are resolved relative to THIS file's directory by the generic engine.
+
+slm_domain:
+  name: travel
+  description: "Intent extraction + tool routing + widget generation for the Muno itinerary-planner"
+
+  # ── 1. I/O CONTRACT — the task the model performs (the oracle's spec) ──
+  roles:
+    - id: extract
+      input: "user event + slot_state + thread context"
+      output_schema: contracts/extract_output.schema.json
+      system_prompt: ../../../../playbooks/agent/system_prompt_extraction.md
+      decoding_grammar: contracts/extract_output.schema.json
+      deterministic_oracle:
+        kind: python_module          # Phase A label source + safety floor
+        module: oracle.py
+        fn: extract
+    - id: render
+      input: "slot_state + extraction + tool_summary + render_intent"
+      output_schema: contracts/render_output.schema.json
+      system_prompt: ../../../../playbooks/agent/system_prompt_chat.md
+      # every emitted envelope is validated against these widget-contract schemas
+      widget_schema_dir: ../../../../playbooks/widget-contract
+      decoding_grammar: ../../../../playbooks/widget-contract/_envelope.schema.json
+      deterministic_oracle:
+        kind: python_module
+        module: oracle.py
+        fn: render
+
+  # tool / output vocab the contract closes over (the enums grammar enforces)
+  vocab:
+    tools:
+      - mcp/google-places.search_text
+      - mcp/duffel.search_offers
+      - mcp/duffel.create_order
+      - mcp/amadeus.search_hotels
+    render_intents:
+      - collect_missing
+      - show_places
+      - show_flights
+      - show_hotels
+      - flight_detail
+      - order_confirmation
+      - order_detail
+      - summary
+      - summarize
+      - calendar_live
+      - clarify
+      - error
+
+  # ── 2. DATA SOURCES — where labels come from ──
+  data:
+    seed_corpus: datasets/seed/travel_seed_turns.jsonl
+    event_log_replay:
+      scope: "tenant=muno/project=travel"
+      via: server_api               # data-access boundary: noetl.* via server API only
+      status: deferred              # Phase-1 follow-up — needs replay access (RFC decision #8)
+    adversarial: datasets/seed/travel_seed_turns.jsonl   # adversarial cases inlined in the seed for Phase A
+    redaction_policy: null          # not required for synthetic seed corpus
+    split:
+      eval_ratio: 0.3
+      seed: "muno-travel-13"
+
+  # ── 3. DATASET BUILD — Phase A stage config ──
+  dataset_build:
+    label_source: deterministic_oracle   # zero-cost floor; teacher is a higher-quality upgrade later
+    run_fn: run_turn                      # oracle entrypoint producing {extract, render}
+    output_dir: datasets/build
+    version: v1
+
+  # ── 4. TEACHER(S) — the labeling ceiling (GATED on RFC decision #6) ──
+  teachers:
+    - id: primary
+      status: disabled
+      kind: http
+      credential: "{{ openai_token }}"    # keychain alias — never inline
+      models: { extract: gpt-4o, render: gpt-4o-mini }
+      note: "Enable to upgrade labels + measure the ceiling; needs teacher-token budget."
+
+  # ── 5. MODEL / TRAIN — GATED on G1/G2/G3; choice deferred until this baseline ──
+  model:
+    status: deferred
+    base_family: qwen2.5
+    base_size: "1.5B"
+    candidates: ["qwen2.5-1.5b-instruct", "llama-3.2-1b-instruct"]
+    recipe: lora
+    role_layout: single_multitask
+    note: "Final size/family decided AFTER the Phase-A baseline numbers (RFC §10 decision 1)."
+
+  # ── 6. EVAL — the gates ──
+  eval:
+    candidate: deterministic_oracle   # Phase A trivial candidate (validates harness + pins floor)
+    floor: deterministic_oracle
+    ceiling: teacher.primary          # deferred until teachers enabled
+    metrics:
+      - { id: widget_schema_validity,      target: 1.0 }   # hard: invalid envelope downgrades UX
+      - { id: extract_schema_validity,     target: 1.0 }
+      - { id: tool_vocab_validity,         target: 1.0 }
+      - { id: render_intent_vocab_validity, target: 1.0 }
+      - { id: tool_match,                  target: 0.98 }
+      - { id: render_intent_match,         target: 0.98 }
+      - { id: widget_type_match,           target: 0.98 }
+      - { id: arg_fidelity,                target: 0.95 }
+      - { id: slot_update_match,           target: 0.95 }
+    eval_sets:
+      holdout: datasets/build/travel/v1/eval.jsonl
+
+  # ── 7. SERVING — GATED on G1; flags pre-wired for the gated cutover ──
+  serving:
+    status: deferred
+    target: cpu
+    quantization: gguf
+    consuming_playbook: playbooks/itinerary-planner.yaml
+    engine_flags:
+      extract: extraction_engine       # openai | slm | deterministic
+      render: render_engine
+
+  # ── 8. CONTINUOUS IMPROVEMENT — Phase C (#142/#150); cadence placeholder ──
+  improvement:
+    status: deferred
+    schedule: "0 3 * * 0"
+    governance:
+      registry_namespace: "muno/travel"
