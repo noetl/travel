@@ -840,5 +840,80 @@
         }
       ]
     }
+  },
+  {
+    "widget_type": "activity_list",
+    "variant": "default",
+    "payload": {
+      "title": "Things to do",
+      "items": [
+        {
+          "activity_code": "act_1",
+          "name": "Seine River Cruise",
+          "type": "TICKET",
+          "country": "France",
+          "currency": "EUR",
+          "amount_from": 35.0,
+          "modalities_count": 2,
+          "modalities": [
+            {
+              "code": "m1",
+              "name": "Standard",
+              "duration": "PT1H"
+            }
+          ],
+          "description": "Scenic cruise past Paris landmarks.",
+          "ctas": [
+            "view_details",
+            "add_to_itinerary"
+          ]
+        }
+      ],
+      "total_count": 1,
+      "filter_summary": "Paris, 2 travellers"
+    },
+    "schema_version": 1,
+    "ai_adjustments": {
+      "annotations": [
+        {
+          "target": "widget",
+          "text": "sample"
+        }
+      ]
+    }
+  },
+  {
+    "widget_type": "transfer_list",
+    "variant": "default",
+    "payload": {
+      "title": "Airport transfers",
+      "items": [
+        {
+          "transfer_id": "xfer_1",
+          "transfer_type": "SHARED",
+          "vehicle_name": "Shared shuttle",
+          "category_name": "Shared",
+          "total_amount": 44.4,
+          "currency": "EUR",
+          "direction": "DEPARTURE",
+          "detail": "CDG to Paris city centre.",
+          "ctas": [
+            "view_details",
+            "add_to_itinerary"
+          ]
+        }
+      ],
+      "total_count": 1,
+      "route_summary": "CDG to Paris"
+    },
+    "schema_version": 1,
+    "ai_adjustments": {
+      "annotations": [
+        {
+          "target": "widget",
+          "text": "sample"
+        }
+      ]
+    }
   }
 ]

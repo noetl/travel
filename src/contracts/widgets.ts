@@ -17,6 +17,8 @@ export interface WidgetEnvelope {
     | 'hotel_list'
     | 'hotel_card'
     | 'hotel_compare'
+    | 'activity_list'
+    | 'transfer_list'
     | 'place_list'
     | 'place_card'
     | 'action_chooser'
@@ -62,6 +64,32 @@ export interface ActionChooserPayload {
   submitted_value?: {
     action_id: string;
   };
+}
+
+
+/**
+ * List of HotelBeds activity availability cards.
+ */
+export interface ActivityListPayload {
+  title: string;
+  items: {
+    activity_code: string;
+    name: string;
+    type?: string;
+    country?: string;
+    currency: string;
+    amount_from?: number;
+    modalities_count?: number;
+    modalities?: {
+      code?: string;
+      name?: string;
+      duration?: unknown;
+    }[];
+    description?: string;
+    ctas?: ('view_details' | 'add_to_itinerary')[];
+  }[];
+  total_count: number;
+  filter_summary?: string;
 }
 
 
@@ -674,6 +702,27 @@ export interface PropertyBlockPayload {
 
 
 /**
+ * List of HotelBeds transfer availability cards.
+ */
+export interface TransferListPayload {
+  title: string;
+  items: {
+    transfer_id: string;
+    transfer_type?: string;
+    vehicle_name?: string;
+    category_name?: string;
+    total_amount?: number;
+    currency: string;
+    direction?: string;
+    detail?: string;
+    ctas?: ('view_details' | 'add_to_itinerary')[];
+  }[];
+  total_count: number;
+  route_summary?: string;
+}
+
+
+/**
  * Typing indicator for an agent.
  */
 export interface TypingIndicatorPayload {
@@ -693,6 +742,7 @@ export interface UserTextPayload {
 
 export const WIDGET_TYPES = [
   "action_chooser",
+  "activity_list",
   "bot_text",
   "calendar_view",
   "clarify_question",
@@ -714,9 +764,10 @@ export const WIDGET_TYPES = [
   "place_card",
   "place_list",
   "property_block",
+  "transfer_list",
   "typing_indicator",
   "user_text"
 ] as const;
 export type WidgetType = typeof WIDGET_TYPES[number];
-export type WidgetPayload = ActionChooserPayload | BotTextPayload | CalendarViewPayload | ClarifyQuestionPayload | DateRangePickerPayload | ErrorCardPayload | FilterPanelPayload | FlightCardPayload | FlightListPayload | HotelCardPayload | HotelComparePayload | HotelListPayload | ItinerarySummaryPayload | LoadingCardPayload | MapViewPayload | NotificationPayload | OrderConfirmationPayload | PartyPickerPayload | PlaceAutocompleteInputPayload | PlaceCardPayload | PlaceListPayload | PropertyBlockPayload | TypingIndicatorPayload | UserTextPayload;
+export type WidgetPayload = ActionChooserPayload | ActivityListPayload | BotTextPayload | CalendarViewPayload | ClarifyQuestionPayload | DateRangePickerPayload | ErrorCardPayload | FilterPanelPayload | FlightCardPayload | FlightListPayload | HotelCardPayload | HotelComparePayload | HotelListPayload | ItinerarySummaryPayload | LoadingCardPayload | MapViewPayload | NotificationPayload | OrderConfirmationPayload | PartyPickerPayload | PlaceAutocompleteInputPayload | PlaceCardPayload | PlaceListPayload | PropertyBlockPayload | TransferListPayload | TypingIndicatorPayload | UserTextPayload;
 export type WidgetEnvelopeOf<TPayload = WidgetPayload> = WidgetEnvelope & { payload: TPayload };
