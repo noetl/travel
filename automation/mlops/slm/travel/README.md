@@ -35,7 +35,7 @@ Outputs land under `datasets/build/travel/v1/` (gitignored — regenerable):
 
 ## Phase-A baseline (seed corpus, 45 turns → 29 train / 16 eval)
 
-**Deterministic-oracle FLOOR + harness validation. OpenAI ceiling deferred.**
+**Deterministic-oracle FLOOR + harness validation. Vertex Gemini ceiling wired (config), on-cluster run deferred.**
 
 | Signal | Value |
 | :-- | :-- |
@@ -55,18 +55,20 @@ Outputs land under `datasets/build/travel/v1/` (gitignored — regenerable):
 - **The floor latency is essentially free** (sub-ms). An SLM call will be
   ~hundreds of ms. So **the SLM must justify itself on accuracy over the
   deterministic floor, not on latency** — latency is a cost the SLM pays vs the
-  floor, recovered only against the *OpenAI* path. This sharpens decision 2/7
+  floor, recovered only against the *teacher (Vertex Gemini)* path. This sharpens decision 2/7
   (CPU vs GPU serving) and decision 1 (model size).
 - **The match-vs-floor 1.0 is the harness working, not a model score.** The
   load-bearing number that will rank model candidates — agreement with the
-  **OpenAI ceiling** — needs teacher labels (next).
+  **teacher ceiling (Vertex Gemini)** — needs teacher labels (next).
 
 ## What Phase 1 needs next
 
-1. **OpenAI teacher budget** (RFC decision #6) — enable `teachers[0]` to
-   produce higher-quality labels and the real **ceiling** (oracle↔teacher and,
-   later, SLM↔teacher agreement). This is the number that ranks model
-   candidates.
+1. **Vertex Gemini teacher run** (RFC decision #6) — `teachers[0]` is wired to
+   the `vertex_gemini` provider (gemini-2.5-pro → flash fallback, Workload-Identity
+   token mint, no API key). The on-cluster run that produces the real **ceiling**
+   (oracle↔teacher and, later, SLM↔teacher agreement) needs Vertex AI enabled on
+   `noetl-demo-19700101` and the worker pod's WI bound to a Vertex-enabled service
+   account. This is the number that ranks model candidates.
 2. **Event-log replay access** (RFC decision #8) — replace/augment the
    synthetic seed with real Muno threads (via the server API, data-access
    boundary) for a golden-replay eval set.

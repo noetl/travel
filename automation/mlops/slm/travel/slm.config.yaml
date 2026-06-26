@@ -70,7 +70,12 @@ slm_domain:
     event_log_replay:
       scope: "tenant=muno/project=travel"
       via: server_api               # data-access boundary: noetl.* via server API only
-      status: deferred              # Phase-1 follow-up — needs replay access (RFC decision #8)
+      status: enabled               # Phase 1 (#140/#141): replay access approved (RFC decision #8)
+      path: muno/playbooks/itinerary-planner   # the consuming playbook whose real turns we pull
+      extract_node: extract_turn    # the planner step whose result carries the production label
+      # base URL arrives at runtime via --base-url / NOETL_SERVER_URL; reads are GET-only.
+      redaction: pii                # emails / phones / cards / names redacted; ISO dates preserved
+      cap_turns: 1000               # bounded replay sample (RFC §2 — keep teacher spend bounded)
     adversarial: datasets/seed/travel_seed_turns.jsonl   # adversarial cases inlined in the seed for Phase A
     redaction_policy: null          # not required for synthetic seed corpus
     split:
@@ -84,14 +89,32 @@ slm_domain:
     output_dir: datasets/build
     version: v1
 
-  # ── 4. TEACHER(S) — the labeling ceiling (GATED on RFC decision #6) ──
+  # ── 4. TEACHER(S) — the labeling ceiling (ENABLED for Phase 1 #140/#141) ──
   teachers:
     - id: primary
-      status: disabled
-      kind: http
-      credential: "{{ openai_token }}"    # keychain alias — never inline
-      models: { extract: gpt-4o, render: gpt-4o-mini }
-      note: "Enable to upgrade labels + measure the ceiling; needs teacher-token budget."
+      status: enabled                     # teacher-token budget approved (RFC decision #6)
+      provider: vertex_gemini             # Vertex AI generateContent; token minted in-python from
+                                          # the worker pod's Workload Identity via the GKE metadata
+                                          # server — no API key, no Secret Manager (RFC decision #6)
+      vertex:
+        project: noetl-demo-19700101
+        region: us-central1
+      # gemini-2.5-flash for label generation (~4x cheaper than pro per the
+      # pricing table below).  The first ceiling run (exec 328967313246134272)
+      # proved a bigger model is NOT the lever — raw gemini-2.5-pro scored 0%
+      # valid widget envelopes / 49% valid extractions, BELOW the deterministic
+      # oracle floor, because it had no output-schema enforcement.  The lever is
+      # schema-constrained decoding (constrained_decoding below): flash +
+      # responseSchema is schema-valid by construction and the cost-effective
+      # label source.  Fallback stays flash (no pro escalation on the cheap path).
+      constrained_decoding: true
+      models: { extract: gemini-2.5-flash, render: gemini-2.5-flash, fallback: gemini-2.5-flash }
+      # USD per 1M tokens — estimate for the cost line; override when list prices move.
+      pricing:
+        gemini-2.5-pro: { input_per_1m: 1.25, output_per_1m: 10.00 }
+        gemini-2.5-flash: { input_per_1m: 0.30, output_per_1m: 2.50 }
+      request_sleep_s: 0.0
+      note: "Ceiling label source — measures the floor↔teacher gap that ranks SLM candidates."
 
   # ── 5. MODEL / TRAIN — GATED on G1/G2/G3; choice deferred until this baseline ──
   model:
