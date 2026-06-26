@@ -70,7 +70,12 @@ slm_domain:
     event_log_replay:
       scope: "tenant=muno/project=travel"
       via: server_api               # data-access boundary: noetl.* via server API only
-      status: deferred              # Phase-1 follow-up — needs replay access (RFC decision #8)
+      status: enabled               # Phase 1 (#140/#141): replay access approved (RFC decision #8)
+      path: muno/playbooks/itinerary-planner   # the consuming playbook whose real turns we pull
+      extract_node: extract_turn    # the planner step whose result carries the production label
+      # base URL arrives at runtime via --base-url / NOETL_SERVER_URL; reads are GET-only.
+      redaction: pii                # emails / phones / cards / names redacted; ISO dates preserved
+      cap_turns: 1000               # bounded replay sample (RFC §2 — keep teacher spend bounded)
     adversarial: datasets/seed/travel_seed_turns.jsonl   # adversarial cases inlined in the seed for Phase A
     redaction_policy: null          # not required for synthetic seed corpus
     split:
@@ -84,14 +89,22 @@ slm_domain:
     output_dir: datasets/build
     version: v1
 
-  # ── 4. TEACHER(S) — the labeling ceiling (GATED on RFC decision #6) ──
+  # ── 4. TEACHER(S) — the labeling ceiling (ENABLED for Phase 1 #140/#141) ──
   teachers:
     - id: primary
-      status: disabled
+      status: enabled                     # teacher-token budget approved (RFC decision #6)
       kind: http
-      credential: "{{ openai_token }}"    # keychain alias — never inline
+      credential: "{{ openai_token }}"    # keychain alias — never inline; resolved via step auth:
+      api_key_env: OPENAI_API_KEY         # engine reads the secret from this env var only;
+                                          # the dataset_build playbook injects it from the
+                                          # keychain alias above via auth: (never written to disk).
       models: { extract: gpt-4o, render: gpt-4o-mini }
-      note: "Enable to upgrade labels + measure the ceiling; needs teacher-token budget."
+      # USD per 1M tokens — estimate for the cost line; override when list prices move.
+      pricing:
+        gpt-4o: { input_per_1m: 2.50, output_per_1m: 10.00 }
+        gpt-4o-mini: { input_per_1m: 0.15, output_per_1m: 0.60 }
+      request_sleep_s: 0.0
+      note: "Ceiling label source — measures the floor↔teacher gap that ranks SLM candidates."
 
   # ── 5. MODEL / TRAIN — GATED on G1/G2/G3; choice deferred until this baseline ──
   model:
