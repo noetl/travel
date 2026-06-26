@@ -15,7 +15,15 @@ metadata:
     SHA256 signature auth — each its own GSM secret). Hotel search via Amadeus
     was removed (Amadeus dropped developer-API support); the mcp/amadeus
     playbook and its GSM secret are left in place but unreferenced.
-  version: "1.2"
+
+    Every provider is reachable as a direct first-turn intent: "flights from
+    NYC to Paris" parses origin/destination and reaches Duffel in one turn,
+    "hotels in Paris" / "things to do in Paris" / "airport transfer from CDG"
+    each land on their HotelBeds provider, and a bare destination shows Places.
+    Flight intent fills origin/destination/dates/party (defaulting dates
+    forward, party to one adult, origin to the home metro) so a follow-up is
+    asked only when the destination is truly absent.
+  version: "1.3"
   agent: true
   tags: [muno, itinerary, trip-planner, event-sourced, widgets]
   terminal:
@@ -223,12 +231,84 @@ workflow:
                 "new york": ("New York", "NYC", "US"),
                 "nyc": ("New York", "NYC", "US"),
                 "london": ("London", "LON", "GB"),
+                "san francisco": ("San Francisco", "SFO", "US"),
+                "los angeles": ("Los Angeles", "LAX", "US"),
             }
             for key, item in known.items():
                 if key in lowered:
                     label, code, country = item
                     return {"label": label, "city_code": code, "country_code": country, "kind": "city"}
+            # Airport-code fallback (word-boundary). Lets an airport-only query
+            # like "airport transfer from CDG" resolve the destination region
+            # so the transfers / flights branches can fire in one turn. The
+            # short codes only match as whole words to avoid substring false
+            # positives ("relax" must not match LAX).
+            airport_codes = {
+                "cdg": ("Paris", "PAR", "FR"), "ory": ("Paris", "PAR", "FR"), "orly": ("Paris", "PAR", "FR"),
+                "jfk": ("New York", "NYC", "US"), "ewr": ("New York", "NYC", "US"), "lga": ("New York", "NYC", "US"),
+                "lhr": ("London", "LON", "GB"), "lgw": ("London", "LON", "GB"), "heathrow": ("London", "LON", "GB"),
+                "mia": ("Miami", "MIA", "US"),
+                "bos": ("Boston", "BOS", "US"),
+                "lax": ("Los Angeles", "LAX", "US"),
+                "sfo": ("San Francisco", "SFO", "US"),
+            }
+            for code_key, item in airport_codes.items():
+                if re.search(r"\b" + code_key + r"\b", lowered):
+                    label, code, country = item
+                    return {"label": label, "city_code": code, "country_code": country, "kind": "city"}
             return None
+
+        # Combined city-name + airport-code -> (IATA code, label, country) map
+        # for parsing flight routes. Duffel test env accepts both metro city
+        # codes (NYC, PAR, LON) and specific airport codes (JFK, CDG, LHR).
+        _PLACE_CODES = {
+            "new york": ("NYC", "New York", "US"), "nyc": ("NYC", "New York", "US"),
+            "jfk": ("JFK", "New York", "US"), "newark": ("EWR", "New York", "US"),
+            "ewr": ("EWR", "New York", "US"), "lga": ("LGA", "New York", "US"),
+            "paris": ("PAR", "Paris", "FR"), "par": ("PAR", "Paris", "FR"),
+            "cdg": ("CDG", "Paris", "FR"), "orly": ("ORY", "Paris", "FR"), "ory": ("ORY", "Paris", "FR"),
+            "miami": ("MIA", "Miami", "US"), "mia": ("MIA", "Miami", "US"),
+            "london": ("LON", "London", "GB"), "lon": ("LON", "London", "GB"),
+            "lhr": ("LHR", "London", "GB"), "heathrow": ("LHR", "London", "GB"),
+            "gatwick": ("LGW", "London", "GB"), "lgw": ("LGW", "London", "GB"),
+            "boston": ("BOS", "Boston", "US"), "bos": ("BOS", "Boston", "US"),
+            "san francisco": ("SFO", "San Francisco", "US"), "sfo": ("SFO", "San Francisco", "US"),
+            "los angeles": ("LAX", "Los Angeles", "US"), "lax": ("LAX", "Los Angeles", "US"),
+        }
+
+        def _resolve_place(token):
+            token = re.sub(r"[^a-z ]", " ", str(token or "").lower()).strip()
+            if not token:
+                return None
+            if token in _PLACE_CODES:
+                return _PLACE_CODES[token]
+            # Longest known key that appears as a whole word inside the phrase,
+            # so "from new york city" -> NYC and "from CDG airport" -> CDG.
+            for key in sorted(_PLACE_CODES, key=len, reverse=True):
+                if re.search(r"\b" + re.escape(key) + r"\b", token):
+                    return _PLACE_CODES[key]
+            return None
+
+        def _flight_route(text):
+            # Parse origin / destination from natural language like
+            # "flights from NYC to Paris". Returns (origin_meta, dest_meta),
+            # each (code, label, country) or None. Falls back to standalone
+            # "from X" / "to Y" when only one endpoint is stated.
+            lowered = " " + str(text or "").lower() + " "
+            origin = dest = None
+            m = re.search(r"\bfrom\s+(.+?)\s+to\s+(.+?)(?:[,.;]| on | next | in | for | departing| leaving|$)", lowered)
+            if m:
+                origin = _resolve_place(m.group(1))
+                dest = _resolve_place(m.group(2))
+            if origin is None:
+                mo = re.search(r"\bfrom\s+([a-z][a-z ]*?)(?:[,.;]| to | on | next | in | for |$)", lowered)
+                if mo:
+                    origin = _resolve_place(mo.group(1))
+            if dest is None:
+                mt = re.search(r"\bto\s+([a-z][a-z ]*?)(?:[,.;]| from | on | next | in | for |$)", lowered)
+                if mt:
+                    dest = _resolve_place(mt.group(1))
+            return origin, dest
 
         def _date_hint(text):
             lowered = text.lower()
@@ -319,6 +399,9 @@ workflow:
             "_deep_merge": _deep_merge,
             "_normalise_region_fields": _normalise_region_fields,
             "_city_geo": _city_geo,
+            "_PLACE_CODES": _PLACE_CODES,
+            "_resolve_place": _resolve_place,
+            "_flight_route": _flight_route,
         })
 
         slot_state = _normalise_region_fields(_slot_from_loaded(loaded_slot_state))
@@ -405,7 +488,29 @@ workflow:
         # HotelBeds Activities — "things to do", tours, excursions, sightseeing.
         wants_activities = any(phrase in lowered_text for phrase in ("things to do", "activities", "activity", "tours", "tour", "what to do", "excursion", "sightseeing", "attractions"))
         # HotelBeds Transfers — airport transfer / ride / shuttle / pickup.
-        wants_transfers = any(phrase in lowered_text for phrase in ("transfer", "airport pickup", "airport pick-up", "ride from", "ride to", "shuttle", "from the airport", "to the airport", "from cdg"))
+        # Note: no bare airport-code trigger here ("from cdg" etc.) — that
+        # collided with explicit flight intent ("fly from CDG to JFK"). The
+        # real transfer phrasings below ("transfer", "shuttle", "airport
+        # pickup") already cover "airport transfer from CDG".
+        wants_transfers = any(phrase in lowered_text for phrase in ("transfer", "airport pickup", "airport pick-up", "ride from", "ride to", "shuttle", "from the airport", "to the airport"))
+        # Duffel Flights — explicit flight intent. "transfer" already routes to
+        # HotelBeds, so flight words are checked independently; the elif chain
+        # below gives hotels/transfers/activities priority when both appear.
+        wants_flight = any(word in lowered_text for word in ("flight", "flights", "fly", "flying", "airfare", "airline", "plane", "air ticket"))
+
+        # Resolve a flight route ("from NYC to Paris") so a direct flight
+        # request fills origin + destination + region in one turn. The parsed
+        # destination overrides region (it is the true endpoint — _city_hint
+        # otherwise returns whichever known city appears first in the text).
+        if wants_flight:
+            origin_meta, dest_meta = _flight_route(text)
+            if dest_meta:
+                # region carries the metro city (PAR), flight_destination the
+                # parsed IATA (CDG or PAR — Duffel test env accepts both).
+                updates["region"] = _city_hint(dest_meta[1]) or {"label": dest_meta[1], "city_code": dest_meta[0], "country_code": dest_meta[2], "kind": "city"}
+                updates["flight_destination"] = dest_meta[0]
+            if origin_meta:
+                updates["flight_origin"] = origin_meta[0]
 
         if any(word in lowered_text for word in ("meeting", "appointment", "reminder", "note")) and "add" in lowered_text:
             updates["pending_calendar_events"] = [{
@@ -541,6 +646,30 @@ workflow:
                 },
             })
             render_intent = {"kind": "show_activities"}
+        elif wants_flight and region_ready:
+            # Duffel flight search on explicit intent ("flights from NYC to
+            # Paris"). Origin / destination come from the parsed route; dates
+            # default forward and party defaults to one adult so a direct
+            # request reaches Duffel in one turn (follow-ups only when the
+            # destination is truly absent — handled by the collect_missing
+            # path when region_ready is False). This branch sits above the
+            # places default so an explicit flight ask is never shown places.
+            fl_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
+            fl_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+            fl_departure = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
+            fl_destination = next_state.get("flight_destination") or fl_region.get("city_code") or "PAR"
+            fl_origin = next_state.get("flight_origin") or "NYC"
+            tool_requests.append({
+                "tool": "mcp/duffel.search_offers",
+                "arguments": {
+                    "origin": fl_origin,
+                    "destination": fl_destination,
+                    "departure_date": fl_departure,
+                    "adults": int(fl_party.get("adults") or 1),
+                    "cabin_class": "economy",
+                },
+            })
+            render_intent = {"kind": "show_flights"}
         elif wants_calendar:
             render_intent = {"kind": "calendar_live"}
         elif region_ready and "places_seen" not in next_state:
@@ -550,11 +679,15 @@ workflow:
             })
             render_intent = {"kind": "show_places"}
         elif region_ready and dates_ready and party_ready and not next_state.get("flight_search_results"):
+            # Guided-flow flights: all core slots are filled (region, dates,
+            # party) and no offers yet. Honor a previously-parsed origin /
+            # destination when present, else fall back to the home-metro
+            # default (SFO) and the region city code.
             tool_requests.append({
                 "tool": "mcp/duffel.search_offers",
                 "arguments": {
-                    "origin": "SFO",
-                    "destination": next_state["region"].get("city_code") or "MIA",
+                    "origin": next_state.get("flight_origin") or "SFO",
+                    "destination": next_state.get("flight_destination") or next_state["region"].get("city_code") or "MIA",
                     "departure_date": next_state.get("check_in_date"),
                     "adults": next_state.get("party", {}).get("adults", 1),
                     "cabin_class": "economy",
