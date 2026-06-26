@@ -23,7 +23,7 @@ metadata:
     Flight intent fills origin/destination/dates/party (defaulting dates
     forward, party to one adult, origin to the home metro) so a follow-up is
     asked only when the destination is truly absent.
-  version: "1.4"
+  version: "1.5"
   agent: true
   tags: [muno, itinerary, trip-planner, event-sourced, widgets]
   terminal:
@@ -1408,14 +1408,28 @@ workflow:
             summary["activities"] = normalised_activities
         elif first_tool == "mcp/hotelbeds-transfers.search_transfers":
             summary["transfers"] = normalised_transfers
-        summary["raw_response"] = envelope
+        # noetl/ai-meta#135 — keep this step's result under the 100 KB
+        # result-tier offload threshold. A result >100 KB is offloaded to
+        # object storage and the off-server state builder hands the NEXT step
+        # (render_widget_chat) a placeholder instead of rehydrating it, which
+        # collapsed the provider widget to its synthetic fallback. The
+        # activities envelope duplicates its items under control_data AND data,
+        # so carrying the full envelope twice (raw_response + an unused
+        # top-level raw) pushed the result to ~118 KB; the widget cards plus a
+        # lightweight envelope summary stay ~25 KB. Store only the envelope
+        # metadata and drop the unused top-level raw.
+        summary["raw_response"] = {
+            key: envelope.get(key)
+            for key in ("_meta", "isError", "status", "summary", "text")
+            if key in envelope
+        }
         # noetl/ai-meta#135 — the result key MUST NOT be named "summary":
         # the Rust runtime shadows a step's ".summary" accessor with an
         # auto-derived text summary, so "{{ normalize_tool_response.summary }}"
         # resolved to the response_summary STRING instead of this dict, which
         # collapsed every provider widget to its synthetic fallback. Use a
         # non-colliding key so render_widget_chat receives the real dict.
-        result = {"tool_result": summary, "slot_state": next_state, "raw": envelope}
+        result = {"tool_result": summary, "slot_state": next_state}
         globals().update({"result": result})
     next:
       spec: { mode: exclusive }
