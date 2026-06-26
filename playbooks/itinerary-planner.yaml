@@ -23,7 +23,7 @@ metadata:
     Flight intent fills origin/destination/dates/party (defaulting dates
     forward, party to one adult, origin to the home metro) so a follow-up is
     asked only when the destination is truly absent.
-  version: "1.3"
+  version: "1.4"
   agent: true
   tags: [muno, itinerary, trip-planner, event-sourced, widgets]
   terminal:
@@ -1409,7 +1409,13 @@ workflow:
         elif first_tool == "mcp/hotelbeds-transfers.search_transfers":
             summary["transfers"] = normalised_transfers
         summary["raw_response"] = envelope
-        result = {"summary": summary, "slot_state": next_state, "raw": envelope}
+        # noetl/ai-meta#135 — the result key MUST NOT be named "summary":
+        # the Rust runtime shadows a step's ".summary" accessor with an
+        # auto-derived text summary, so "{{ normalize_tool_response.summary }}"
+        # resolved to the response_summary STRING instead of this dict, which
+        # collapsed every provider widget to its synthetic fallback. Use a
+        # non-colliding key so render_widget_chat receives the real dict.
+        result = {"tool_result": summary, "slot_state": next_state, "raw": envelope}
         globals().update({"result": result})
     next:
       spec: { mode: exclusive }
@@ -1429,7 +1435,7 @@ workflow:
         extraction_json: "{{ extract_turn.json_str | default('{}') }}"
         slot_state_pre_tool: "{{ extract_turn.captured_slots }}"
         slot_state_post_tool: "{{ normalize_tool_response.slot_state | default({}) }}"
-        tool_summary: "{{ normalize_tool_response.summary | default({}) }}"
+        tool_summary: "{{ normalize_tool_response.tool_result | default({}) }}"
         user_uid: "{{ workload.user_uid | default('guest') }}"
       code: |
         import json
