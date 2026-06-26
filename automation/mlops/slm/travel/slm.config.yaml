@@ -93,16 +93,19 @@ slm_domain:
   teachers:
     - id: primary
       status: enabled                     # teacher-token budget approved (RFC decision #6)
-      kind: http
-      credential: "{{ openai_token }}"    # keychain alias — never inline; resolved via step auth:
-      api_key_env: OPENAI_API_KEY         # engine reads the secret from this env var only;
-                                          # the dataset_build playbook injects it from the
-                                          # keychain alias above via auth: (never written to disk).
-      models: { extract: gpt-4o, render: gpt-4o-mini }
+      provider: vertex_gemini             # Vertex AI generateContent; token minted in-python from
+                                          # the worker pod's Workload Identity via the GKE metadata
+                                          # server — no API key, no Secret Manager (RFC decision #6)
+      vertex:
+        project: noetl-demo-19700101
+        region: us-central1
+      # primary gemini-2.5-pro; the provider falls back to gemini-2.5-flash on a
+      # primary-model failure (e.g. transient resource exhaustion)
+      models: { extract: gemini-2.5-pro, render: gemini-2.5-pro, fallback: gemini-2.5-flash }
       # USD per 1M tokens — estimate for the cost line; override when list prices move.
       pricing:
-        gpt-4o: { input_per_1m: 2.50, output_per_1m: 10.00 }
-        gpt-4o-mini: { input_per_1m: 0.15, output_per_1m: 0.60 }
+        gemini-2.5-pro: { input_per_1m: 1.25, output_per_1m: 10.00 }
+        gemini-2.5-flash: { input_per_1m: 0.30, output_per_1m: 2.50 }
       request_sleep_s: 0.0
       note: "Ceiling label source — measures the floor↔teacher gap that ranks SLM candidates."
 
