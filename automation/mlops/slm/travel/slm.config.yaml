@@ -99,9 +99,16 @@ slm_domain:
       vertex:
         project: noetl-demo-19700101
         region: us-central1
-      # primary gemini-2.5-pro; the provider falls back to gemini-2.5-flash on a
-      # primary-model failure (e.g. transient resource exhaustion)
-      models: { extract: gemini-2.5-pro, render: gemini-2.5-pro, fallback: gemini-2.5-flash }
+      # gemini-2.5-flash for label generation (~4x cheaper than pro per the
+      # pricing table below).  The first ceiling run (exec 328967313246134272)
+      # proved a bigger model is NOT the lever — raw gemini-2.5-pro scored 0%
+      # valid widget envelopes / 49% valid extractions, BELOW the deterministic
+      # oracle floor, because it had no output-schema enforcement.  The lever is
+      # schema-constrained decoding (constrained_decoding below): flash +
+      # responseSchema is schema-valid by construction and the cost-effective
+      # label source.  Fallback stays flash (no pro escalation on the cheap path).
+      constrained_decoding: true
+      models: { extract: gemini-2.5-flash, render: gemini-2.5-flash, fallback: gemini-2.5-flash }
       # USD per 1M tokens — estimate for the cost line; override when list prices move.
       pricing:
         gemini-2.5-pro: { input_per_1m: 1.25, output_per_1m: 10.00 }

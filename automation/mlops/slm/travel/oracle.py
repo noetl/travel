@@ -375,7 +375,14 @@ def _tool_summary(extraction, slot_state):
     reqs = extraction.get("tool_requests") or []
     if not reqs:
         return {"ok": True, "tool": "", "data": {}}
-    tool = reqs[0]["tool"]
+    # A teacher (or any non-oracle label source) may emit a tool request whose
+    # routing key drifted from the contract (``tool_id`` / ``tool_name`` instead
+    # of ``tool``).  Read defensively so a missing ``tool`` key never crashes the
+    # whole batch — an unroutable request degrades to an empty summary, not a
+    # KeyError (noetl/ai-meta#140 Phase 1: the prior ceiling run aborted every
+    # such turn with ``KeyError: 'tool'``).
+    first = reqs[0] if isinstance(reqs[0], dict) else {}
+    tool = first.get("tool") or first.get("tool_id") or first.get("tool_name") or ""
     region = slot_state.get("region") or {}
     if tool == TOOL_GOOGLE_PLACES:
         return {"ok": True, "tool": tool, "data": {"places": _fixture_places(region)}}
