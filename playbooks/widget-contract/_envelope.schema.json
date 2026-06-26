@@ -26,6 +26,8 @@
         "hotel_list",
         "hotel_card",
         "hotel_compare",
+        "activity_list",
+        "transfer_list",
         "place_list",
         "place_card",
         "action_chooser",

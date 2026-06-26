@@ -50,7 +50,7 @@ Keep `bot_message` short. The widget should carry the structured information.
 
 Do not mention production booking. This agent is test mode only.
 
-Use CTA ids that can round-trip into `user_widget_cta_click`, for example `pick_offer:off_123`, `pick_hotel:hotel_123`, `retry:mcp/amadeus.search_hotels`, `confirm`, or `edit:dates`.
+Use CTA ids that can round-trip into `user_widget_cta_click`, for example `pick_offer:off_123`, `retry:mcp/duffel.search_offers`, `confirm`, or `edit:dates`.
 
 When a tool response is sparse or failed, prefer an `error_card` with a retry CTA over fabricating inventory.
 
