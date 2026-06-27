@@ -454,6 +454,52 @@ BUDGETS = {
         "summary_cta": (72, 12), "summary_text": (56, 10), "calendar": (44, 8),
         "summarize": (52, 10),
     },
+    # v4 — render iteration.  v3's last gap was widget_type_match (0.79), driven by
+    # the DATA-BEARING render slices (flight_list / hotel_list / the two-widget
+    # summary sequence) and a soft show_flights routing slice (15/21).  v4 keeps
+    # the EVAL column identical to v3 so the 144-turn holdout stays comparable, and
+    # heavily over-samples those weak slices in TRAIN so the model sees many more
+    # complete flight_list / hotel_list / itinerary_summary+calendar_view renders
+    # and sharper show_flights-vs-(places|hotels) routing contrast:
+    #   * show_flights        104 -> 184  (the weak routing slice + flight_list render)
+    #   * show_hotels_text     88 -> 152  (hotel_list render + flights/hotels contrast)
+    #   * show_hotels_cta      52 ->  80
+    #   * summary_cta          72 -> 128  (the itinerary_summary+calendar_view pair)
+    #   * summary_text         56 -> 104
+    #   * flight_detail        44 ->  72  (flight_card render, sibling of flight_list)
+    #   * show_places_text     72 ->  92  (contrast so flights routing doesn't bleed
+    #                                      back into show_places over-prediction)
+    # Lighter, already-strong slices stay at v3 levels.
+    "v4": {
+        "collect_region": (56, 10), "unknown_city": (28, 6),
+        "collect_dates_text": (44, 10), "collect_dates_widget": (28, 0),
+        "collect_party_widget": (52, 10), "show_places_widget": (96, 16),
+        "show_places_text": (92, 12), "show_flights": (184, 16),
+        "flight_detail": (72, 8), "order_text": (48, 8), "order_cta": (44, 8),
+        "show_hotels_text": (152, 14), "show_hotels_cta": (80, 8),
+        "summary_cta": (128, 12), "summary_text": (104, 10), "calendar": (44, 8),
+        "summarize": (52, 10),
+    },
+    # v4b — v4's aggressive render over-sampling REGRESSED the extract pass:
+    # show_flights/show_hotels/summary jumped 1.7-1.8x while the funnel-start
+    # slices (collect_region/unknown_city/collect_dates) stayed flat, so those
+    # turns fell to ~6% of the corpus.  At 1600 iters (0.73 epoch) the model was
+    # undertrained on "no city -> emit NO region" and learned to always emit a
+    # region -> hallucinated regions on collect_missing turns (slot_update_match
+    # 0.94 -> 0.31, and tool/arg/widget collapsed with it).  v4b keeps a MODERATE
+    # render boost (~1.3-1.4x over v3, vs v4's 1.7-1.8x) AND scales the
+    # funnel/extract slices UP in step, so the extract distribution stays balanced
+    # while render still gets more exposure than v3.  Trained to a full epoch.
+    "v4b": {
+        "collect_region": (96, 10), "unknown_city": (52, 6),
+        "collect_dates_text": (76, 10), "collect_dates_widget": (40, 0),
+        "collect_party_widget": (80, 10), "show_places_widget": (104, 16),
+        "show_places_text": (88, 12), "show_flights": (140, 16),
+        "flight_detail": (60, 8), "order_text": (72, 8), "order_cta": (64, 8),
+        "show_hotels_text": (120, 14), "show_hotels_cta": (72, 8),
+        "summary_cta": (100, 12), "summary_text": (80, 10), "calendar": (60, 8),
+        "summarize": (72, 10),
+    },
 }
 
 
