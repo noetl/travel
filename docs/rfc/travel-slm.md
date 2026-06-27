@@ -392,3 +392,92 @@ Each of Phases 1–5 is a child issue under the umbrella (§9).
 6. **Cutover aggressiveness.** Per-pass independent cutover (recommended: extraction first, then rendering) vs both-at-once; and the metric bar for flipping (RFC proposes the §7 targets).
 7. **Serving stack.** vLLM / TGI (GPU) vs llama.cpp-server / Ollama (CPU) for the inference service — tie to decision #2.
 8. **Replay access for the dataset.** Confirm we can replay historical Muno threads from the event log to build the real-traffic portion of the dataset + golden-replay eval set.
+
+---
+
+## 11. Status / Outcome (update — 2026-06-26)
+
+> Appended after Phases 0–B shipped. The body above (§1–§10) is the
+> original Phase-0 design and is kept verbatim for the record. This
+> section is an honest status of where the project actually landed,
+> which diverged from the Phase-0 assumptions in two important ways.
+> Full narrative + numbers live on the wiki:
+> [Travel-SLM-Journey](https://github.com/noetl/travel/wiki/Travel-SLM-Journey)
+> and
+> [Training-the-Travel-SLM](https://github.com/noetl/travel/wiki/Training-the-Travel-SLM).
+
+### Teacher: OpenAI removed, Vertex Gemini in — and the floor surprise
+
+OpenAI was **fully removed** from the SLM pipeline. The teacher is now
+**Vertex Gemini (`gemini-2.5-flash`)** called over Workload Identity —
+**no API key, no keychain secret** on the teacher path (landed in
+noetl/ops#216 + noetl/travel#75).
+
+The load-bearing finding came early and reshaped the project: **the raw
+teacher scored *below* the deterministic oracle floor.** A bigger
+general model, prompted with the contract, did not beat the rule-based
+Python reference at this narrow structured-generation task — the raw
+teacher even emitted the wrong key (`tool_id` instead of `tool`). The
+fix was **not** a bigger model but **schema / grammar-constrained
+decoding**: forcing the teacher's output through the extraction +
+widget-envelope schemas (Vertex `responseSchema`) took schema validity
+to 100% and tool/extract match up to the floor. That reframed the whole
+effort around **constrained decoding + a small fine-tuned model** —
+exactly the Hybrid A+B recommendation in §3, but for a sharper reason
+than originally argued: at this task, *constraint beats scale*.
+
+Consequently the §5/§7 "OpenAI as ceiling" framing is retired. The
+**deterministic oracle is the authoritative labeler**, and the SLM is
+measured as *accuracy over the deterministic floor*, not *fidelity to a
+frontier ceiling*.
+
+### Pipeline: Phase 1 dataset built, full MLOps lifecycle shipped
+
+The §6A "MLOps-as-NoETL-playbooks" requirement is **real and shipped**.
+The Phase-1 dataset is built, and the `finetune` / `eval` / `package`
+playbooks landed on the G1/G2/G3 foundations (GPU/container Job
+dispatch, long-running async, and the registry / artifact store) —
+noetl/ops#219 (Phase-B finetune + eval(SLM) + package playbooks). The
+G1–G3 capability gaps called out in §6A.2 are no longer blocking: they
+were built, and the lifecycle runs on them.
+
+### Local training: Apple Silicon (MLX), Qwen2.5-1.5B LoRA
+
+Real fine-tuning now runs **locally on Apple Silicon via MLX** —
+**Qwen2.5-1.5B with LoRA** — alongside the container/GPU path
+(noetl/ops#220 + the v2/v3 synthetic corpus generator noetl/travel#76).
+The v1→v2→v3 data-scaling iterations moved per-field match steadily up,
+with **schema validity pinned at 100% throughout** (the grammar
+guarantee from §3 holding in practice):
+
+| Field match | v1 | v3 |
+|---|---|---|
+| `tool` | 0.56 | **0.94** |
+| `render_intent` | 0.56 | **0.92** |
+| `widget_type` | 0.38 | **0.79** |
+| argument fidelity | 0.56 | **0.94** |
+| slot updates | 0.63 | **0.94** |
+| schema validity | 100% | **100%** |
+
+### Honest current status — not yet at the production gate
+
+The model is **not yet at the §7 production bar** (≥0.98 tool/render-
+intent, ≥0.95 arg/slot). Most fields are at/near 0.94; the **lone
+remaining blocker is `widget_type_match` (~0.79)** — specifically the
+**render-generation pass for data-bearing widgets** (flight/hotel/
+activity lists and the like), which is harder than the extraction-side
+routing. Closing that gap is the **next iteration**: more / better-
+targeted render examples for the data-bearing widget classes, not a new
+architecture. Extraction-side routing is effectively production-ready;
+rendering is the long pole.
+
+### Reference
+
+- **Merged work:** noetl/ops#216 + noetl/travel#75 (Vertex Gemini
+  teacher), noetl/ops#219 (Phase-B finetune/eval/package playbooks),
+  noetl/ops#220 + noetl/travel#76 (MLX local LoRA + v2/v3 corpus).
+- **Wiki (full detail):**
+  [Travel-SLM-Journey](https://github.com/noetl/travel/wiki/Travel-SLM-Journey)
+  (the end-to-end story + the floor-surprise finding) and
+  [Training-the-Travel-SLM](https://github.com/noetl/travel/wiki/Training-the-Travel-SLM)
+  (the local MLX training how-to + per-version metrics).
