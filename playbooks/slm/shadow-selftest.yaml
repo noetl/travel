@@ -1,0 +1,255 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: muno_slm_shadow_selftest
+  path: muno/slm/shadow-selftest
+  description: |
+    Isolated validation of the itinerary-planner SLM shadow mechanism
+    (RFC docs/rfc/travel-slm-shadow-rollout.md, Option A) on the real Rust
+    orchestrator — WITHOUT the planner's Firestore + MCP provider stack.
+
+    Reproduces the exact shadow wiring the planner uses: a deterministic "live"
+    extract+render (standing in for extract_turn / render_widget_chat), an
+    INCLUSIVE fork that runs the SLM shadow leaf in parallel
+    (shadow_slm_compare) gated on slm_shadow.enabled, and a final_response main
+    leaf that reads ONLY the live render. Proves:
+      (b) shadow OFF vs ON → final_response is byte-identical (shadow changed
+          nothing user-visible);
+      (a) shadow ON → shadow_slm_compare captures BOTH the live and the SLM
+          extract+render with per-field agreement, in the event log.
+
+    Tenant-tagged muno/slm/* — kind/local only, never prod.
+  version: "2.0"
+  tags: [muno, slm, shadow, selftest]
+
+workload:
+  event_type: user_message
+  event_payload: { text: "I want to plan a trip" }
+  slot_state: {}
+  slm_shadow:
+    enabled: false
+    endpoint: ""               # e.g. http://host.containers.internal:8099
+    timeout_ms: 60000
+    compare_render: true
+
+workflow:
+  - step: start
+    desc: Entry point (Rust runtime requires a `start` step)
+    tool: { kind: noop }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: mock_extract
+
+  - step: mock_extract
+    desc: Deterministic "live" extract — stands in for the planner's extract_turn
+    tool:
+      kind: python
+      input:
+        event_type: "{{ workload.event_type | default('user_message') }}"
+        event_payload: "{{ workload.event_payload | default({}) }}"
+        slot_state: "{{ workload.slot_state | default({}) }}"
+      code: |
+        import json
+
+        payload = event_payload if isinstance(event_payload, dict) else {}
+        text = (payload.get("text") or "").lower()
+        tool_requests = []
+        if "flight" in text or ("from" in text and "to" in text):
+            tool_requests = [{"tool": "mcp/duffel.search_offers", "arguments": {"duffel_env": "test"}}]
+            render_intent = {"kind": "show_flights"}
+        elif text and "trip" not in text and "plan" not in text:
+            tool_requests = [{"tool": "mcp/google-places.search_text", "arguments": {"query": text}}]
+            render_intent = {"kind": "show_places"}
+        else:
+            render_intent = {"kind": "collect_missing", "missing": ["region", "dates", "party"]}
+        contract = {"slot_updates": {}, "tool_requests": tool_requests, "render_intent": render_intent}
+        result = {
+            "first_tool": tool_requests[0]["tool"] if tool_requests else "",
+            "render_intent": render_intent,
+            "slot_updates": {},
+            "captured_slots": slot_state if isinstance(slot_state, dict) else {},
+            "json_str": json.dumps(contract, separators=(",", ":")),
+        }
+        globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: mock_render
+
+  - step: mock_render
+    desc: Deterministic "live" render — stands in for the planner's render_widget_chat
+    tool:
+      kind: python
+      input:
+        render_intent: "{{ mock_extract.render_intent | default({}) }}"
+      code: |
+        ri = render_intent if isinstance(render_intent, dict) else {}
+        kind = ri.get("kind") or "collect_missing"
+        if kind == "show_flights":
+            widget = {"schema_version": 1, "widget_type": "flight_list", "variant": "default",
+                      "payload": {"offers": []}}
+            bot = "Here are some flight options."
+        elif kind == "show_places":
+            widget = {"schema_version": 1, "widget_type": "place_list", "variant": "default",
+                      "payload": {"places": []}}
+            bot = "Here are some destinations."
+        else:
+            widget = {"schema_version": 1, "widget_type": "place_autocomplete_input", "variant": "default",
+                      "payload": {"placeholder": "Search a destination", "submit_on_select": True, "suggestions": []}}
+            bot = "Where would you like to go?"
+        result = {"widgets": [widget], "first_widget": widget, "bot_message": bot}
+        globals().update({"result": result})
+    next:
+      # INCLUSIVE fork — identical pattern to the planner: the main leaf
+      # (final_response) always fires; the shadow leaf forks in parallel only
+      # when enabled. Default OFF → only final_response runs → byte-identical.
+      spec: { mode: inclusive }
+      arcs:
+        - step: final_response
+        - step: shadow_slm_compare
+          when: "{{ workload.slm_shadow.enabled | default(false) }}"
+
+  - step: final_response
+    desc: The user-facing response — reads ONLY mock_render (never the shadow leaf)
+    tool:
+      kind: python
+      input:
+        widget: "{{ mock_render.first_widget | default({}) }}"
+        bot_message: "{{ mock_render.bot_message | default('') }}"
+      code: |
+        result = {
+            "status": "completed",
+            "render": widget,
+            "bot_message": bot_message,
+            "emitted_widget_types": [widget.get("widget_type")] if isinstance(widget, dict) else [],
+        }
+        globals().update({"result": result})
+
+  # Single terminal shadow leaf (see the planner's shadow_slm_compare rationale:
+  # one leaf avoids an orphaned tail hop when the execution goes terminal on the
+  # main path before the slow SLM passes finish). Reads the mock live output.
+  - step: shadow_slm_compare
+    desc: Shadow — v3 SLM extract+render vs the mock live output, per-field agreement (logged, never served)
+    tool:
+      kind: python
+      input:
+        event_type: "{{ workload.event_type | default('user_message') }}"
+        event_payload: "{{ workload.event_payload | default({}) }}"
+        slot_state: "{{ workload.slot_state | default({}) }}"
+        live_extract_json: "{{ mock_extract.json_str | default('{}') }}"
+        live_widgets: "{{ mock_render.widgets | default([]) }}"
+        live_bot_message: "{{ mock_render.bot_message | default('') }}"
+        endpoint: "{{ workload.slm_shadow.endpoint | default('') }}"
+        timeout_ms: "{{ workload.slm_shadow.timeout_ms | default(60000) }}"
+        compare_render: "{{ workload.slm_shadow.compare_render | default(true) }}"
+      code: |
+        import json
+        import re
+        import urllib.request
+
+        _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+        _PHONE = re.compile(r"\+?[\d][\d\s\-().]{7,}\d")
+
+        def _redact(text):
+            if not isinstance(text, str) or not text:
+                return text
+            t = _EMAIL.sub("[REDACTED_EMAIL]", text)
+            return _PHONE.sub(lambda m: "[REDACTED_PHONE]" if sum(c.isdigit() for c in m.group(0)) >= 9 else m.group(0), t)
+
+        def _as_dict(v):
+            if isinstance(v, dict):
+                return v
+            if isinstance(v, str):
+                try:
+                    p = json.loads(v)
+                    return p if isinstance(p, dict) else {}
+                except Exception:
+                    return {}
+            return {}
+
+        def _first_tool(ex):
+            reqs = (ex or {}).get("tool_requests") or []
+            return reqs[0].get("tool", "") if reqs else ""
+
+        def _first_args(ex):
+            reqs = (ex or {}).get("tool_requests") or []
+            return reqs[0].get("arguments", {}) if reqs else {}
+
+        def _intent(ex):
+            return ((ex or {}).get("render_intent") or {}).get("kind")
+
+        def _wtypes(widgets):
+            return [w.get("widget_type") for w in (widgets or []) if isinstance(w, dict)]
+
+        def _post(route, body):
+            req = urllib.request.Request(
+                endpoint.rstrip("/") + route, data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=max(0.1, float(timeout_ms) / 1000.0)) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        turn = {"event_type": event_type, "event_payload": event_payload,
+                "slot_state": slot_state if isinstance(slot_state, dict) else {}, "tool_summary": {}}
+
+        slm_extract = slm_render = None
+        ex_lat = rd_lat = None
+        sv = {"extract": False, "render": False}
+        fell_back = True
+        error = None
+        try:
+            if not endpoint:
+                raise RuntimeError("slm_shadow.endpoint not set")
+            er = _post("/extract", {"turn": turn})
+            slm_extract, ex_lat, sv["extract"] = er.get("extract"), er.get("latency_ms"), bool(er.get("schema_valid"))
+            if compare_render:
+                rr = _post("/render", {"turn": turn, "extraction": slm_extract or {}})
+                slm_render, rd_lat, sv["render"] = rr.get("render"), rr.get("latency_ms"), bool(rr.get("schema_valid"))
+            fell_back = False
+        except Exception as exc:
+            error = ("%s: %s" % (type(exc).__name__, exc))[:300]
+
+        live_extract = _as_dict(live_extract_json)
+        live_widgets_list = live_widgets if isinstance(live_widgets, list) else []
+        slm_ex = _as_dict(slm_extract)
+        slm_rd = _as_dict(slm_render)
+        slm_widgets = slm_rd.get("widgets") if isinstance(slm_rd, dict) else []
+
+        agreement = {}
+        if not fell_back and slm_ex:
+            agreement.update({
+                "tool_match": _first_tool(live_extract) == _first_tool(slm_ex),
+                "arg_match": _first_args(live_extract) == _first_args(slm_ex),
+                "slot_match": live_extract.get("slot_updates") == slm_ex.get("slot_updates"),
+                "render_intent_match": _intent(live_extract) == _intent(slm_ex),
+            })
+        if not fell_back and compare_render and slm_rd:
+            agreement.update({
+                "widget_type_match": _wtypes(live_widgets_list) == _wtypes(slm_widgets),
+                "bot_message_match": (live_bot_message or "") == (slm_rd.get("bot_message") or ""),
+            })
+
+        red_payload = dict(_as_dict(event_payload))
+        for k in ("text", "message"):
+            if isinstance(red_payload.get(k), str):
+                red_payload[k] = _redact(red_payload[k])
+
+        result = {
+            "kind": "slm_shadow_comparison",
+            "turn": {"event_type": event_type, "event_payload": red_payload,
+                     "slot_state": slot_state if isinstance(slot_state, dict) else {}},
+            "live_extract": live_extract,
+            "live_render": {"bot_message": live_bot_message, "widgets": live_widgets_list},
+            "slm_extract": slm_ex,
+            "slm_render": slm_rd,
+            "chosen": "live",
+            "agreement": agreement,
+            "schema_valid": sv,
+            "slm_extract_latency_ms": ex_lat,
+            "slm_render_latency_ms": rd_lat,
+            "fell_back": fell_back,
+            "error": error,
+            "live_widget_types": _wtypes(live_widgets_list),
+            "slm_widget_types": _wtypes(slm_widgets),
+        }
+        globals().update({"result": result})

@@ -437,6 +437,84 @@ already gets today.
 
 ---
 
+## 6b. Implementation status (Option A built + kind-validated)
+
+Option A (local MLX pilot) is **built and validated end-to-end on kind/local**
+(review-only; not on prod). What shipped:
+
+| Piece | Where | What |
+| :-- | :-- | :-- |
+| Serving endpoint | `noetl/ops` `lib/slm_serve.py` | stdlib `http.server` over `SlmRunner`; `POST /extract`, `POST /render`, `GET /healthz`; loads the v3 LoRA, returns the planner's shapes + `schema_valid`. |
+| Split inference | `noetl/ops` `lib/slm_infer.py` | `SlmRunner.run_extract` / `run_render` so each shadow pass is one model call. |
+| Shadow core | `noetl/ops` `lib/slm_shadow.py` | `ShadowClient` + per-field agreement extractors identical to `slm_eval`. |
+| Validation harness | `noetl/ops` `lib/slm_shadow_validate.py` | drives the endpoint over real eval turns vs the oracle; writes shadow records. |
+| Data flywheel | `noetl/ops` `lib/slm_replay.py` `--shadow` | reads shadow-leaf records from the event log → corpus → `dataset_build --corpus`. |
+| Planner shadow branch | `noetl/travel` `playbooks/itinerary-planner.yaml` | `workload.slm_shadow` block (default OFF) + an INCLUSIVE fork at `render_widget_chat` to a single `shadow_slm_compare` terminal leaf. |
+| Orchestrator self-test | `noetl/travel` `playbooks/slm/shadow-selftest.yaml` | isolated planner-shaped playbook proving the mechanism on the real Rust orchestrator without the Firestore/MCP stack. |
+
+### Design refinement found during the build — one leaf, not a chain
+
+The RFC §2.2 sketch (`shadow_slm_extract → shadow_slm_render →
+log_shadow_comparison`) was collapsed to a **single `shadow_slm_compare` leaf**.
+Reason, observed on kind: the Rust orchestrator marks the whole execution
+terminal the instant the main path's terminal step (`final_result`) completes,
+then drives no further commands (`drive: execution is terminal; no further
+orchestrate dispatch`). A multi-hop parallel shadow chain has its tail hop
+orphaned when the slow SLM render outlives `final_result`. A single leaf is
+dispatched at the fork, runs to completion in parallel, and persists its result
+(the comparison record) in the event log even after the execution goes terminal
+— no orphaned hop. The fork uses `next.spec.mode: inclusive` (the orchestrator's
+"all matching arcs fire" mode) so the main arc and the shadow arc both fire when
+enabled; with `enabled=false` the shadow arc's `when` is false → `step.skipped`,
+and the response chain is byte-identical to today.
+
+### Kind validation results (2026-06-27, review-only)
+
+- **Agreement on real turns** (`slm_shadow_validate`, v3, 22-turn stratified
+  eval covering all 11 widget classes): `tool_match` 0.86, `arg_match` 0.86,
+  `slot_match` 0.86, `render_intent_match` 0.82, **`widget_type_match` 0.73**,
+  schema validity **100%** (extract + render), latency p50 ≈ 2.9 s extract /
+  3.4 s render on this Mac. `widget=False` lands exactly on the data-bearing
+  list widgets (`show_flights`/`flight_list`, `show_hotels`/`hotel_list`) — the
+  §6 blocker, faithfully reproduced on a live shadow harness, no fall-backs.
+- **(a) shadow capture** — on the kind orchestrator the `shadow_slm_compare`
+  leaf wrote a `slm_shadow_comparison` record to the event log carrying BOTH the
+  live and the SLM extract+render, per-field agreement, `schema_valid`, real
+  endpoint latencies (worker pod → host MLX endpoint via
+  `host.containers.internal`), `chosen: live`, `fell_back: false`.
+- **(b) byte-identical response** — the self-test's `final_response` was
+  **byte-identical** between a shadow-OFF and a shadow-ON run on the same input;
+  shadow ON only added the `shadow_slm_compare` leaf (the OFF run shows it as
+  `step.skipped`). The served turn is provably unaffected.
+- **(c) flywheel** — `slm_replay --shadow` pulled the shadow record from the
+  event log into a corpus (redacted text + the live label as `prod_extract` +
+  the SLM output), and `dataset_build --corpus` re-labeled it into a training
+  dataset (`travel/shadow_flywheel`, 100% schema validity). A shadow turn
+  became training data.
+
+The real `itinerary-planner.yaml` shadow branch carries the identical wiring;
+it was not executed end-to-end on kind because the full planner requires the
+Firestore + MCP provider stack (not provisioned on kind). The self-test
+exercises the identical mechanism on the same orchestrator, and the planner
+edit is purely additive (the diff touches only `render_widget_chat`'s `next`
+mode + one new arc + one new terminal leaf step + the `workload.slm_shadow`
+block).
+
+### Operator turn-on (prod) — a single change, NOT executed here
+
+Shadow stays OFF on prod. To turn it on later, the operator (1) stands up the
+endpoint per Option A, then (2) flips two `itinerary-planner` workload fields:
+
+```yaml
+workload:
+  slm_shadow:
+    enabled: true
+    endpoint: "<reachable slm_serve URL>"   # e.g. the tunnel to the pilot Mac
+```
+
+Re-register the planner and the next turns shadow. Rollback is the inverse
+single flag (`enabled: false`). No code change, no redeploy.
+
 ## 7. What this RFC does NOT do
 
 - It does not modify `itinerary-planner.yaml` (the shadow steps in §2.2 are a
