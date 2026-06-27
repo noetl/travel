@@ -428,27 +428,56 @@ def _dedup(turns):
                   "dropped_eval_leak": dropped_leak}
 
 
-def build(seed):
+# per-profile (train, eval) budgets.  v3 over-samples the slices the v2 eval was
+# weakest on — show_places (the model over-predicted it: 3/14 correct tool on
+# predicted-show_places turns), its CONTRAST neighbours (show_flights /
+# show_hotels / summarize, so the model stops defaulting to show_places), and the
+# multi-widget `summary` render sequence (itinerary_summary + calendar_view).
+BUDGETS = {
+    "v2": {
+        "collect_region": (48, 10), "unknown_city": (24, 6),
+        "collect_dates_text": (40, 10), "collect_dates_widget": (28, 0),
+        "collect_party_widget": (48, 10), "show_places_widget": (56, 12),
+        "show_places_text": (40, 8), "show_flights": (72, 14),
+        "flight_detail": (40, 8), "order_text": (44, 8), "order_cta": (40, 8),
+        "show_hotels_text": (56, 12), "show_hotels_cta": (44, 8),
+        "summary_cta": (40, 8), "summary_text": (32, 6), "calendar": (40, 8),
+        "summarize": (28, 6),
+    },
+    "v3": {
+        "collect_region": (56, 10), "unknown_city": (28, 6),
+        "collect_dates_text": (44, 10), "collect_dates_widget": (28, 0),
+        "collect_party_widget": (52, 10), "show_places_widget": (96, 16),
+        "show_places_text": (72, 12), "show_flights": (104, 16),
+        "flight_detail": (44, 8), "order_text": (48, 8), "order_cta": (44, 8),
+        "show_hotels_text": (88, 14), "show_hotels_cta": (52, 8),
+        "summary_cta": (72, 12), "summary_text": (56, 10), "calendar": (44, 8),
+        "summarize": (52, 10),
+    },
+}
+
+
+def build(seed, profile="v2"):
     g = Gen(seed)
-    # budgets (train, eval) — weak slices over-sampled; widget/CTA transitions heavy.
+    b = BUDGETS[profile]
     # Over-generate; _dedup trims within-split repeats + any eval/train collision.
-    g.gen_collect_region(48, 10)
-    g.gen_unknown_city(24, 6)
-    g.gen_collect_dates_text(40, 10)       # leak-free date_range_picker (text)
-    g.gen_collect_dates_widget(28, 0)      # city-select: low-cardinality -> train only
-    g.gen_collect_party_widget(48, 10)
-    g.gen_show_places_widget(56, 12)
-    g.gen_show_places_text(40, 8)
-    g.gen_show_flights(72, 14)
-    g.gen_flight_detail(40, 8)
-    g.gen_order_text(44, 8)
-    g.gen_order_cta(40, 8)
-    g.gen_show_hotels_text(56, 12)
-    g.gen_show_hotels_cta(44, 8)
-    g.gen_summary_cta(40, 8)
-    g.gen_summary_text(32, 6)
-    g.gen_calendar(40, 8)
-    g.gen_summarize(28, 6)
+    g.gen_collect_region(*b["collect_region"])
+    g.gen_unknown_city(*b["unknown_city"])
+    g.gen_collect_dates_text(*b["collect_dates_text"])     # leak-free date_range_picker (text)
+    g.gen_collect_dates_widget(*b["collect_dates_widget"])  # city-select: low-cardinality -> train only
+    g.gen_collect_party_widget(*b["collect_party_widget"])
+    g.gen_show_places_widget(*b["show_places_widget"])
+    g.gen_show_places_text(*b["show_places_text"])
+    g.gen_show_flights(*b["show_flights"])
+    g.gen_flight_detail(*b["flight_detail"])
+    g.gen_order_text(*b["order_text"])
+    g.gen_order_cta(*b["order_cta"])
+    g.gen_show_hotels_text(*b["show_hotels_text"])
+    g.gen_show_hotels_cta(*b["show_hotels_cta"])
+    g.gen_summary_cta(*b["summary_cta"])
+    g.gen_summary_text(*b["summary_text"])
+    g.gen_calendar(*b["calendar"])
+    g.gen_summarize(*b["summarize"])
     kept, stats = _dedup(g.turns)
     return kept, stats
 
@@ -486,10 +515,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", default="muno-travel-v2")
+    ap.add_argument("--profile", default="v2", choices=list(BUDGETS.keys()))
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args()
 
-    turns, dedup_stats = build(args.seed)
+    turns, dedup_stats = build(args.seed, profile=args.profile)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as fh:
         for t in turns:
