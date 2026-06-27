@@ -480,6 +480,26 @@ BUDGETS = {
         "summary_cta": (128, 12), "summary_text": (104, 10), "calendar": (44, 8),
         "summarize": (52, 10),
     },
+    # v4b — v4's aggressive render over-sampling REGRESSED the extract pass:
+    # show_flights/show_hotels/summary jumped 1.7-1.8x while the funnel-start
+    # slices (collect_region/unknown_city/collect_dates) stayed flat, so those
+    # turns fell to ~6% of the corpus.  At 1600 iters (0.73 epoch) the model was
+    # undertrained on "no city -> emit NO region" and learned to always emit a
+    # region -> hallucinated regions on collect_missing turns (slot_update_match
+    # 0.94 -> 0.31, and tool/arg/widget collapsed with it).  v4b keeps a MODERATE
+    # render boost (~1.3-1.4x over v3, vs v4's 1.7-1.8x) AND scales the
+    # funnel/extract slices UP in step, so the extract distribution stays balanced
+    # while render still gets more exposure than v3.  Trained to a full epoch.
+    "v4b": {
+        "collect_region": (96, 10), "unknown_city": (52, 6),
+        "collect_dates_text": (76, 10), "collect_dates_widget": (40, 0),
+        "collect_party_widget": (80, 10), "show_places_widget": (104, 16),
+        "show_places_text": (88, 12), "show_flights": (140, 16),
+        "flight_detail": (60, 8), "order_text": (72, 8), "order_cta": (64, 8),
+        "show_hotels_text": (120, 14), "show_hotels_cta": (72, 8),
+        "summary_cta": (100, 12), "summary_text": (80, 10), "calendar": (60, 8),
+        "summarize": (72, 10),
+    },
 }
 
 
