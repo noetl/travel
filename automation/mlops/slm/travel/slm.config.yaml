@@ -154,9 +154,29 @@ slm_domain:
       extract: extraction_engine       # openai | slm | deterministic
       render: render_engine
 
-  # ── 8. CONTINUOUS IMPROVEMENT — Phase C (#142/#150); cadence placeholder ──
+  # ── 8. CONTINUOUS IMPROVEMENT — the data-flywheel loop (#150) ──
+  # Consumed by automation/mlops/slm/improve.yaml (slm_improve.py): harvest →
+  # threshold gate → train → eval + promotion gate → report.  Review-only — the
+  # loop is built + kind-validated but NOT scheduled on prod (an operator wires
+  # the cadence / data-threshold trigger; see improve.yaml § SCHEDULE HOOK).
   improvement:
-    status: deferred
-    schedule: "0 3 * * 0"
+    status: available            # loop is built + validated; scheduling is operator-gated
+    schedule: "0 3 * * 0"        # intended cadence (Sundays 03:00) once an operator wires it
+    # retrain only when this many NEW real (shadow) turns have accrued since the
+    # last run — the threshold gate that stops pointless retrains.
+    min_new_real_turns: 200
+    # the validated training recipe (the v4 negative-result learnings):
+    #   qwen2.5-1.5B single multitask LoRA, balanced extract distribution, NO
+    #   envelope-first render serialization (sort_keys=True).
+    train:
+      mode: mlx                  # mlx = real local LoRA; container = GPU Job; stub = CI
+      backend: mlx
+    # the current production champion the promotion gate compares against on the
+    # first loop run (before any loop-registered release exists) — travel's v3,
+    # the constrained-decode winner (widget_type 0.79; #141).  After the first
+    # promotion the latest G3 release supersedes this bootstrap.
+    champion:
+      model_ref: "registry://muno/travel/model/travel_slm_multitask/3"
+      eval_ref: "registry://muno/travel/eval/travel_slm_multitask/3"
     governance:
       registry_namespace: "muno/travel"
