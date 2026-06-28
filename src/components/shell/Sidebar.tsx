@@ -191,7 +191,7 @@ export function Sidebar({
   const searches = summary?.searches ?? [];
   const orders = summary?.orders ?? [];
   return (
-    <Box sx={{ borderRight: '1px solid', borderColor: 'divider', bgcolor: 'background.paper', p: 2, overflow: 'auto' }}>
+    <Box sx={{ height: '100%', borderRight: '1px solid', borderColor: 'divider', bgcolor: 'background.paper', p: 2, overflow: 'auto' }}>
       <Typography variant="h5" sx={{ mb: 2 }}>{t('app_name')}</Typography>
       <SidebarAccount
         isAuthConfigured={auth.isAuthConfigured}
