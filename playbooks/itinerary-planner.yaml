@@ -801,38 +801,13 @@ workflow:
         }
         globals().update({"result": result})
     next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: persist_turn_docs_atomically
-
-  - step: persist_turn_docs_atomically
-    desc: Persist projected slot state in one batched Firestore MCP call
-    tool:
-      kind: playbook
-      path: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: batch_set_docs
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          items: "{{ extract_turn.turn_docs }}"
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: append_turn_events_atomically
-
-  - step: append_turn_events_atomically
-    desc: Append input, slot update, and optional tool-call events in one batched Firestore MCP call
-    tool:
-      kind: playbook
-      path: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: batch_append_events
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          items: "{{ extract_turn.turn_events }}"
-    next:
+      # FIX B (noetl/ai-meta latency): the turn-doc + turn-event firestore writes
+      # are deferred to a single terminal `persist_all_atomically` step after
+      # render — extract_turn now routes straight to tool dispatch, removing two
+      # fire-and-forget firestore child hops from the critical path. Nothing
+      # between extract_turn and final_result reads the persisted turn docs back
+      # (the old persist/append steps had no return_result and fed no downstream
+      # step), so deferring the write to the end is output-equivalent.
       spec: { mode: exclusive }
       arcs:
         - step: call_google_places
@@ -1979,59 +1954,42 @@ workflow:
       # that NOTHING on the response path reads.
       spec: { mode: inclusive }
       arcs:
-        # Arc-level `set: ctx.*` is one-hop-transient under the Rust orchestrator
-        # (applied to the immediate next step's context only, never persisted as
-        # a ctx.updated event). Downstream steps therefore read render_widget_chat
-        # fields directly — its result persists in the steps map for every later
-        # step — instead of relying on ctx.* surviving multiple hops.
-        - step: persist_render_docs_atomically
-          when: "{{ render_widget_chat.post_docs | length > 0 }}"
-        - step: skip_render_persist
-          when: "{{ render_widget_chat.post_docs | length == 0 }}"
+        # FIX B (noetl/ai-meta latency): all four firestore writes — turn docs +
+        # turn events from extract_turn AND render docs + render events from this
+        # step — are persisted in ONE terminal batch_write child dispatch
+        # (persist_all_atomically), replacing the previous four-step
+        # persist_turn → append_turn → persist_render → append_render chain (four
+        # kind:playbook child hops on the critical path). batch_write tolerates
+        # empty set/append lists, so the old post_docs>0 / ==0 split and the
+        # skip_render_persist convergence noop are gone — there is now exactly one
+        # response-path arc, so no exclusive-convergence trap. Downstream steps
+        # read render_widget_chat fields directly from the steps map; this arc
+        # never feeds ctx.*. The shadow arc stays a gated parallel dead-end leaf.
+        - step: persist_all_atomically
         - step: shadow_slm_compare
           when: "{{ workload.slm_shadow.enabled | default(false) }}"
 
-  - step: skip_render_persist
-    desc: >
-      No render docs to persist (post_docs empty). Same Rust convergence rule as
-      skip_tool_dispatch: append_render_events_atomically must not be a direct
-      exclusive arc of render_widget_chat, or the post_docs>0 branch would skip
-      it terminally. This noop carries the empty-docs branch unconditionally into
-      append_render_events_atomically, its single convergence point.
-    tool:
-      kind: noop
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: append_render_events_atomically
-
-  - step: persist_render_docs_atomically
-    desc: Persist tool replay docs, final slot state, and calendar event docs in one batched Firestore MCP call
+  - step: persist_all_atomically
+    desc: Persist turn + render slot docs and events in ONE batched Firestore MCP call (FIX B hop collapse)
     tool:
       kind: playbook
       path: automation/agents/mcp/firestore
       payload:
         method: tools/call
-        tool: batch_set_docs
+        tool: batch_write
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
-          items: "{{ render_widget_chat.post_docs }}"
-    next:
-      spec: { mode: exclusive }
-      arcs:
-        - step: append_render_events_atomically
-
-  - step: append_render_events_atomically
-    desc: Append tool response, widget, optional companion widget, and chat events in one batched Firestore MCP call
-    tool:
-      kind: playbook
-      path: automation/agents/mcp/firestore
-      payload:
-        method: tools/call
-        tool: batch_append_events
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          items: "{{ render_widget_chat.post_events }}"
+          # Turn docs first, render docs second → render's final slot_state doc is
+          # the last writer for slot_state/current (preserves the prior ordering
+          # where persist_render ran after persist_turn). Each value is a
+          # standalone {{ expr }} so NoETL renders it to the structured list; the
+          # MCP batch_write concatenates set_docs + set_docs_extra in order.
+          set_docs: "{{ extract_turn.turn_docs }}"
+          set_docs_extra: "{{ render_widget_chat.post_docs }}"
+          # Turn events first, render events second → monotonic seq order preserved
+          # (matches the prior append_turn-then-append_render sequence).
+          append_events: "{{ extract_turn.turn_events }}"
+          append_events_extra: "{{ render_widget_chat.post_events }}"
     next:
       spec: { mode: exclusive }
       arcs:
