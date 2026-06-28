@@ -80,7 +80,7 @@ function propertyBlockEnvelope(slotState: Record<string, unknown>): WidgetEnvelo
 export function RightPane({ slotState }: { slotState: Record<string, unknown> }) {
   const { t } = useTranslation();
   return (
-    <Box sx={{ borderLeft: '1px solid', borderColor: 'divider', bgcolor: 'background.paper', p: 2, overflow: 'auto' }}>
+    <Box sx={{ height: '100%', borderLeft: '1px solid', borderColor: 'divider', bgcolor: 'background.paper', p: 2, overflow: 'auto' }}>
       <Typography variant="h6" sx={{ mb: 2 }}>{t('right_pane.title')}</Typography>
       <WidgetRenderer envelope={propertyBlockEnvelope(slotState)} />
     </Box>

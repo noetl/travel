@@ -1,4 +1,6 @@
 import AddCommentIcon from '@mui/icons-material/AddComment';
+import MenuIcon from '@mui/icons-material/Menu';
+import LuggageIcon from '@mui/icons-material/Luggage';
 import { Alert, Box, Button, CircularProgress, IconButton, Paper, Stack, TextField, Tooltip, Typography } from '@mui/material';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -260,7 +262,9 @@ export function ChatThread({
   onSummaryChange,
   scrollToMessageId,
   onScrollHandled,
-  onViewChange
+  onViewChange,
+  onOpenSidebar,
+  onOpenTripState
 }: {
   activeView: SidebarView;
   onSlotStateChange?: (slotState: Record<string, unknown>) => void;
@@ -268,6 +272,10 @@ export function ChatThread({
   scrollToMessageId?: string;
   onScrollHandled?: () => void;
   onViewChange?: (view: SidebarView) => void;
+  // Mobile-only: when provided, render header buttons that open the
+  // sidebar / trip-state drawers. Undefined on desktop (no buttons rendered).
+  onOpenSidebar?: () => void;
+  onOpenTripState?: () => void;
 }) {
   const { t } = useTranslation();
   const auth = useMunoAuth();
@@ -463,20 +471,35 @@ export function ChatThread({
       <Stack
         direction="row"
         alignItems="center"
-        justifyContent="space-between"
+        spacing={1}
         sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}
       >
-        <Typography variant="h6">{activeView === 'orders' ? 'Orders' : 'Muno trip planner'}</Typography>
+        {onOpenSidebar ? (
+          <IconButton edge="start" aria-label="Open menu" onClick={onOpenSidebar} sx={{ mr: 0.5 }}>
+            <MenuIcon />
+          </IconButton>
+        ) : null}
+        <Typography variant="h6" noWrap sx={{ flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {activeView === 'orders' ? 'Orders' : 'Muno trip planner'}
+        </Typography>
         <Tooltip title="Start a new search (clears current thread)">
           <Button
             size="small"
             variant="outlined"
             startIcon={<AddCommentIcon />}
             onClick={startNewSearch}
+            sx={{ flexShrink: 0 }}
           >
             New search
           </Button>
         </Tooltip>
+        {onOpenTripState ? (
+          <Tooltip title="Trip state">
+            <IconButton edge="end" aria-label="Open trip state" onClick={onOpenTripState}>
+              <LuggageIcon />
+            </IconButton>
+          </Tooltip>
+        ) : null}
       </Stack>
       <Box sx={{ overflow: 'auto', p: 2, display: 'grid', gap: 1.5, alignContent: 'start' }}>
         {activeView === 'orders' && visibleMessages.length === 0 ? (

@@ -1,4 +1,5 @@
-import { Alert, Box, Button, CircularProgress, Stack, Typography } from '@mui/material';
+import { Alert, Box, Button, CircularProgress, Drawer, Stack, Typography, useMediaQuery } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import { useCallback, useState } from 'react';
 import { Route, Routes } from 'react-router-dom';
 import { AuthCallback } from './auth/AuthCallback';
@@ -20,32 +21,79 @@ function mergeSlotState(
 }
 
 function Shell() {
+  const theme = useTheme();
+  // Below `md` (900px) the three fixed columns can't fit a phone viewport, so
+  // reflow to a single column (chat) with the side panels as temporary drawers.
+  const isMobile = useMediaQuery(theme.breakpoints.down('md'));
   const [activeView, setActiveView] = useState<SidebarView>('searches');
   const [slotState, setSlotState] = useState<Record<string, unknown>>({});
   const [summary, setSummary] = useState<ChatHistorySummary>({ searches: [], orders: [] });
   const [scrollToMessageId, setScrollToMessageId] = useState<string | undefined>();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [tripStateOpen, setTripStateOpen] = useState(false);
 
   const handleSlotChange = useCallback((next: Record<string, unknown>) => {
     setSlotState((current) => mergeSlotState(current, next));
   }, []);
 
+  const sidebar = (
+    <Sidebar
+      activeView={activeView}
+      onViewChange={setActiveView}
+      summary={summary}
+      onSelectHistoryItem={(item) => {
+        setScrollToMessageId(item.id);
+        if (isMobile) setSidebarOpen(false);
+      }}
+    />
+  );
+
+  const chat = (
+    <ChatThread
+      activeView={activeView}
+      onSlotStateChange={handleSlotChange}
+      onSummaryChange={setSummary}
+      scrollToMessageId={scrollToMessageId}
+      onScrollHandled={() => setScrollToMessageId(undefined)}
+      onViewChange={setActiveView}
+      onOpenSidebar={isMobile ? () => setSidebarOpen(true) : undefined}
+      onOpenTripState={isMobile ? () => setTripStateOpen(true) : undefined}
+    />
+  );
+
+  const rightPane = <RightPane slotState={slotState} />;
+
+  if (isMobile) {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', height: '100dvh' }}>
+        <Box sx={{ flex: 1, minHeight: 0, display: 'grid' }}>{chat}</Box>
+        <Drawer
+          anchor="left"
+          open={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
+          ModalProps={{ keepMounted: true }}
+          PaperProps={{ sx: { width: 'min(300px, 85vw)' } }}
+        >
+          {sidebar}
+        </Drawer>
+        <Drawer
+          anchor="right"
+          open={tripStateOpen}
+          onClose={() => setTripStateOpen(false)}
+          ModalProps={{ keepMounted: true }}
+          PaperProps={{ sx: { width: 'min(340px, 88vw)' } }}
+        >
+          {rightPane}
+        </Drawer>
+      </Box>
+    );
+  }
+
   return (
     <Box sx={{ display: 'grid', gridTemplateColumns: '280px minmax(0, 1fr) 360px', minHeight: '100vh' }}>
-      <Sidebar
-        activeView={activeView}
-        onViewChange={setActiveView}
-        summary={summary}
-        onSelectHistoryItem={(item) => setScrollToMessageId(item.id)}
-      />
-      <ChatThread
-        activeView={activeView}
-        onSlotStateChange={handleSlotChange}
-        onSummaryChange={setSummary}
-        scrollToMessageId={scrollToMessageId}
-        onScrollHandled={() => setScrollToMessageId(undefined)}
-        onViewChange={setActiveView}
-      />
-      <RightPane slotState={slotState} />
+      {sidebar}
+      {chat}
+      {rightPane}
     </Box>
   );
 }
