@@ -59,10 +59,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
+// The control plane wraps a step's output several layers deep on the
+// getExecution / poll path — e.g. final_result is at
+// `event.result.context.result.context.data.{bot_message,render}`. The SSE
+// push path delivers it pre-unwrapped (render / bot_message already at the
+// top level). Descend through the common {context}/{result}/{data}/
+// {output_result} wrappers until we reach the object that actually carries
+// the payload, so the #82 reconcile/poll fallback surfaces the real widget +
+// bot_message instead of degrading to the "Ready." placeholder with no widget.
+function resolvePayloadBag(raw: unknown, depth = 0): Record<string, unknown> | undefined {
+  if (!isRecord(raw) || depth > 8) return undefined;
+  if (contextHasPayload(raw)) return raw;
+  const nested = [
+    raw.context,
+    isRecord(raw.result) ? raw.result.context : undefined,
+    raw.data,
+    raw.result,
+    raw.output_result,
+  ];
+  for (const next of nested) {
+    const found = resolvePayloadBag(next, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 function getEventContext(event: Record<string, unknown>): Record<string, unknown> | undefined {
   const result = event.result as Record<string, unknown> | undefined;
   const outputResult = event.output_result as Record<string, unknown> | undefined;
   const candidates = [result?.context, outputResult?.context, event.context, result, outputResult];
+  for (const candidate of candidates) {
+    const bag = resolvePayloadBag(candidate);
+    if (bag) return bag;
+  }
   return candidates.find(isRecord);
 }
 
@@ -112,13 +141,13 @@ function eventPayloadPriority(event: Record<string, unknown>, context: Record<st
   return priority;
 }
 
-function extractPayloadContext(execution: unknown): Record<string, unknown> {
+export function extractPayloadContext(execution: unknown): Record<string, unknown> {
   const item = isRecord(execution) ? execution : {};
-  const result = item.result;
-  if (isRecord(result) && contextHasPayload(result)) return result;
+  const resolvedResult = resolvePayloadBag(item.result);
+  if (resolvedResult) return resolvedResult;
 
-  const data = item.data;
-  if (isRecord(data) && contextHasPayload(data)) return data;
+  const resolvedData = resolvePayloadBag(item.data);
+  if (resolvedData) return resolvedData;
 
   let best: { priority: number; eventId: string; context: Record<string, unknown> } | undefined;
   const events = Array.isArray(item.events) ? item.events : [];
@@ -135,7 +164,7 @@ function extractPayloadContext(execution: unknown): Record<string, unknown> {
   return best?.context || item;
 }
 
-function extractEnvelope(execution: unknown): WidgetEnvelope | undefined {
+export function extractEnvelope(execution: unknown): WidgetEnvelope | undefined {
   const payload = extractPayloadContext(execution);
   const payloadEnvelope = extractEnvelopeFromContext(payload);
   if (payloadEnvelope) return payloadEnvelope;
@@ -158,18 +187,18 @@ function extractEnvelope(execution: unknown): WidgetEnvelope | undefined {
   return best?.envelope;
 }
 
-function extractSlotState(execution: unknown): Record<string, unknown> | undefined {
+export function extractSlotState(execution: unknown): Record<string, unknown> | undefined {
   const payload = extractPayloadContext(execution);
   const slotState = payload.final_slot_state || payload.slot_state;
   return slotState && typeof slotState === 'object' ? (slotState as Record<string, unknown>) : undefined;
 }
 
-function extractBotMessage(execution: unknown): string {
+export function extractBotMessage(execution: unknown): string {
   const payload = extractPayloadContext(execution);
   return String(payload.bot_message || payload.text || payload.summary || 'Ready.');
 }
 
-function hasFinalPayload(execution: unknown): boolean {
+export function hasFinalPayload(execution: unknown): boolean {
   const payload = extractPayloadContext(execution);
   return Boolean(extractEnvelope(execution) || extractSlotState(execution) || payload.bot_message);
 }
