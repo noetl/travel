@@ -25,6 +25,14 @@ const pendingExecutionStates = new Map<
 const SSE_TIMEOUT_MS = 10_000;
 const CALLBACK_TIMEOUT_MS = 120_000;
 const SSE_DROP_GRACE_MS = 15_000;
+// Absolute ceiling on waiting for a turn's terminal lifecycle frame. The
+// gateway routes `playbook/state` / `playbook/result` frames to a specific
+// SSE `client_id`; if the connection that turn's callback was bound to closes
+// during a reconnect gap, the hub has no live channel and the frame is dropped
+// with NO redelivery. Without a ceiling the pending entry waits forever and the
+// "Muno is planning…" spinner never clears. On expiry we reject so the caller's
+// poll fallback (`getExecution`) recovers the result instead of hanging.
+const EXECUTION_STATE_TIMEOUT_MS = 180_000;
 
 export interface PlaybookStateEvent {
   execution_id: string;
@@ -148,6 +156,33 @@ function handlePlaybookState(message: unknown) {
   });
 }
 
+// Resolve any pending execution waiters whose terminal lifecycle frame may
+// have been lost (e.g. dropped during an SSE reconnect gap) by polling the
+// authoritative execution status. Best-effort: failures leave the pending
+// entry in place so the absolute timeout remains the backstop.
+async function reconcilePendingExecutions(): Promise<void> {
+  const executionIds = Array.from(pendingExecutionStates.keys());
+  for (const executionId of executionIds) {
+    const pending = pendingExecutionStates.get(executionId);
+    if (!pending) continue;
+    try {
+      const execution = (await getExecution(executionId)) as Record<string, unknown>;
+      const status = String(execution?.status || '').toUpperCase();
+      if (status === 'COMPLETED' || status === 'FAILED' || status === 'ERROR' || status === 'CANCELLED') {
+        pendingExecutionStates.delete(executionId);
+        if (pending.timeoutId !== undefined) window.clearTimeout(pending.timeoutId);
+        pending.resolve({
+          execution_id: executionId,
+          event_type: status === 'COMPLETED' ? 'playbook.completed' : 'playbook.failed',
+          status
+        });
+      }
+    } catch {
+      // Best-effort recovery; the absolute timeout still bounds the wait.
+    }
+  }
+}
+
 function attachRegisteredListeners(source: EventSource) {
   for (const [eventName, listeners] of sseListeners) {
     for (const listener of listeners) {
@@ -174,6 +209,12 @@ function connectSSE(token: string): void {
       if (message?.result?.clientId) {
         clientId = message.result.clientId;
         sseConnected = true;
+        // A (re)connect handshake just landed. Any turn whose terminal frame
+        // was dropped while the previous connection was down would otherwise
+        // hang until EXECUTION_STATE_TIMEOUT_MS. Reconcile in-flight turns by
+        // polling their authoritative status so a recovered connection clears
+        // the spinner promptly instead of waiting out the ceiling.
+        void reconcilePendingExecutions();
       }
     } catch {
       // Ignore heartbeat/noise frames.
@@ -281,7 +322,15 @@ export async function waitForExecutionCompletion(executionId: string, signal?: A
       cleanup();
       reject(new DOMException('Aborted', 'AbortError'));
     };
-    pendingExecutionStates.set(executionId, { resolve, reject });
+    // Absolute ceiling: a terminal frame routed to a now-dead SSE client_id is
+    // never redelivered, so without this the waiter (and the spinner) hangs
+    // forever. On expiry reject; the caller's poll fallback recovers the result.
+    const timeoutId = window.setTimeout(() => {
+      pendingExecutionStates.delete(executionId);
+      signal?.removeEventListener('abort', abort);
+      reject(new Error('Gateway lifecycle confirmation timed out'));
+    }, EXECUTION_STATE_TIMEOUT_MS);
+    pendingExecutionStates.set(executionId, { resolve, reject, timeoutId });
     signal?.addEventListener('abort', abort, { once: true });
   });
 }

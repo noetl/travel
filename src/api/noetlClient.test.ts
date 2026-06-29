@@ -126,4 +126,73 @@ describe('noetlClient auth token handling', () => {
     });
     vi.useRealTimers();
   });
+
+  it('rejects (does not hang) when the terminal frame never arrives', async () => {
+    // Regression: a lifecycle frame routed to a dead SSE client_id is never
+    // redelivered. Before the absolute timeout, the waiter hung forever and the
+    // "Muno is planning…" spinner never cleared. It must now reject so the
+    // caller's poll fallback can recover.
+    vi.resetModules();
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { ...globalThis, location: { hostname: 'travel.mestumre.dev' } });
+    vi.stubGlobal('EventSource', MockEventSource);
+    MockEventSource.instances = [];
+    storeSession('test-session-token');
+    const mod = await import('./noetlClient');
+    // Keep reconcile from short-circuiting: report the execution as still RUNNING.
+    mod.noetlClient.defaults.adapter = async (config) => ({
+      data: { status: 'RUNNING' }, status: 200, statusText: 'OK', headers: {}, config
+    });
+
+    const promise = mod.waitForExecutionCompletion('exec-stuck');
+    const settled = promise.then(() => 'resolved').catch((e: Error) => e.message);
+    const source = MockEventSource.instances[0];
+    source.emit('message', { result: { clientId: 'client-1' } });
+    await vi.advanceTimersByTimeAsync(100);
+    // No playbook/state frame is ever emitted (simulating the lost frame).
+    await vi.advanceTimersByTimeAsync(180_000);
+    await expect(settled).resolves.toBe('Gateway lifecycle confirmation timed out');
+
+    vi.useRealTimers();
+  });
+
+  it('recovers a pending turn from a reconnect handshake when its frame was lost', async () => {
+    // The SSE dropped mid-turn and the terminal frame was lost in the gap. On
+    // reconnect the handshake reconciles in-flight turns by polling status, so
+    // the spinner clears without waiting out the absolute timeout.
+    vi.resetModules();
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { ...globalThis, location: { hostname: 'travel.mestumre.dev' } });
+    vi.stubGlobal('EventSource', MockEventSource);
+    MockEventSource.instances = [];
+    storeSession('test-session-token');
+    const mod = await import('./noetlClient');
+    mod.noetlClient.defaults.adapter = async (config) => ({
+      data: { status: 'COMPLETED' }, status: 200, statusText: 'OK', headers: {}, config
+    });
+
+    const promise = mod.waitForExecutionCompletion('exec-recover');
+    const source = MockEventSource.instances[0];
+    // Initial handshake + connection settle so the waiter is registered first
+    // (mirrors a turn already in flight).
+    source.emit('message', { result: { clientId: 'client-2a' } });
+    await vi.advanceTimersByTimeAsync(100);
+    // The SSE then dropped and reconnected; the terminal frame was lost in the
+    // gap. A reconnect handshake now arrives while the turn is pending — this is
+    // what triggers reconciliation (poll status → COMPLETED → resolve).
+    source.emit('message', { result: { clientId: 'client-2b' } });
+    // Flush the async reconcile (getExecution) without firing the 180s ceiling.
+    for (let i = 0; i < 5; i += 1) {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1);
+    }
+
+    await expect(promise).resolves.toMatchObject({
+      execution_id: 'exec-recover',
+      event_type: 'playbook.completed',
+      status: 'COMPLETED'
+    });
+
+    vi.useRealTimers();
+  });
 });
