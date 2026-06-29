@@ -540,6 +540,21 @@ workflow:
                 "google_calendar_event_id": None,
             }]
 
+        # A destination (re)statement in a free-text user_message starts a
+        # fresh place lookup for that region.  Without this, a thread that has
+        # already shown places (places_seen populated) never re-shows them when
+        # the user restates the SAME city, and — worse — never shows the NEW
+        # city's places when they CHANGE destination ("Trip to London" on a
+        # Paris thread).  Drop the prior place ids so show_places fires again
+        # and normalize_tool_response replaces places_seen with the new city's
+        # results instead of leaving stale Paris ids behind.  Scope strictly to
+        # user_message: a user_widget_submit place-pick also writes
+        # updates["region"] (above) but must advance the flow, not re-search.
+        region_restated = ("region" in updates) and event_type == "user_message"
+        if region_restated:
+            updates["places_seen"] = []
+            updates["total_results_seen"] = 0
+
         next_state = _normalise_region_fields(_deep_merge(slot_state, updates))
         region_ready = isinstance(next_state.get("region"), dict)
         dates_ready = bool(next_state.get("check_in_date") and next_state.get("check_out_date"))
@@ -685,7 +700,11 @@ workflow:
             render_intent = {"kind": "show_flights"}
         elif wants_calendar:
             render_intent = {"kind": "calendar_live"}
-        elif region_ready and "places_seen" not in next_state:
+        elif region_ready and ("places_seen" not in next_state or region_restated):
+            # Fire on first sight of a region (no places_seen yet), and again
+            # whenever the user restates/changes the destination in a
+            # user_message (region_restated, which already cleared places_seen
+            # above so this is the new city's lookup, not a stale repeat).
             tool_requests.append({
                 "tool": "mcp/google-places.search_text",
                 "arguments": {"query": next_state["region"].get("label", ""), "max_results": 5},
