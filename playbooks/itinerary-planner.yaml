@@ -23,7 +23,7 @@ metadata:
     Flight intent fills origin/destination/dates/party (defaulting dates
     forward, party to one adult, origin to the home metro) so a follow-up is
     asked only when the destination is truly absent.
-  version: "1.5"
+  version: "1.6"
   agent: true
   tags: [muno, itinerary, trip-planner, event-sourced, widgets]
   terminal:
@@ -847,18 +847,496 @@ workflow:
   - step: call_google_places
     desc: Dispatch a Google Places text search through the MCP playbook
     tool:
-      kind: playbook
-      path: automation/agents/mcp/google-places
-      # noetl/ai-meta#136 — block for the child's real result so
-      # `call_google_places` is the actual Places search envelope
-      # (`{status, data: {items: [...]}}`), not the async-start status.
-      return_result: true
-      result_step: google_places_dispatch
-      timeout: 120
-      payload:
-        method: tools/call
-        tool: search_text
+      kind: python
+      input:
+        method: "tools/call"
+        tool: "search_text"
         arguments: "{{ extract_turn.first_tool_arguments }}"
+        google_project: "noetl-demo-19700101"
+        widget_key_secret: "google-maps-widget-key"
+        max_enrichments: 10
+      code: |
+        import base64
+        import json
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+        METADATA_TOKEN_URL = (
+            "http://metadata.google.internal/computeMetadata/v1/"
+            "instance/service-accounts/default/token"
+        )
+        PLACES_SEARCH_TEXT = "https://places.googleapis.com/v1/places:searchText"
+        PLACES_SEARCH_NEARBY = "https://places.googleapis.com/v1/places:searchNearby"
+        DETAILS_FIELDS = ",".join([
+            "id",
+            "displayName",
+            "formattedAddress",
+            "location",
+            "rating",
+            "userRatingCount",
+            "types",
+            "photos",
+            "regularOpeningHours",
+            "editorialSummary",
+        ])
+        SEARCH_FIELDS = ",".join([
+            "places.id",
+            "places.displayName",
+            "places.formattedAddress",
+            "places.location",
+            "places.rating",
+            "places.userRatingCount",
+            "places.types",
+            "places.photos",
+            "places.regularOpeningHours",
+            "places.editorialSummary",
+        ])
+
+        def _as_dict(value):
+            return value if isinstance(value, dict) else {}
+
+        def _as_list(value):
+            return value if isinstance(value, list) else []
+
+        def _cap(value, default=10):
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = default
+            return max(1, min(parsed, 10))
+
+        def _error(tool_name, message, detail=None, status_code=0):
+            text = message if detail is None else f"{message}: {str(detail)[:500]}"
+            return {
+                "status": "error",
+                "content": [{"type": "text", "text": text}],
+                "isError": True,
+                "_meta": {"backend": "google-places", "tool": tool_name, "status_code": status_code, "error": text[:2000]},
+                "data": {"ok": False, "error": text[:2000], "items": []},
+                "control_data": {"ok": False, "error": text[:2000], "items": []},
+                "summary": text,
+                "text": text,
+            }
+
+        def _ok(tool_name, data, text=None, meta=None):
+            meta = meta if isinstance(meta, dict) else {}
+            payload = data if isinstance(data, dict) else {"value": data}
+            payload.setdefault("ok", True)
+            return {
+                "status": "ok",
+                "content": [{"type": "text", "text": text or f"google-places {tool_name} ok"}],
+                "isError": False,
+                "_meta": {"backend": "google-places", "tool": tool_name, **meta},
+                "data": payload,
+                "control_data": payload,
+                "summary": text or f"google-places {tool_name} ok",
+                "text": text or f"google-places {tool_name} ok",
+            }
+
+        def _token():
+            # Mint an OAuth2 access token from the GKE metadata server using the
+            # worker pod's Workload Identity. No google-auth library: the metadata
+            # endpoint is exactly what google.auth.default() reads under the hood on
+            # GKE, so a direct urllib GET is the library-free equivalent and removes
+            # the `ModuleNotFoundError: No module named 'google'` failure (noetl/ai-meta#137).
+            # The token carries the bound service account's cloud-platform scope, which
+            # is what the Places API (New) accepts as a bearer for backend search calls.
+            req = urllib.request.Request(
+                METADATA_TOKEN_URL,
+                headers={"Metadata-Flavor": "Google"},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")[:300]
+                raise RuntimeError(
+                    "metadata token mint failed HTTP "
+                    f"{exc.code}: Workload Identity is not bound to a GCP service "
+                    f"account with Places access for this worker pod ({body})"
+                )
+            except urllib.error.URLError as exc:
+                raise RuntimeError(
+                    "metadata server unreachable "
+                    f"({getattr(exc, 'reason', exc)}): the worker pod has no GKE "
+                    "Workload Identity metadata endpoint (expected off-cluster, e.g. kind)"
+                )
+            token = (payload or {}).get("access_token") if isinstance(payload, dict) else None
+            if not token:
+                raise RuntimeError("metadata token endpoint returned no access_token")
+            return token
+
+        def _post_google(url, payload, field_mask, project):
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {_token()}",
+                    "X-Goog-User-Project": project,
+                    "X-Goog-FieldMask": field_mask,
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                try:
+                    parsed = json.loads(body)
+                except Exception:
+                    parsed = {"raw": body[:2000]}
+                return exc.code, parsed
+
+        def _get_google(url, field_mask, project):
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "Authorization": f"Bearer {_token()}",
+                    "X-Goog-User-Project": project,
+                    "X-Goog-FieldMask": field_mask,
+                },
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                try:
+                    parsed = json.loads(body)
+                except Exception:
+                    parsed = {"raw": body[:2000]}
+                return exc.code, parsed
+
+        def _secret_value(project, secret_name):
+            token = _token()
+            name = f"projects/{project}/secrets/{secret_name}/versions/latest:access"
+            req = urllib.request.Request(
+                f"https://secretmanager.googleapis.com/v1/{name}",
+                headers={"Authorization": f"Bearer {token}"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            encoded = ((payload.get("payload") or {}).get("data") or "").strip()
+            if not encoded:
+                return ""
+            return base64.b64decode(encoded).decode("utf-8").strip()
+
+        def _display_name(place):
+            display = place.get("displayName") if isinstance(place, dict) else {}
+            if isinstance(display, dict):
+                return display.get("text") or ""
+            return str(display or "")
+
+        def _photo_name(place):
+            photos = place.get("photos") if isinstance(place, dict) else []
+            if isinstance(photos, list) and photos and isinstance(photos[0], dict):
+                return photos[0].get("name") or ""
+            return ""
+
+        def _static_map_url(lat, lng, key, label=""):
+            # `key` is optional: when empty the URL is keyless. Widget-bound
+            # image URLs (see _google_summary) are deliberately built keyless so
+            # the server's `google-maps-widget-key` secret never rides the
+            # delivered payload — the response-boundary scrubber would mask a
+            # keyed URL to "[REDACTED]", which is not a valid `uri` and breaks
+            # the place_card render. The browser supplies its own restricted
+            # `VITE_GOOGLE_MAPS_KEY` at <img> time.
+            if lat is None or lng is None:
+                return None
+            center = urllib.parse.quote(f"{lat},{lng}", safe="")
+            marker_label = urllib.parse.quote(str(label or "")[:12], safe="")
+            url = (
+                "https://maps.googleapis.com/maps/api/staticmap"
+                f"?center={center}&zoom=13&size=400x260&scale=2"
+                f"&markers=color:red%7Clabel:{marker_label}%7C{center}"
+            )
+            if key:
+                url += f"&key={urllib.parse.quote(key, safe='')}"
+            return url
+
+        def _place_photo_url(photo_resource, key, max_width=400):
+            # `key` optional — keyless when empty (see _static_map_url rationale).
+            if not photo_resource:
+                return None
+            resource = str(photo_resource).strip().lstrip("/")
+            url = f"https://places.googleapis.com/v1/{resource}/media?maxWidthPx={int(max_width)}"
+            if key:
+                url += f"&key={urllib.parse.quote(key, safe='')}"
+            return url
+
+        def _lat_lng_from_item(item):
+            geo = item.get("geoCode") if isinstance(item, dict) else {}
+            if not isinstance(geo, dict):
+                geo = item.get("location") if isinstance(item, dict) and isinstance(item.get("location"), dict) else {}
+            lat = geo.get("latitude") if isinstance(geo, dict) else None
+            lng = geo.get("longitude") if isinstance(geo, dict) else None
+            if lat is None:
+                lat = geo.get("lat") if isinstance(geo, dict) else None
+            if lng is None:
+                lng = geo.get("lng") if isinstance(geo, dict) else None
+            return lat, lng
+
+        def _query_for_item(item, intent, fallback_query):
+            if not isinstance(item, dict):
+                return str(fallback_query or "")
+            parts = []
+            name = item.get("name") or item.get("iataCode") or item.get("hotelId") or item.get("id")
+            if name:
+                parts.append(str(name))
+            address = item.get("address") if isinstance(item.get("address"), dict) else {}
+            for key in ("cityName", "countryName"):
+                if address.get(key):
+                    parts.append(str(address[key]))
+            if item.get("iataCode") and intent in ("locations", "hotels"):
+                parts.append(str(item["iataCode"]))
+            if not parts:
+                parts.append(str(fallback_query or "travel"))
+            if intent == "hotels":
+                parts.append("hotel")
+            elif intent == "activities":
+                parts.append("attraction")
+            return " ".join(parts)
+
+        def _valid_widget_uri(url):
+            # Widget photos are schema-validated as `format: uri` on the client;
+            # only emit a syntactically valid absolute http(s) URL, else "" so
+            # the place_card simply renders without a photo (never a broken/
+            # invalid-URI token that fails the whole widget).
+            if not isinstance(url, str) or not url:
+                return ""
+            try:
+                parts = urllib.parse.urlsplit(url)
+            except Exception:
+                return ""
+            return url if parts.scheme in ("http", "https") and parts.netloc else ""
+
+        def _google_summary(place, widget_key):
+            loc = place.get("location") if isinstance(place.get("location"), dict) else {}
+            lat = loc.get("latitude")
+            lng = loc.get("longitude")
+            photo_resource = _photo_name(place)
+            # Prefer the place's actual Google Places photo; fall back to a
+            # static map only when the place has no photo (e.g. a locality /
+            # region anchor). Keyless (widget_key intentionally NOT embedded) —
+            # the browser adds its own VITE_GOOGLE_MAPS_KEY; a server-keyed URL
+            # would be scrubbed to "[REDACTED]" and fail the place_card `uri`
+            # contract.
+            image_url = _valid_widget_uri(
+                _place_photo_url(photo_resource, "")
+                or _static_map_url(lat, lng, "", _display_name(place))
+            )
+            opening = place.get("regularOpeningHours") if isinstance(place.get("regularOpeningHours"), dict) else {}
+            editorial = place.get("editorialSummary") if isinstance(place.get("editorialSummary"), dict) else {}
+            return {
+                "place_id": place.get("id"),
+                "name": _display_name(place),
+                "address": place.get("formattedAddress"),
+                "rating": place.get("rating"),
+                "user_rating_count": place.get("userRatingCount"),
+                "types": place.get("types") if isinstance(place.get("types"), list) else [],
+                "open_now": opening.get("openNow"),
+                "summary": editorial.get("text"),
+                "photo_resource": photo_resource,
+                "image_url": image_url,
+                "maps_static_url": _valid_widget_uri(_static_map_url(lat, lng, "", _display_name(place))),
+            }
+
+        def _enrich_items(args, project, widget_key, limit):
+            intent = str(args.get("intent") or "").strip().lower()
+            fallback_query = args.get("query") or ""
+            source_items = _as_list(args.get("items"))[:limit]
+            enriched = []
+            calls = 0
+            errors = []
+            for item in source_items:
+                if not isinstance(item, dict):
+                    continue
+                query = _query_for_item(item, intent, fallback_query)
+                payload = {"textQuery": query, "maxResultCount": 1}
+                lat, lng = _lat_lng_from_item(item)
+                if lat is not None and lng is not None:
+                    try:
+                        payload["locationBias"] = {
+                            "circle": {
+                                "center": {"latitude": float(lat), "longitude": float(lng)},
+                                "radius": 5000.0,
+                            }
+                        }
+                    except Exception:
+                        pass
+                status, body = _post_google(PLACES_SEARCH_TEXT, payload, SEARCH_FIELDS, project)
+                calls += 1
+                merged = dict(item)
+                if status == 200 and isinstance(body.get("places"), list) and body["places"]:
+                    merged["_google"] = _google_summary(body["places"][0], widget_key)
+                else:
+                    errors.append({"query": query, "status_code": status, "body": body})
+                enriched.append(merged)
+            return {
+                "ok": True,
+                "items": enriched,
+                "enriched_count": sum(1 for item in enriched if isinstance(item.get("_google"), dict)),
+                "calls_made": calls,
+                "errors": errors[:5],
+            }
+
+        def _search_text(args, project, widget_key, limit):
+            if isinstance(args.get("items"), list):
+                return _ok("search_text", _enrich_items(args, project, widget_key, limit), "google-places enriched items")
+            query = str(args.get("query") or args.get("textQuery") or "").strip()
+            if not query:
+                return _error("search_text", "query is required")
+            payload = {"textQuery": query, "maxResultCount": min(int(args.get("maxResultCount") or limit), limit)}
+            lat = args.get("lat")
+            lng = args.get("lng")
+            radius = float(args.get("radius") or 5000)
+            if lat is not None and lng is not None:
+                payload["locationBias"] = {"circle": {"center": {"latitude": float(lat), "longitude": float(lng)}, "radius": radius}}
+            status, body = _post_google(PLACES_SEARCH_TEXT, payload, SEARCH_FIELDS, project)
+            if status != 200:
+                return _error("search_text", f"Places searchText failed HTTP {status}", body, status)
+            places = body.get("places") if isinstance(body.get("places"), list) else []
+            items = [{**place, "_google": _google_summary(place, widget_key)} for place in places[:limit]]
+            return _ok("search_text", {"items": items, "calls_made": 1, "enriched_count": len(items)}, f"{len(items)} Google place(s)")
+
+        def _nearby_search(args, project, widget_key, limit):
+            try:
+                lat = float(args.get("lat") if args.get("lat") is not None else args.get("latitude"))
+                lng = float(args.get("lng") if args.get("lng") is not None else args.get("longitude"))
+            except Exception:
+                return _error("nearby_search", "lat/lng are required")
+            included_type = args.get("type")
+            payload = {
+                "maxResultCount": min(int(args.get("maxResultCount") or limit), limit),
+                "locationRestriction": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": float(args.get("radius") or 5000)}},
+            }
+            if included_type:
+                payload["includedTypes"] = [str(included_type)]
+            status, body = _post_google(PLACES_SEARCH_NEARBY, payload, SEARCH_FIELDS, project)
+            if status != 200:
+                return _error("nearby_search", f"Places nearbySearch failed HTTP {status}", body, status)
+            places = body.get("places") if isinstance(body.get("places"), list) else []
+            items = [{**place, "_google": _google_summary(place, widget_key)} for place in places[:limit]]
+            return _ok("nearby_search", {"items": items, "calls_made": 1, "enriched_count": len(items)}, f"{len(items)} nearby Google place(s)")
+
+        def _place_details(args, project, widget_key, limit):
+            raw_ids = args.get("place_ids") or args.get("placeIds") or args.get("place_id") or args.get("placeId")
+            ids = raw_ids if isinstance(raw_ids, list) else [raw_ids]
+            ids = [str(value).strip() for value in ids if str(value or "").strip()][:limit]
+            if not ids:
+                return _error("place_details", "place_id or place_ids is required")
+            details = []
+            errors = []
+            for place_id in ids:
+                url = "https://places.googleapis.com/v1/places/" + urllib.parse.quote(place_id, safe="")
+                status, body = _get_google(url, DETAILS_FIELDS, project)
+                if status == 200:
+                    details.append({**body, "_google": _google_summary(body, widget_key)})
+                else:
+                    errors.append({"place_id": place_id, "status_code": status, "body": body})
+            return _ok("place_details", {"items": details, "errors": errors[:5], "calls_made": len(ids), "enriched_count": len(details)}, f"{len(details)} place detail(s)")
+
+        def _static_map(args, project, widget_key):
+            lat = args.get("lat") if args.get("lat") is not None else args.get("latitude")
+            lng = args.get("lng") if args.get("lng") is not None else args.get("longitude")
+            url = _static_map_url(lat, lng, widget_key, args.get("label") or "")
+            return _ok("static_map_url", {"url": url, "calls_made": 0}, "static map URL built")
+
+        def _place_photo(args, project, widget_key):
+            resource = args.get("photo_resource") or args.get("photoResource") or args.get("name")
+            width = args.get("maxWidthPx") or args.get("max_width") or 400
+            url = _place_photo_url(resource, widget_key, int(width))
+            return _ok("place_photo_url", {"url": url, "calls_made": 0}, "place photo URL built")
+
+        globals().update({
+            "base64": base64,
+            "json": json,
+            "time": time,
+            "urllib": urllib,
+            "SCOPE": SCOPE,
+            "METADATA_TOKEN_URL": METADATA_TOKEN_URL,
+            "PLACES_SEARCH_TEXT": PLACES_SEARCH_TEXT,
+            "PLACES_SEARCH_NEARBY": PLACES_SEARCH_NEARBY,
+            "DETAILS_FIELDS": DETAILS_FIELDS,
+            "SEARCH_FIELDS": SEARCH_FIELDS,
+            "_as_dict": _as_dict,
+            "_as_list": _as_list,
+            "_cap": _cap,
+            "_error": _error,
+            "_ok": _ok,
+            "_token": _token,
+            "_post_google": _post_google,
+            "_get_google": _get_google,
+            "_secret_value": _secret_value,
+            "_display_name": _display_name,
+            "_photo_name": _photo_name,
+            "_static_map_url": _static_map_url,
+            "_place_photo_url": _place_photo_url,
+            "_lat_lng_from_item": _lat_lng_from_item,
+            "_query_for_item": _query_for_item,
+            "_google_summary": _google_summary,
+            "_enrich_items": _enrich_items,
+            "_search_text": _search_text,
+            "_nearby_search": _nearby_search,
+            "_place_details": _place_details,
+            "_static_map": _static_map,
+            "_place_photo": _place_photo,
+        })
+
+        tools = [
+            {"name": "search_text", "title": "Search Google Places by text", "description": "Text search, or batch-enrich up to 10 supplied travel items.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "items": {"type": "array"}, "intent": {"type": "string"}}}},
+            {"name": "place_details", "title": "Google Place Details", "description": "Fetch details for one place_id or up to 10 place_ids.", "inputSchema": {"type": "object", "properties": {"place_id": {"type": "string"}, "place_ids": {"type": "array"}}}},
+            {"name": "nearby_search", "title": "Search nearby Google Places", "description": "Nearby search by latitude/longitude.", "inputSchema": {"type": "object", "required": ["lat", "lng"], "properties": {"lat": {"type": "number"}, "lng": {"type": "number"}, "radius": {"type": "number"}, "type": {"type": "string"}}}},
+            {"name": "static_map_url", "title": "Build Maps Static URL", "description": "Builds a browser-fetchable Maps Static URL using the restricted widget key.", "inputSchema": {"type": "object", "required": ["lat", "lng"], "properties": {"lat": {"type": "number"}, "lng": {"type": "number"}, "label": {"type": "string"}}}},
+            {"name": "place_photo_url", "title": "Build Place Photo URL", "description": "Builds a browser-fetchable Place Photo media URL using the restricted widget key.", "inputSchema": {"type": "object", "required": ["photo_resource"], "properties": {"photo_resource": {"type": "string"}, "maxWidthPx": {"type": "integer"}}}},
+        ]
+
+        selected_method = str(method or "tools/list").strip().lower()
+        selected_tool = str(tool or "").strip()
+        args = _as_dict(arguments)
+        project = str(args.get("google_project") or google_project or "noetl-demo-19700101").strip()
+        secret_name = str(args.get("widget_key_secret") or widget_key_secret or "google-maps-widget-key").strip()
+        limit = _cap(args.get("max_enrichments") or max_enrichments)
+
+        if selected_method == "tools/list":
+            result = _ok("tools/list", {"tools": tools}, "Google Places MCP — 5 tools available", {"tool_count": len(tools)})
+        elif selected_method != "tools/call":
+            result = _error("unknown_method", f"Unsupported method {selected_method!r}")
+        elif selected_tool not in {tool_def["name"] for tool_def in tools}:
+            result = _error("unknown_tool", f"Unsupported tool {selected_tool!r}")
+        else:
+            widget_key = ""
+            try:
+                widget_key = _secret_value(project, secret_name)
+            except Exception as exc:
+                # Backend enrichment still works without photos. URL builders
+                # return null rather than failing the caller.
+                if selected_tool in ("static_map_url", "place_photo_url"):
+                    result = _ok(selected_tool, {"url": None, "calls_made": 0, "widget_key_error": f"{type(exc).__name__}: {exc}"}, f"{selected_tool} unavailable: widget key unreadable")
+                else:
+                    widget_key = ""
+            if "result" not in locals():
+                try:
+                    if selected_tool == "search_text":
+                        result = _search_text(args, project, widget_key, limit)
+                    elif selected_tool == "nearby_search":
+                        result = _nearby_search(args, project, widget_key, limit)
+                    elif selected_tool == "place_details":
+                        result = _place_details(args, project, widget_key, limit)
+                    elif selected_tool == "static_map_url":
+                        result = _static_map(args, project, widget_key)
+                    elif selected_tool == "place_photo_url":
+                        result = _place_photo(args, project, widget_key)
+                except Exception as exc:
+                    result = _error(selected_tool, "Google Places tool failed", f"{type(exc).__name__}: {exc}")
     next:
       spec: { mode: exclusive }
       arcs:
@@ -867,17 +1345,690 @@ workflow:
   - step: call_duffel_offers
     desc: Dispatch Duffel test-environment flight offers search
     tool:
-      kind: playbook
-      path: automation/agents/mcp/duffel
-      # noetl/ai-meta#136 — block for the child's real Duffel offers.
-      return_result: true
-      result_step: duffel_dispatch
-      timeout: 120
-      payload:
-        method: tools/call
-        tool: search_offers
-        duffel_env: test
+      kind: python
+      input:
+        method: "tools/call"
+        tool: "search_offers"
         arguments: "{{ extract_turn.first_tool_arguments }}"
+        duffel_env: "test"
+        duffel_api_base: "https://api.duffel.com"
+        duffel_api_version: "v2"
+        google_project: "noetl-demo-19700101"
+        duffel_secret_name: "duffel-api-test"
+      code: |
+        import base64
+        import json
+        from datetime import datetime, timezone
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        METADATA_TOKEN_URL = (
+            "http://metadata.google.internal/computeMetadata/v1/"
+            "instance/service-accounts/default/token"
+        )
+
+        def _metadata_token():
+            # Mint an OAuth2 access token from the GKE metadata server using the
+            # worker pod's Workload Identity. No google-auth library: this is the
+            # same endpoint google.auth.default() reads under the hood on GKE, so a
+            # direct urllib GET is the library-free equivalent (noetl/ai-meta#137).
+            req = urllib.request.Request(
+                METADATA_TOKEN_URL,
+                headers={"Metadata-Flavor": "Google"},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")[:300]
+                raise RuntimeError(
+                    "metadata token mint failed HTTP "
+                    f"{exc.code}: Workload Identity is not bound to a GCP service "
+                    f"account with Secret Manager access for this worker pod ({body})"
+                )
+            except urllib.error.URLError as exc:
+                raise RuntimeError(
+                    "metadata server unreachable "
+                    f"({getattr(exc, 'reason', exc)}): the worker pod has no GKE "
+                    "Workload Identity metadata endpoint (expected off-cluster, e.g. kind)"
+                )
+            token = (payload or {}).get("access_token") if isinstance(payload, dict) else None
+            if not token:
+                raise RuntimeError("metadata token endpoint returned no access_token")
+            return token
+
+        def _extract_token(raw):
+            # The GSM secret `duffel-api-test` holds the full Duffel credential
+            # file ({"data":{"token":…}}); tolerate a bare {"token":…} object or
+            # a raw token string too, so a future `gcloud secrets versions add`
+            # in any of those shapes keeps resolving without a playbook edit.
+            # Never logged/printed.
+            s = "" if raw is None else str(raw).strip()
+            if s.startswith("{"):
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    return s
+                if isinstance(obj, dict):
+                    data = obj.get("data")
+                    if isinstance(data, dict) and data.get("token"):
+                        return str(data.get("token")).strip()
+                    if obj.get("token"):
+                        return str(obj.get("token")).strip()
+                return s
+            return s
+
+        def _secret_bearer(project, secret_name):
+            # Read the GSM secret value (the full Duffel credential file JSON)
+            # using the WI metadata token and collapse it to the bare bearer.
+            # Raises with a credential/permission-flavoured message so the
+            # failure mode is unambiguous on kind / pre-grant prod.
+            token = _metadata_token()
+            name = f"projects/{project}/secrets/{secret_name}/versions/latest:access"
+            req = urllib.request.Request(
+                f"https://secretmanager.googleapis.com/v1/{name}",
+                headers={"Authorization": f"Bearer {token}"},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    payload = json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")[:300]
+                raise RuntimeError(
+                    f"secret manager access HTTP {exc.code} for '{secret_name}': the "
+                    f"worker GSA lacks secretmanager.secretAccessor on this secret, or "
+                    f"the secret is not loaded yet ({body})"
+                )
+            encoded = ((payload.get("payload") or {}).get("data") or "").strip()
+            if not encoded:
+                raise RuntimeError(f"secret '{secret_name}' has no payload data")
+            raw = base64.b64decode(encoded).decode("utf-8").strip()
+            bearer = _extract_token(raw)
+            if not bearer:
+                raise RuntimeError(f"secret '{secret_name}' payload had no Duffel token (.data.token)")
+            return bearer
+
+        def _as_dict(value):
+            return value if isinstance(value, dict) else {}
+
+        def _as_list(value):
+            return value if isinstance(value, list) else []
+
+        def _cap(value, default=10, maximum=10):
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = default
+            return max(1, min(parsed, maximum))
+
+        def _text(value, default=""):
+            value = default if value is None else value
+            return str(value).strip()
+
+        def _error(tool_name, message, detail=None, status_code=0, code=None):
+            text = message if detail is None else f"{message}: {str(detail)[:700]}"
+            payload = {"ok": False, "status": "error", "error": text[:2000], "status_code": status_code}
+            if code:
+                payload["code"] = code
+            return {
+                # Keep the NoETL step green; MCP clients read isError plus
+                # control_data.status for the upstream/tool-level error.
+                "status": "ok",
+                "content": [{"type": "text", "text": text}],
+                "isError": True,
+                "_meta": {"backend": "duffel", "tool": tool_name, "duffel_env": duffel_env, "status_code": status_code, "error": text[:2000], "code": code},
+                "data": payload,
+                "control_data": payload,
+                "summary": text,
+                "text": text,
+            }
+
+        def _ok(tool_name, data, text=None, meta=None):
+            meta = meta if isinstance(meta, dict) else {}
+            payload = data if isinstance(data, dict) else {"value": data}
+            payload.setdefault("ok", True)
+            return {
+                "status": "ok",
+                "content": [{"type": "text", "text": text or f"Duffel {tool_name} ok"}],
+                "isError": False,
+                "_meta": {"backend": "duffel", "tool": tool_name, "duffel_env": duffel_env, **meta},
+                "data": payload,
+                "control_data": payload,
+                "summary": text or f"Duffel {tool_name} ok",
+                "text": text or f"Duffel {tool_name} ok",
+            }
+
+        def _request(http_method, path, payload=None, params=None):
+            base = _text(duffel_api_base, "https://api.duffel.com").rstrip("/")
+            url = base + path
+            if params:
+                url += "?" + urllib.parse.urlencode(params, doseq=True)
+            headers = {
+                "Authorization": f"Bearer {duffel_token}",
+                "Accept": "application/json",
+                "Duffel-Version": _text(duffel_api_version, "v2"),
+            }
+            body = None
+            if payload is not None:
+                headers["Content-Type"] = "application/json"
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            req = urllib.request.Request(url, data=body, headers=headers, method=http_method)
+            try:
+                with urllib.request.urlopen(req, timeout=45) as resp:
+                    raw = resp.read().decode("utf-8")
+                    parsed = json.loads(raw or "{}")
+                    return True, resp.status, parsed
+            except urllib.error.HTTPError as exc:
+                raw = exc.read().decode("utf-8", errors="replace")
+                try:
+                    parsed = json.loads(raw or "{}")
+                except Exception:
+                    parsed = {"raw": raw[:2000]}
+                return False, exc.code, parsed
+            except urllib.error.URLError as exc:
+                return False, 0, {"error": str(getattr(exc, "reason", exc))}
+            except Exception as exc:
+                return False, 0, {"error": f"{type(exc).__name__}: {exc}"}
+
+        def _duration(value):
+            return _text(value, "?") or "?"
+
+        def _iata(place):
+            if isinstance(place, dict):
+                return place.get("iata_code") or place.get("iataCode") or place.get("id") or "?"
+            return "?"
+
+        def _carrier(segment):
+            for key in ("marketing_carrier", "operating_carrier"):
+                carrier = segment.get(key)
+                if isinstance(carrier, dict) and carrier.get("iata_code"):
+                    return carrier.get("iata_code")
+            return segment.get("marketing_carrier_iata_code") or segment.get("operating_carrier_iata_code") or "?"
+
+        def _normalise_segment(segment):
+            origin = segment.get("origin") if isinstance(segment.get("origin"), dict) else {}
+            destination = segment.get("destination") if isinstance(segment.get("destination"), dict) else {}
+            return {
+                "departure": {"iataCode": _iata(origin), "at": segment.get("departing_at") or segment.get("departure_time") or "?"},
+                "arrival": {"iataCode": _iata(destination), "at": segment.get("arriving_at") or segment.get("arrival_time") or "?"},
+                "carrierCode": _carrier(segment),
+                "number": _text(segment.get("marketing_carrier_flight_number") or segment.get("flight_number")),
+                "duration": _duration(segment.get("duration")),
+                "numberOfStops": 0,
+            }
+
+        def _normalise_offer(offer):
+            slices = _as_list(offer.get("slices"))
+            itineraries = []
+            validating = []
+            for item in slices:
+                segments = [_normalise_segment(seg) for seg in _as_list(item.get("segments")) if isinstance(seg, dict)]
+                for seg in segments:
+                    code = seg.get("carrierCode")
+                    if code and code != "?" and code not in validating:
+                        validating.append(code)
+                itineraries.append({
+                    "duration": _duration(item.get("duration")),
+                    "segments": segments,
+                })
+            return {
+                "id": offer.get("id"),
+                "source": "duffel",
+                "price": {
+                    "total": offer.get("total_amount") or offer.get("base_amount") or "?",
+                    "currency": offer.get("total_currency") or offer.get("base_currency") or "USD",
+                },
+                "itineraries": itineraries,
+                "validatingAirlineCodes": validating,
+                "expires_at": offer.get("expires_at"),
+                "live_mode": offer.get("live_mode"),
+            }
+
+        def _tools_list():
+            tools = [
+                {
+                    "name": "search_offers",
+                    "title": "Search flight offers",
+                    "description": "Duffel flight offers search. Required: origin, destination, departure_date. Optional: return_date, adults, cabin_class.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["origin", "destination", "departure_date"],
+                        "properties": {
+                            "origin": {"type": "string", "description": "IATA airport or city code"},
+                            "destination": {"type": "string", "description": "IATA airport or city code"},
+                            "departure_date": {"type": "string", "description": "YYYY-MM-DD"},
+                            "return_date": {"type": "string", "description": "YYYY-MM-DD"},
+                            "adults": {"type": "integer", "minimum": 1, "default": 1},
+                            "cabin_class": {"type": "string", "enum": ["economy", "premium_economy", "business", "first"], "default": "economy"},
+                        },
+                    },
+                },
+                {
+                    "name": "get_offer",
+                    "title": "Get offer",
+                    "description": "Fetch one Duffel offer by id.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["offer_id"],
+                        "properties": {"offer_id": {"type": "string"}},
+                    },
+                },
+                {
+                    "name": "search_places",
+                    "title": "Search flight places",
+                    "description": "Duffel airport/city autocomplete for flight origin and destination fields.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["query"],
+                        "properties": {
+                            "query": {"type": "string"},
+                            "lat": {"type": "number"},
+                            "lng": {"type": "number"},
+                            "rad": {"type": "integer"},
+                        },
+                    },
+                },
+                {
+                    "name": "get_airlines",
+                    "title": "Get airlines",
+                    "description": "Duffel airline reference data, first page only.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 200}},
+                    },
+                },
+                {
+                    "name": "create_order",
+                    "title": "Create test order",
+                    "description": "Create a Duffel test-environment order for one selected offer using wallet balance payment.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["offer_id", "passengers"],
+                        "properties": {
+                            "offer_id": {"type": "string"},
+                            "passengers": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                    "type": "object",
+                                    "required": ["given_name", "family_name", "born_on", "email", "phone_number"],
+                                    "properties": {
+                                        "id": {"type": "string", "description": "Duffel passenger id from the selected offer; filled by index when omitted"},
+                                        "title": {"type": "string", "default": "mr"},
+                                        "given_name": {"type": "string"},
+                                        "family_name": {"type": "string"},
+                                        "born_on": {"type": "string", "description": "YYYY-MM-DD"},
+                                        "email": {"type": "string"},
+                                        "phone_number": {"type": "string"},
+                                        "gender": {"type": "string"},
+                                    },
+                                },
+                            },
+                            "payment_amount": {"type": "string"},
+                            "payment_currency": {"type": "string"},
+                        },
+                    },
+                },
+                {
+                    "name": "get_order",
+                    "title": "Get order",
+                    "description": "Fetch one Duffel order by id. Payment details are reduced to type, amount, and currency.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["order_id"],
+                        "properties": {"order_id": {"type": "string"}},
+                    },
+                },
+                {
+                    "name": "list_orders",
+                    "title": "List orders",
+                    "description": "List Duffel orders, first page only. Payment details are reduced to type, amount, and currency.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50},
+                            "created_at_after": {"type": "string", "description": "ISO timestamp lower bound"},
+                            "passenger_name": {"type": "string"},
+                            "booking_reference": {"type": "string"},
+                        },
+                    },
+                },
+            ]
+            return _ok("tools/list", {"tools": tools, "tool_count": len(tools)}, f"Duffel MCP - {len(tools)} tools available", {"tool_count": len(tools)})
+
+        def _search_offers(args):
+            origin = _text(args.get("origin")).upper()
+            destination = _text(args.get("destination")).upper()
+            departure_date = _text(args.get("departure_date") or args.get("departureDate"))
+            if not origin or not destination or not departure_date:
+                return _error("search_offers", "origin, destination, and departure_date are required")
+            adults = _cap(args.get("adults"), default=1, maximum=9)
+            cabin = _text(args.get("cabin_class") or args.get("cabin") or "economy").lower()
+            if cabin == "premium-economy":
+                cabin = "premium_economy"
+            if cabin not in ("economy", "premium_economy", "business", "first"):
+                cabin = "economy"
+            slices = [{"origin": origin, "destination": destination, "departure_date": departure_date}]
+            return_date = _text(args.get("return_date") or args.get("returnDate"))
+            if return_date:
+                slices.append({"origin": destination, "destination": origin, "departure_date": return_date})
+            payload = {
+                "data": {
+                    "slices": slices,
+                    "passengers": [{"type": "adult"} for _ in range(adults)],
+                    "cabin_class": cabin,
+                }
+            }
+            ok, status_code, body = _request("POST", "/air/offer_requests", payload=payload, params={"return_offers": "true"})
+            data = body.get("data") if isinstance(body, dict) else {}
+            offers = _as_list(data.get("offers") if isinstance(data, dict) else [])
+            cap = _cap(args.get("max_offers"), default=10, maximum=10)
+            normalised = [_normalise_offer(offer) for offer in offers[:cap] if isinstance(offer, dict)]
+            if not ok:
+                return _error("search_offers", "Duffel search_offers failed", body, status_code)
+            currency = None
+            for offer in normalised:
+                currency = (offer.get("price") or {}).get("currency")
+                if currency:
+                    break
+            return _ok(
+                "search_offers",
+                {
+                    "source": "duffel",
+                    "duffel_env": duffel_env,
+                    "ok": True,
+                    "status_code": status_code,
+                    "offer_request_id": data.get("id") if isinstance(data, dict) else None,
+                    "offers": normalised,
+                    "offers_total": len(normalised),
+                    "raw_offers_total": len(offers),
+                    "meta": {"count": len(normalised), "source": "duffel", "currency": currency},
+                },
+                f"{len(normalised)} Duffel flight offer(s)",
+                {"status_code": status_code, "offers_total": len(normalised)},
+            )
+
+        def _get_offer(args):
+            offer_id = _text(args.get("offer_id") or args.get("id"))
+            if not offer_id:
+                return _error("get_offer", "offer_id is required")
+            ok, status_code, body = _request("GET", f"/air/offers/{urllib.parse.quote(offer_id, safe='')}")
+            if not ok:
+                return _error("get_offer", "Duffel get_offer failed", body, status_code)
+            return _ok("get_offer", {"source": "duffel", "status_code": status_code, "offer": body.get("data") if isinstance(body, dict) else body}, "Duffel offer fetched", {"status_code": status_code})
+
+        def _search_places(args):
+            query = _text(args.get("query"))
+            if not query and not (args.get("lat") and args.get("lng")):
+                return _error("search_places", "query or lat/lng is required")
+            params = {}
+            if query:
+                params["query"] = query
+            for key in ("lat", "lng", "rad"):
+                if args.get(key) not in (None, ""):
+                    params[key] = args.get(key)
+            ok, status_code, body = _request("GET", "/places/suggestions", params=params)
+            if not ok:
+                return _error("search_places", "Duffel search_places failed", body, status_code)
+            items = _as_list(body.get("data") if isinstance(body, dict) else [])
+            return _ok("search_places", {"source": "duffel", "status_code": status_code, "places": items, "places_total": len(items)}, f"{len(items)} Duffel place suggestion(s)", {"status_code": status_code, "places_total": len(items)})
+
+        def _get_airlines(args):
+            limit = _cap(args.get("limit"), default=200, maximum=200)
+            ok, status_code, body = _request("GET", "/air/airlines", params={"limit": limit})
+            if not ok:
+                return _error("get_airlines", "Duffel get_airlines failed", body, status_code)
+            items = _as_list(body.get("data") if isinstance(body, dict) else [])
+            meta = body.get("meta") if isinstance(body, dict) and isinstance(body.get("meta"), dict) else {}
+            return _ok("get_airlines", {"source": "duffel", "status_code": status_code, "airlines": items, "airlines_total": len(items), "meta": meta}, f"{len(items)} Duffel airline(s)", {"status_code": status_code, "airlines_total": len(items)})
+
+        def _parse_ts(value):
+            text = _text(value)
+            if not text:
+                return None
+            try:
+                return datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        def _safe_payment(payment):
+            if not isinstance(payment, dict):
+                return {}
+            return {
+                "type": payment.get("type"),
+                "amount": payment.get("amount"),
+                "currency": payment.get("currency"),
+            }
+
+        def _safe_order(order):
+            if not isinstance(order, dict):
+                return {}
+            return {
+                "id": order.get("id"),
+                "booking_reference": order.get("booking_reference"),
+                "type": order.get("type"),
+                "live_mode": order.get("live_mode"),
+                "created_at": order.get("created_at"),
+                "confirmed_at": order.get("confirmed_at"),
+                "cancelled_at": order.get("cancelled_at"),
+                "total_amount": order.get("total_amount"),
+                "total_currency": order.get("total_currency"),
+                "base_amount": order.get("base_amount"),
+                "base_currency": order.get("base_currency"),
+                "tax_amount": order.get("tax_amount"),
+                "tax_currency": order.get("tax_currency"),
+                "passengers": order.get("passengers") if isinstance(order.get("passengers"), list) else [],
+                "slices": order.get("slices") if isinstance(order.get("slices"), list) else [],
+                "payments": [_safe_payment(p) for p in _as_list(order.get("payments"))],
+                # Only surface documents Duffel actually hosts. Test-environment
+                # orders return electronic_ticket entries with document_url=null;
+                # filter those out so downstream widget schemas that require a
+                # string url never see a null and clients can simply hide the
+                # download CTA when the list is empty.
+                "documents": [
+                    {
+                        "unique_identifier": doc.get("unique_identifier"),
+                        "type": doc.get("type"),
+                        "document_url": doc.get("document_url"),
+                    }
+                    for doc in _as_list(order.get("documents"))
+                    if isinstance(doc, dict) and isinstance(doc.get("document_url"), str) and doc.get("document_url")
+                ],
+            }
+
+        def _offer_by_id(offer_id):
+            return _request("GET", f"/air/offers/{urllib.parse.quote(offer_id, safe='')}")
+
+        def _normalise_passengers(input_passengers, offer):
+            passengers = _as_list(input_passengers)
+            if not passengers:
+                return None, "passengers must be a non-empty array"
+            offer_passengers = _as_list(offer.get("passengers") if isinstance(offer, dict) else [])
+            normalised = []
+            required = ("given_name", "family_name", "born_on", "email", "phone_number")
+            for idx, passenger in enumerate(passengers):
+                if not isinstance(passenger, dict):
+                    return None, f"passenger[{idx}] must be an object"
+                missing = [key for key in required if not _text(passenger.get(key))]
+                if missing:
+                    return None, f"passenger[{idx}] missing required field(s): {', '.join(missing)}"
+                item = {
+                    "id": _text(passenger.get("id") or ((offer_passengers[idx] or {}).get("id") if idx < len(offer_passengers) and isinstance(offer_passengers[idx], dict) else "")),
+                    "title": _text(passenger.get("title") or "mr").lower(),
+                    "given_name": _text(passenger.get("given_name")),
+                    "family_name": _text(passenger.get("family_name")),
+                    "born_on": _text(passenger.get("born_on")),
+                    "email": _text(passenger.get("email")),
+                    "phone_number": _text(passenger.get("phone_number")),
+                }
+                gender = _text(passenger.get("gender")).lower()
+                if gender:
+                    item["gender"] = gender
+                if not item["id"]:
+                    return None, f"passenger[{idx}] missing Duffel passenger id and offer had no matching passenger id"
+                normalised.append(item)
+            return normalised, None
+
+        def _create_order(args):
+            if duffel_env != "test":
+                return _error("create_order", "create_order is enabled only for duffel_env=test in this round", code="live_orders_disabled")
+            offer_id = _text(args.get("offer_id") or args.get("id"))
+            if not offer_id:
+                return _error("create_order", "offer_id is required", code="validation_error")
+            ok, status_code, offer_body = _offer_by_id(offer_id)
+            if not ok:
+                return _error("create_order", "Duffel get_offer failed before order creation", offer_body, status_code)
+            offer = offer_body.get("data") if isinstance(offer_body, dict) and isinstance(offer_body.get("data"), dict) else {}
+            expires_at = _parse_ts(offer.get("expires_at"))
+            if expires_at and expires_at <= datetime.now(timezone.utc):
+                return _error("create_order", f"Offer {offer_id} is expired", code="offer_expired")
+            passengers, passenger_error = _normalise_passengers(args.get("passengers"), offer)
+            if passenger_error:
+                return _error("create_order", passenger_error, code="validation_error")
+            amount = _text(args.get("payment_amount") or offer.get("total_amount"))
+            currency = _text(args.get("payment_currency") or offer.get("total_currency"))
+            if not amount or not currency:
+                return _error("create_order", "payment amount/currency could not be determined from offer", code="validation_error")
+            payload = {
+                "data": {
+                    "type": "instant",
+                    "selected_offers": [offer_id],
+                    "passengers": passengers,
+                    "payments": [{"type": "balance", "amount": amount, "currency": currency}],
+                }
+            }
+            ok, status_code, body = _request("POST", "/air/orders", payload=payload)
+            if not ok:
+                return _error("create_order", "Duffel create_order failed", body, status_code)
+            order = body.get("data") if isinstance(body, dict) else {}
+            # Duffel issues itinerary receipt documents asynchronously after
+            # order creation; the create response usually has documents=[].
+            # Re-fetch the order so callers (e.g. travel UI) get document_url
+            # values they can link to without a second round-trip.
+            order_id_for_refresh = order.get("id") if isinstance(order, dict) else None
+            if order_id_for_refresh and not _as_list(order.get("documents")):
+                ok2, _status2, refresh = _request(
+                    "GET",
+                    f"/air/orders/{urllib.parse.quote(str(order_id_for_refresh), safe='')}",
+                )
+                if ok2 and isinstance(refresh, dict) and isinstance(refresh.get("data"), dict):
+                    order = refresh["data"]
+            safe = _safe_order(order)
+            return _ok(
+                "create_order",
+                {"source": "duffel", "status_code": status_code, "order": safe, "order_id": safe.get("id"), "booking_reference": safe.get("booking_reference")},
+                f"Duffel test order created {safe.get('booking_reference') or safe.get('id')}",
+                {"status_code": status_code, "order_id": safe.get("id"), "booking_reference": safe.get("booking_reference")},
+            )
+
+        def _get_order(args):
+            order_id = _text(args.get("order_id") or args.get("id"))
+            if not order_id:
+                return _error("get_order", "order_id is required", code="validation_error")
+            ok, status_code, body = _request("GET", f"/air/orders/{urllib.parse.quote(order_id, safe='')}")
+            if not ok:
+                return _error("get_order", "Duffel get_order failed", body, status_code)
+            order = body.get("data") if isinstance(body, dict) else {}
+            safe = _safe_order(order)
+            return _ok("get_order", {"source": "duffel", "status_code": status_code, "order": safe, "order_id": safe.get("id"), "booking_reference": safe.get("booking_reference")}, f"Duffel order {safe.get('booking_reference') or safe.get('id')} fetched", {"status_code": status_code})
+
+        def _list_orders(args):
+            params = {"limit": _cap(args.get("limit"), default=50, maximum=50)}
+            if _text(args.get("booking_reference")):
+                params["booking_reference"] = _text(args.get("booking_reference"))
+            if _text(args.get("created_at_after")):
+                params["created_at[after]"] = _text(args.get("created_at_after"))
+            if _text(args.get("passenger_name")):
+                params["passenger_name[]"] = _text(args.get("passenger_name"))
+            ok, status_code, body = _request("GET", "/air/orders", params=params)
+            if not ok:
+                return _error("list_orders", "Duffel list_orders failed", body, status_code)
+            orders = [_safe_order(order) for order in _as_list(body.get("data") if isinstance(body, dict) else []) if isinstance(order, dict)]
+            meta = body.get("meta") if isinstance(body, dict) and isinstance(body.get("meta"), dict) else {}
+            return _ok("list_orders", {"source": "duffel", "status_code": status_code, "orders": orders, "orders_total": len(orders), "meta": meta}, f"{len(orders)} Duffel order(s)", {"status_code": status_code, "orders_total": len(orders)})
+
+        globals().update({
+            "base64": base64,
+            "METADATA_TOKEN_URL": METADATA_TOKEN_URL,
+            "_metadata_token": _metadata_token,
+            "_extract_token": _extract_token,
+            "_secret_bearer": _secret_bearer,
+            "_as_dict": _as_dict,
+            "_as_list": _as_list,
+            "_cap": _cap,
+            "_text": _text,
+            "_error": _error,
+            "_ok": _ok,
+            "_request": _request,
+            "_duration": _duration,
+            "_iata": _iata,
+            "_carrier": _carrier,
+            "_normalise_segment": _normalise_segment,
+            "_normalise_offer": _normalise_offer,
+            "_tools_list": _tools_list,
+            "_search_offers": _search_offers,
+            "_get_offer": _get_offer,
+            "_search_places": _search_places,
+            "_get_airlines": _get_airlines,
+            "_parse_ts": _parse_ts,
+            "_safe_payment": _safe_payment,
+            "_safe_order": _safe_order,
+            "_offer_by_id": _offer_by_id,
+            "_normalise_passengers": _normalise_passengers,
+            "_create_order": _create_order,
+            "_get_order": _get_order,
+            "_list_orders": _list_orders,
+            "json": json,
+            "datetime": datetime,
+            "timezone": timezone,
+            "urllib": urllib,
+        })
+
+        VALID_TOOLS = ("search_offers", "get_offer", "search_places", "get_airlines", "create_order", "get_order", "list_orders")
+        method_name = _text(method, "tools/list").lower()
+        tool_name = _text(tool).lower()
+        args = _as_dict(arguments)
+        project = _text(google_project, "noetl-demo-19700101")
+        secret_name = _text(duffel_secret_name, "duffel-api-test")
+
+        if method_name == "tools/list":
+            result = _tools_list()
+        elif method_name != "tools/call":
+            result = _error(method_name, f"Unknown MCP method: {method_name}")
+        elif tool_name not in VALID_TOOLS:
+            result = _error(tool_name or "unknown", f"Unknown tool: {tool_name}. Run tools/list to see the catalog.")
+        else:
+            # Resolve the Duffel bearer from GSM via Workload Identity. On kind
+            # (no metadata server) or pre-grant prod this raises a clear
+            # credential/permission error rather than a 401 from an empty bearer.
+            # Promote the resolved bearer to globals so the globally-registered
+            # _request helper reads it (the python tool execs helpers in globals).
+            try:
+                duffel_token = _secret_bearer(project, secret_name)
+                globals()["duffel_token"] = duffel_token
+            except Exception as exc:
+                result = _error(tool_name, "Duffel credential unavailable", f"{type(exc).__name__}: {exc}", code="credential_unavailable")
+            if "result" not in locals() or result is None:
+                try:
+                    if tool_name == "search_offers":
+                        result = _search_offers(args)
+                    elif tool_name == "get_offer":
+                        result = _get_offer(args)
+                    elif tool_name == "search_places":
+                        result = _search_places(args)
+                    elif tool_name == "get_airlines":
+                        result = _get_airlines(args)
+                    elif tool_name == "create_order":
+                        result = _create_order(args)
+                    elif tool_name == "get_order":
+                        result = _get_order(args)
+                    else:
+                        result = _list_orders(args)
+                except Exception as exc:
+                    result = _error(tool_name, "Duffel tool failed", f"{type(exc).__name__}: {exc}")
     next:
       spec: { mode: exclusive }
       arcs:
@@ -886,17 +2037,690 @@ workflow:
   - step: call_duffel_create_order
     desc: Dispatch Duffel test-environment wallet order creation
     tool:
-      kind: playbook
-      path: automation/agents/mcp/duffel
-      # noetl/ai-meta#136 — block for the child's real Duffel order.
-      return_result: true
-      result_step: duffel_dispatch
-      timeout: 120
-      payload:
-        method: tools/call
-        tool: create_order
-        duffel_env: test
+      kind: python
+      input:
+        method: "tools/call"
+        tool: "create_order"
         arguments: "{{ extract_turn.first_tool_arguments }}"
+        duffel_env: "test"
+        duffel_api_base: "https://api.duffel.com"
+        duffel_api_version: "v2"
+        google_project: "noetl-demo-19700101"
+        duffel_secret_name: "duffel-api-test"
+      code: |
+        import base64
+        import json
+        from datetime import datetime, timezone
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        METADATA_TOKEN_URL = (
+            "http://metadata.google.internal/computeMetadata/v1/"
+            "instance/service-accounts/default/token"
+        )
+
+        def _metadata_token():
+            # Mint an OAuth2 access token from the GKE metadata server using the
+            # worker pod's Workload Identity. No google-auth library: this is the
+            # same endpoint google.auth.default() reads under the hood on GKE, so a
+            # direct urllib GET is the library-free equivalent (noetl/ai-meta#137).
+            req = urllib.request.Request(
+                METADATA_TOKEN_URL,
+                headers={"Metadata-Flavor": "Google"},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")[:300]
+                raise RuntimeError(
+                    "metadata token mint failed HTTP "
+                    f"{exc.code}: Workload Identity is not bound to a GCP service "
+                    f"account with Secret Manager access for this worker pod ({body})"
+                )
+            except urllib.error.URLError as exc:
+                raise RuntimeError(
+                    "metadata server unreachable "
+                    f"({getattr(exc, 'reason', exc)}): the worker pod has no GKE "
+                    "Workload Identity metadata endpoint (expected off-cluster, e.g. kind)"
+                )
+            token = (payload or {}).get("access_token") if isinstance(payload, dict) else None
+            if not token:
+                raise RuntimeError("metadata token endpoint returned no access_token")
+            return token
+
+        def _extract_token(raw):
+            # The GSM secret `duffel-api-test` holds the full Duffel credential
+            # file ({"data":{"token":…}}); tolerate a bare {"token":…} object or
+            # a raw token string too, so a future `gcloud secrets versions add`
+            # in any of those shapes keeps resolving without a playbook edit.
+            # Never logged/printed.
+            s = "" if raw is None else str(raw).strip()
+            if s.startswith("{"):
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    return s
+                if isinstance(obj, dict):
+                    data = obj.get("data")
+                    if isinstance(data, dict) and data.get("token"):
+                        return str(data.get("token")).strip()
+                    if obj.get("token"):
+                        return str(obj.get("token")).strip()
+                return s
+            return s
+
+        def _secret_bearer(project, secret_name):
+            # Read the GSM secret value (the full Duffel credential file JSON)
+            # using the WI metadata token and collapse it to the bare bearer.
+            # Raises with a credential/permission-flavoured message so the
+            # failure mode is unambiguous on kind / pre-grant prod.
+            token = _metadata_token()
+            name = f"projects/{project}/secrets/{secret_name}/versions/latest:access"
+            req = urllib.request.Request(
+                f"https://secretmanager.googleapis.com/v1/{name}",
+                headers={"Authorization": f"Bearer {token}"},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    payload = json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")[:300]
+                raise RuntimeError(
+                    f"secret manager access HTTP {exc.code} for '{secret_name}': the "
+                    f"worker GSA lacks secretmanager.secretAccessor on this secret, or "
+                    f"the secret is not loaded yet ({body})"
+                )
+            encoded = ((payload.get("payload") or {}).get("data") or "").strip()
+            if not encoded:
+                raise RuntimeError(f"secret '{secret_name}' has no payload data")
+            raw = base64.b64decode(encoded).decode("utf-8").strip()
+            bearer = _extract_token(raw)
+            if not bearer:
+                raise RuntimeError(f"secret '{secret_name}' payload had no Duffel token (.data.token)")
+            return bearer
+
+        def _as_dict(value):
+            return value if isinstance(value, dict) else {}
+
+        def _as_list(value):
+            return value if isinstance(value, list) else []
+
+        def _cap(value, default=10, maximum=10):
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = default
+            return max(1, min(parsed, maximum))
+
+        def _text(value, default=""):
+            value = default if value is None else value
+            return str(value).strip()
+
+        def _error(tool_name, message, detail=None, status_code=0, code=None):
+            text = message if detail is None else f"{message}: {str(detail)[:700]}"
+            payload = {"ok": False, "status": "error", "error": text[:2000], "status_code": status_code}
+            if code:
+                payload["code"] = code
+            return {
+                # Keep the NoETL step green; MCP clients read isError plus
+                # control_data.status for the upstream/tool-level error.
+                "status": "ok",
+                "content": [{"type": "text", "text": text}],
+                "isError": True,
+                "_meta": {"backend": "duffel", "tool": tool_name, "duffel_env": duffel_env, "status_code": status_code, "error": text[:2000], "code": code},
+                "data": payload,
+                "control_data": payload,
+                "summary": text,
+                "text": text,
+            }
+
+        def _ok(tool_name, data, text=None, meta=None):
+            meta = meta if isinstance(meta, dict) else {}
+            payload = data if isinstance(data, dict) else {"value": data}
+            payload.setdefault("ok", True)
+            return {
+                "status": "ok",
+                "content": [{"type": "text", "text": text or f"Duffel {tool_name} ok"}],
+                "isError": False,
+                "_meta": {"backend": "duffel", "tool": tool_name, "duffel_env": duffel_env, **meta},
+                "data": payload,
+                "control_data": payload,
+                "summary": text or f"Duffel {tool_name} ok",
+                "text": text or f"Duffel {tool_name} ok",
+            }
+
+        def _request(http_method, path, payload=None, params=None):
+            base = _text(duffel_api_base, "https://api.duffel.com").rstrip("/")
+            url = base + path
+            if params:
+                url += "?" + urllib.parse.urlencode(params, doseq=True)
+            headers = {
+                "Authorization": f"Bearer {duffel_token}",
+                "Accept": "application/json",
+                "Duffel-Version": _text(duffel_api_version, "v2"),
+            }
+            body = None
+            if payload is not None:
+                headers["Content-Type"] = "application/json"
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            req = urllib.request.Request(url, data=body, headers=headers, method=http_method)
+            try:
+                with urllib.request.urlopen(req, timeout=45) as resp:
+                    raw = resp.read().decode("utf-8")
+                    parsed = json.loads(raw or "{}")
+                    return True, resp.status, parsed
+            except urllib.error.HTTPError as exc:
+                raw = exc.read().decode("utf-8", errors="replace")
+                try:
+                    parsed = json.loads(raw or "{}")
+                except Exception:
+                    parsed = {"raw": raw[:2000]}
+                return False, exc.code, parsed
+            except urllib.error.URLError as exc:
+                return False, 0, {"error": str(getattr(exc, "reason", exc))}
+            except Exception as exc:
+                return False, 0, {"error": f"{type(exc).__name__}: {exc}"}
+
+        def _duration(value):
+            return _text(value, "?") or "?"
+
+        def _iata(place):
+            if isinstance(place, dict):
+                return place.get("iata_code") or place.get("iataCode") or place.get("id") or "?"
+            return "?"
+
+        def _carrier(segment):
+            for key in ("marketing_carrier", "operating_carrier"):
+                carrier = segment.get(key)
+                if isinstance(carrier, dict) and carrier.get("iata_code"):
+                    return carrier.get("iata_code")
+            return segment.get("marketing_carrier_iata_code") or segment.get("operating_carrier_iata_code") or "?"
+
+        def _normalise_segment(segment):
+            origin = segment.get("origin") if isinstance(segment.get("origin"), dict) else {}
+            destination = segment.get("destination") if isinstance(segment.get("destination"), dict) else {}
+            return {
+                "departure": {"iataCode": _iata(origin), "at": segment.get("departing_at") or segment.get("departure_time") or "?"},
+                "arrival": {"iataCode": _iata(destination), "at": segment.get("arriving_at") or segment.get("arrival_time") or "?"},
+                "carrierCode": _carrier(segment),
+                "number": _text(segment.get("marketing_carrier_flight_number") or segment.get("flight_number")),
+                "duration": _duration(segment.get("duration")),
+                "numberOfStops": 0,
+            }
+
+        def _normalise_offer(offer):
+            slices = _as_list(offer.get("slices"))
+            itineraries = []
+            validating = []
+            for item in slices:
+                segments = [_normalise_segment(seg) for seg in _as_list(item.get("segments")) if isinstance(seg, dict)]
+                for seg in segments:
+                    code = seg.get("carrierCode")
+                    if code and code != "?" and code not in validating:
+                        validating.append(code)
+                itineraries.append({
+                    "duration": _duration(item.get("duration")),
+                    "segments": segments,
+                })
+            return {
+                "id": offer.get("id"),
+                "source": "duffel",
+                "price": {
+                    "total": offer.get("total_amount") or offer.get("base_amount") or "?",
+                    "currency": offer.get("total_currency") or offer.get("base_currency") or "USD",
+                },
+                "itineraries": itineraries,
+                "validatingAirlineCodes": validating,
+                "expires_at": offer.get("expires_at"),
+                "live_mode": offer.get("live_mode"),
+            }
+
+        def _tools_list():
+            tools = [
+                {
+                    "name": "search_offers",
+                    "title": "Search flight offers",
+                    "description": "Duffel flight offers search. Required: origin, destination, departure_date. Optional: return_date, adults, cabin_class.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["origin", "destination", "departure_date"],
+                        "properties": {
+                            "origin": {"type": "string", "description": "IATA airport or city code"},
+                            "destination": {"type": "string", "description": "IATA airport or city code"},
+                            "departure_date": {"type": "string", "description": "YYYY-MM-DD"},
+                            "return_date": {"type": "string", "description": "YYYY-MM-DD"},
+                            "adults": {"type": "integer", "minimum": 1, "default": 1},
+                            "cabin_class": {"type": "string", "enum": ["economy", "premium_economy", "business", "first"], "default": "economy"},
+                        },
+                    },
+                },
+                {
+                    "name": "get_offer",
+                    "title": "Get offer",
+                    "description": "Fetch one Duffel offer by id.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["offer_id"],
+                        "properties": {"offer_id": {"type": "string"}},
+                    },
+                },
+                {
+                    "name": "search_places",
+                    "title": "Search flight places",
+                    "description": "Duffel airport/city autocomplete for flight origin and destination fields.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["query"],
+                        "properties": {
+                            "query": {"type": "string"},
+                            "lat": {"type": "number"},
+                            "lng": {"type": "number"},
+                            "rad": {"type": "integer"},
+                        },
+                    },
+                },
+                {
+                    "name": "get_airlines",
+                    "title": "Get airlines",
+                    "description": "Duffel airline reference data, first page only.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 200}},
+                    },
+                },
+                {
+                    "name": "create_order",
+                    "title": "Create test order",
+                    "description": "Create a Duffel test-environment order for one selected offer using wallet balance payment.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["offer_id", "passengers"],
+                        "properties": {
+                            "offer_id": {"type": "string"},
+                            "passengers": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                    "type": "object",
+                                    "required": ["given_name", "family_name", "born_on", "email", "phone_number"],
+                                    "properties": {
+                                        "id": {"type": "string", "description": "Duffel passenger id from the selected offer; filled by index when omitted"},
+                                        "title": {"type": "string", "default": "mr"},
+                                        "given_name": {"type": "string"},
+                                        "family_name": {"type": "string"},
+                                        "born_on": {"type": "string", "description": "YYYY-MM-DD"},
+                                        "email": {"type": "string"},
+                                        "phone_number": {"type": "string"},
+                                        "gender": {"type": "string"},
+                                    },
+                                },
+                            },
+                            "payment_amount": {"type": "string"},
+                            "payment_currency": {"type": "string"},
+                        },
+                    },
+                },
+                {
+                    "name": "get_order",
+                    "title": "Get order",
+                    "description": "Fetch one Duffel order by id. Payment details are reduced to type, amount, and currency.",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["order_id"],
+                        "properties": {"order_id": {"type": "string"}},
+                    },
+                },
+                {
+                    "name": "list_orders",
+                    "title": "List orders",
+                    "description": "List Duffel orders, first page only. Payment details are reduced to type, amount, and currency.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50},
+                            "created_at_after": {"type": "string", "description": "ISO timestamp lower bound"},
+                            "passenger_name": {"type": "string"},
+                            "booking_reference": {"type": "string"},
+                        },
+                    },
+                },
+            ]
+            return _ok("tools/list", {"tools": tools, "tool_count": len(tools)}, f"Duffel MCP - {len(tools)} tools available", {"tool_count": len(tools)})
+
+        def _search_offers(args):
+            origin = _text(args.get("origin")).upper()
+            destination = _text(args.get("destination")).upper()
+            departure_date = _text(args.get("departure_date") or args.get("departureDate"))
+            if not origin or not destination or not departure_date:
+                return _error("search_offers", "origin, destination, and departure_date are required")
+            adults = _cap(args.get("adults"), default=1, maximum=9)
+            cabin = _text(args.get("cabin_class") or args.get("cabin") or "economy").lower()
+            if cabin == "premium-economy":
+                cabin = "premium_economy"
+            if cabin not in ("economy", "premium_economy", "business", "first"):
+                cabin = "economy"
+            slices = [{"origin": origin, "destination": destination, "departure_date": departure_date}]
+            return_date = _text(args.get("return_date") or args.get("returnDate"))
+            if return_date:
+                slices.append({"origin": destination, "destination": origin, "departure_date": return_date})
+            payload = {
+                "data": {
+                    "slices": slices,
+                    "passengers": [{"type": "adult"} for _ in range(adults)],
+                    "cabin_class": cabin,
+                }
+            }
+            ok, status_code, body = _request("POST", "/air/offer_requests", payload=payload, params={"return_offers": "true"})
+            data = body.get("data") if isinstance(body, dict) else {}
+            offers = _as_list(data.get("offers") if isinstance(data, dict) else [])
+            cap = _cap(args.get("max_offers"), default=10, maximum=10)
+            normalised = [_normalise_offer(offer) for offer in offers[:cap] if isinstance(offer, dict)]
+            if not ok:
+                return _error("search_offers", "Duffel search_offers failed", body, status_code)
+            currency = None
+            for offer in normalised:
+                currency = (offer.get("price") or {}).get("currency")
+                if currency:
+                    break
+            return _ok(
+                "search_offers",
+                {
+                    "source": "duffel",
+                    "duffel_env": duffel_env,
+                    "ok": True,
+                    "status_code": status_code,
+                    "offer_request_id": data.get("id") if isinstance(data, dict) else None,
+                    "offers": normalised,
+                    "offers_total": len(normalised),
+                    "raw_offers_total": len(offers),
+                    "meta": {"count": len(normalised), "source": "duffel", "currency": currency},
+                },
+                f"{len(normalised)} Duffel flight offer(s)",
+                {"status_code": status_code, "offers_total": len(normalised)},
+            )
+
+        def _get_offer(args):
+            offer_id = _text(args.get("offer_id") or args.get("id"))
+            if not offer_id:
+                return _error("get_offer", "offer_id is required")
+            ok, status_code, body = _request("GET", f"/air/offers/{urllib.parse.quote(offer_id, safe='')}")
+            if not ok:
+                return _error("get_offer", "Duffel get_offer failed", body, status_code)
+            return _ok("get_offer", {"source": "duffel", "status_code": status_code, "offer": body.get("data") if isinstance(body, dict) else body}, "Duffel offer fetched", {"status_code": status_code})
+
+        def _search_places(args):
+            query = _text(args.get("query"))
+            if not query and not (args.get("lat") and args.get("lng")):
+                return _error("search_places", "query or lat/lng is required")
+            params = {}
+            if query:
+                params["query"] = query
+            for key in ("lat", "lng", "rad"):
+                if args.get(key) not in (None, ""):
+                    params[key] = args.get(key)
+            ok, status_code, body = _request("GET", "/places/suggestions", params=params)
+            if not ok:
+                return _error("search_places", "Duffel search_places failed", body, status_code)
+            items = _as_list(body.get("data") if isinstance(body, dict) else [])
+            return _ok("search_places", {"source": "duffel", "status_code": status_code, "places": items, "places_total": len(items)}, f"{len(items)} Duffel place suggestion(s)", {"status_code": status_code, "places_total": len(items)})
+
+        def _get_airlines(args):
+            limit = _cap(args.get("limit"), default=200, maximum=200)
+            ok, status_code, body = _request("GET", "/air/airlines", params={"limit": limit})
+            if not ok:
+                return _error("get_airlines", "Duffel get_airlines failed", body, status_code)
+            items = _as_list(body.get("data") if isinstance(body, dict) else [])
+            meta = body.get("meta") if isinstance(body, dict) and isinstance(body.get("meta"), dict) else {}
+            return _ok("get_airlines", {"source": "duffel", "status_code": status_code, "airlines": items, "airlines_total": len(items), "meta": meta}, f"{len(items)} Duffel airline(s)", {"status_code": status_code, "airlines_total": len(items)})
+
+        def _parse_ts(value):
+            text = _text(value)
+            if not text:
+                return None
+            try:
+                return datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        def _safe_payment(payment):
+            if not isinstance(payment, dict):
+                return {}
+            return {
+                "type": payment.get("type"),
+                "amount": payment.get("amount"),
+                "currency": payment.get("currency"),
+            }
+
+        def _safe_order(order):
+            if not isinstance(order, dict):
+                return {}
+            return {
+                "id": order.get("id"),
+                "booking_reference": order.get("booking_reference"),
+                "type": order.get("type"),
+                "live_mode": order.get("live_mode"),
+                "created_at": order.get("created_at"),
+                "confirmed_at": order.get("confirmed_at"),
+                "cancelled_at": order.get("cancelled_at"),
+                "total_amount": order.get("total_amount"),
+                "total_currency": order.get("total_currency"),
+                "base_amount": order.get("base_amount"),
+                "base_currency": order.get("base_currency"),
+                "tax_amount": order.get("tax_amount"),
+                "tax_currency": order.get("tax_currency"),
+                "passengers": order.get("passengers") if isinstance(order.get("passengers"), list) else [],
+                "slices": order.get("slices") if isinstance(order.get("slices"), list) else [],
+                "payments": [_safe_payment(p) for p in _as_list(order.get("payments"))],
+                # Only surface documents Duffel actually hosts. Test-environment
+                # orders return electronic_ticket entries with document_url=null;
+                # filter those out so downstream widget schemas that require a
+                # string url never see a null and clients can simply hide the
+                # download CTA when the list is empty.
+                "documents": [
+                    {
+                        "unique_identifier": doc.get("unique_identifier"),
+                        "type": doc.get("type"),
+                        "document_url": doc.get("document_url"),
+                    }
+                    for doc in _as_list(order.get("documents"))
+                    if isinstance(doc, dict) and isinstance(doc.get("document_url"), str) and doc.get("document_url")
+                ],
+            }
+
+        def _offer_by_id(offer_id):
+            return _request("GET", f"/air/offers/{urllib.parse.quote(offer_id, safe='')}")
+
+        def _normalise_passengers(input_passengers, offer):
+            passengers = _as_list(input_passengers)
+            if not passengers:
+                return None, "passengers must be a non-empty array"
+            offer_passengers = _as_list(offer.get("passengers") if isinstance(offer, dict) else [])
+            normalised = []
+            required = ("given_name", "family_name", "born_on", "email", "phone_number")
+            for idx, passenger in enumerate(passengers):
+                if not isinstance(passenger, dict):
+                    return None, f"passenger[{idx}] must be an object"
+                missing = [key for key in required if not _text(passenger.get(key))]
+                if missing:
+                    return None, f"passenger[{idx}] missing required field(s): {', '.join(missing)}"
+                item = {
+                    "id": _text(passenger.get("id") or ((offer_passengers[idx] or {}).get("id") if idx < len(offer_passengers) and isinstance(offer_passengers[idx], dict) else "")),
+                    "title": _text(passenger.get("title") or "mr").lower(),
+                    "given_name": _text(passenger.get("given_name")),
+                    "family_name": _text(passenger.get("family_name")),
+                    "born_on": _text(passenger.get("born_on")),
+                    "email": _text(passenger.get("email")),
+                    "phone_number": _text(passenger.get("phone_number")),
+                }
+                gender = _text(passenger.get("gender")).lower()
+                if gender:
+                    item["gender"] = gender
+                if not item["id"]:
+                    return None, f"passenger[{idx}] missing Duffel passenger id and offer had no matching passenger id"
+                normalised.append(item)
+            return normalised, None
+
+        def _create_order(args):
+            if duffel_env != "test":
+                return _error("create_order", "create_order is enabled only for duffel_env=test in this round", code="live_orders_disabled")
+            offer_id = _text(args.get("offer_id") or args.get("id"))
+            if not offer_id:
+                return _error("create_order", "offer_id is required", code="validation_error")
+            ok, status_code, offer_body = _offer_by_id(offer_id)
+            if not ok:
+                return _error("create_order", "Duffel get_offer failed before order creation", offer_body, status_code)
+            offer = offer_body.get("data") if isinstance(offer_body, dict) and isinstance(offer_body.get("data"), dict) else {}
+            expires_at = _parse_ts(offer.get("expires_at"))
+            if expires_at and expires_at <= datetime.now(timezone.utc):
+                return _error("create_order", f"Offer {offer_id} is expired", code="offer_expired")
+            passengers, passenger_error = _normalise_passengers(args.get("passengers"), offer)
+            if passenger_error:
+                return _error("create_order", passenger_error, code="validation_error")
+            amount = _text(args.get("payment_amount") or offer.get("total_amount"))
+            currency = _text(args.get("payment_currency") or offer.get("total_currency"))
+            if not amount or not currency:
+                return _error("create_order", "payment amount/currency could not be determined from offer", code="validation_error")
+            payload = {
+                "data": {
+                    "type": "instant",
+                    "selected_offers": [offer_id],
+                    "passengers": passengers,
+                    "payments": [{"type": "balance", "amount": amount, "currency": currency}],
+                }
+            }
+            ok, status_code, body = _request("POST", "/air/orders", payload=payload)
+            if not ok:
+                return _error("create_order", "Duffel create_order failed", body, status_code)
+            order = body.get("data") if isinstance(body, dict) else {}
+            # Duffel issues itinerary receipt documents asynchronously after
+            # order creation; the create response usually has documents=[].
+            # Re-fetch the order so callers (e.g. travel UI) get document_url
+            # values they can link to without a second round-trip.
+            order_id_for_refresh = order.get("id") if isinstance(order, dict) else None
+            if order_id_for_refresh and not _as_list(order.get("documents")):
+                ok2, _status2, refresh = _request(
+                    "GET",
+                    f"/air/orders/{urllib.parse.quote(str(order_id_for_refresh), safe='')}",
+                )
+                if ok2 and isinstance(refresh, dict) and isinstance(refresh.get("data"), dict):
+                    order = refresh["data"]
+            safe = _safe_order(order)
+            return _ok(
+                "create_order",
+                {"source": "duffel", "status_code": status_code, "order": safe, "order_id": safe.get("id"), "booking_reference": safe.get("booking_reference")},
+                f"Duffel test order created {safe.get('booking_reference') or safe.get('id')}",
+                {"status_code": status_code, "order_id": safe.get("id"), "booking_reference": safe.get("booking_reference")},
+            )
+
+        def _get_order(args):
+            order_id = _text(args.get("order_id") or args.get("id"))
+            if not order_id:
+                return _error("get_order", "order_id is required", code="validation_error")
+            ok, status_code, body = _request("GET", f"/air/orders/{urllib.parse.quote(order_id, safe='')}")
+            if not ok:
+                return _error("get_order", "Duffel get_order failed", body, status_code)
+            order = body.get("data") if isinstance(body, dict) else {}
+            safe = _safe_order(order)
+            return _ok("get_order", {"source": "duffel", "status_code": status_code, "order": safe, "order_id": safe.get("id"), "booking_reference": safe.get("booking_reference")}, f"Duffel order {safe.get('booking_reference') or safe.get('id')} fetched", {"status_code": status_code})
+
+        def _list_orders(args):
+            params = {"limit": _cap(args.get("limit"), default=50, maximum=50)}
+            if _text(args.get("booking_reference")):
+                params["booking_reference"] = _text(args.get("booking_reference"))
+            if _text(args.get("created_at_after")):
+                params["created_at[after]"] = _text(args.get("created_at_after"))
+            if _text(args.get("passenger_name")):
+                params["passenger_name[]"] = _text(args.get("passenger_name"))
+            ok, status_code, body = _request("GET", "/air/orders", params=params)
+            if not ok:
+                return _error("list_orders", "Duffel list_orders failed", body, status_code)
+            orders = [_safe_order(order) for order in _as_list(body.get("data") if isinstance(body, dict) else []) if isinstance(order, dict)]
+            meta = body.get("meta") if isinstance(body, dict) and isinstance(body.get("meta"), dict) else {}
+            return _ok("list_orders", {"source": "duffel", "status_code": status_code, "orders": orders, "orders_total": len(orders), "meta": meta}, f"{len(orders)} Duffel order(s)", {"status_code": status_code, "orders_total": len(orders)})
+
+        globals().update({
+            "base64": base64,
+            "METADATA_TOKEN_URL": METADATA_TOKEN_URL,
+            "_metadata_token": _metadata_token,
+            "_extract_token": _extract_token,
+            "_secret_bearer": _secret_bearer,
+            "_as_dict": _as_dict,
+            "_as_list": _as_list,
+            "_cap": _cap,
+            "_text": _text,
+            "_error": _error,
+            "_ok": _ok,
+            "_request": _request,
+            "_duration": _duration,
+            "_iata": _iata,
+            "_carrier": _carrier,
+            "_normalise_segment": _normalise_segment,
+            "_normalise_offer": _normalise_offer,
+            "_tools_list": _tools_list,
+            "_search_offers": _search_offers,
+            "_get_offer": _get_offer,
+            "_search_places": _search_places,
+            "_get_airlines": _get_airlines,
+            "_parse_ts": _parse_ts,
+            "_safe_payment": _safe_payment,
+            "_safe_order": _safe_order,
+            "_offer_by_id": _offer_by_id,
+            "_normalise_passengers": _normalise_passengers,
+            "_create_order": _create_order,
+            "_get_order": _get_order,
+            "_list_orders": _list_orders,
+            "json": json,
+            "datetime": datetime,
+            "timezone": timezone,
+            "urllib": urllib,
+        })
+
+        VALID_TOOLS = ("search_offers", "get_offer", "search_places", "get_airlines", "create_order", "get_order", "list_orders")
+        method_name = _text(method, "tools/list").lower()
+        tool_name = _text(tool).lower()
+        args = _as_dict(arguments)
+        project = _text(google_project, "noetl-demo-19700101")
+        secret_name = _text(duffel_secret_name, "duffel-api-test")
+
+        if method_name == "tools/list":
+            result = _tools_list()
+        elif method_name != "tools/call":
+            result = _error(method_name, f"Unknown MCP method: {method_name}")
+        elif tool_name not in VALID_TOOLS:
+            result = _error(tool_name or "unknown", f"Unknown tool: {tool_name}. Run tools/list to see the catalog.")
+        else:
+            # Resolve the Duffel bearer from GSM via Workload Identity. On kind
+            # (no metadata server) or pre-grant prod this raises a clear
+            # credential/permission error rather than a 401 from an empty bearer.
+            # Promote the resolved bearer to globals so the globally-registered
+            # _request helper reads it (the python tool execs helpers in globals).
+            try:
+                duffel_token = _secret_bearer(project, secret_name)
+                globals()["duffel_token"] = duffel_token
+            except Exception as exc:
+                result = _error(tool_name, "Duffel credential unavailable", f"{type(exc).__name__}: {exc}", code="credential_unavailable")
+            if "result" not in locals() or result is None:
+                try:
+                    if tool_name == "search_offers":
+                        result = _search_offers(args)
+                    elif tool_name == "get_offer":
+                        result = _get_offer(args)
+                    elif tool_name == "search_places":
+                        result = _search_places(args)
+                    elif tool_name == "get_airlines":
+                        result = _get_airlines(args)
+                    elif tool_name == "create_order":
+                        result = _create_order(args)
+                    elif tool_name == "get_order":
+                        result = _get_order(args)
+                    else:
+                        result = _list_orders(args)
+                except Exception as exc:
+                    result = _error(tool_name, "Duffel tool failed", f"{type(exc).__name__}: {exc}")
     next:
       spec: { mode: exclusive }
       arcs:
@@ -1614,10 +3438,16 @@ workflow:
         widgets = []
         bot_message = ""
         if not ok and tool:
+            # noetl/ai-meta#155 (P4) — a failed Duffel create_order must NOT
+            # retry create_order: the offer that failed (typically expired /
+            # offer_no_longer_available, HTTP 422) is dead, so re-submitting the
+            # same offer_id just fails again. Redirect any create_order failure
+            # to a fresh flight search so the user gets live, bookable offers.
+            retry_tool = "mcp/duffel.search_offers" if tool == "mcp/duffel.create_order" else tool
             widgets.append(_env("error_card", "default", {
                 "title": "I could not complete that search",
                 "description": _as_dict(tool_summary).get("response_summary", "The provider returned an error. You can retry or continue without this step."),
-                "retry_action_id": f"retry:{tool}",
+                "retry_action_id": f"retry:{retry_tool}",
                 "contact_support": False,
             }))
             bot_message = "That provider hiccuped, but the itinerary thread is still intact."
@@ -1688,24 +3518,30 @@ workflow:
             bot_message = "Here are transfer options from HotelBeds. Pick one for your trip."
         elif intent == "show_flights":
             offers = tool_summary.get("offers") if isinstance(tool_summary.get("offers"), list) else []
+            flight_items = offers[:10] or [{
+                "offer_id": "synthetic-offer-1",
+                "price": {"total": "220.00", "currency": "USD"},
+                "itineraries": [{"duration": "PT5H30M", "segments": [{
+                    "departure": {"iata": "SFO", "at": f"{slot_state.get('check_in_date', default_from)}T08:00:00"},
+                    "arrival": {"iata": slot_state.get("region", {}).get("city_code", "MIA"), "at": f"{slot_state.get('check_in_date', default_from)}T16:00:00"},
+                    "carrier": "DU", "flight_number": "100", "duration": "PT5H30M", "stops": 0,
+                }]}],
+                "carriers": ["DU"],
+                "duration": "PT5H30M",
+                "stops": 0,
+                "validating_airline": "DU",
+                "ctas": ["view_details", "book_this"],
+            }]
+            # noetl/ai-meta#155 (P3) — total_count + emphasis must reflect the
+            # real offer set, not a hardcoded 1. With 10 live Duffel offers the
+            # widget previously claimed total_count=1 and emphasised a synthetic
+            # offer_id. Derive both from the rendered items.
+            emphasis_id = str(flight_items[0].get("offer_id") or "synthetic-offer-1")
             widgets.append(_env("flight_list", "default", {
                 "title": "Flight options",
-                "items": offers[:10] or [{
-                    "offer_id": "synthetic-offer-1",
-                    "price": {"total": "220.00", "currency": "USD"},
-                    "itineraries": [{"duration": "PT5H30M", "segments": [{
-                        "departure": {"iata": "SFO", "at": f"{slot_state.get('check_in_date', default_from)}T08:00:00"},
-                        "arrival": {"iata": slot_state.get("region", {}).get("city_code", "MIA"), "at": f"{slot_state.get('check_in_date', default_from)}T16:00:00"},
-                        "carrier": "DU", "flight_number": "100", "duration": "PT5H30M", "stops": 0,
-                    }]}],
-                    "carriers": ["DU"],
-                    "duration": "PT5H30M",
-                    "stops": 0,
-                    "validating_airline": "DU",
-                    "ctas": ["view_details", "book_this"],
-                }],
-                "emphasis_offer_id": "synthetic-offer-1",
-                "total_count": 1,
+                "items": flight_items,
+                "emphasis_offer_id": emphasis_id,
+                "total_count": len(offers) or 1,
                 "currency": "USD",
             }))
             bot_message = "Here is the first flight batch. Book one to create a Duffel test order."
