@@ -123,10 +123,32 @@ export function EmptyPhoto({ icon = 'hotel' }: { icon?: 'hotel' | 'flight' | 'im
   );
 }
 
+// Google Places/Static-Maps photo URLs arrive keyless from the server (the
+// `google-maps-widget-key` secret is deliberately not embedded — a keyed URL
+// would be scrubbed to "[REDACTED]" and fail the place_card `uri` contract).
+// The browser supplies its own restricted VITE_GOOGLE_MAPS_KEY at <img> time so
+// the image actually loads. Non-Google hosts (e.g. HotelBeds) pass through.
+const GOOGLE_PHOTO_HOSTS = ['maps.googleapis.com', 'places.googleapis.com'];
+
+export function withMapsKey(url: string): string {
+  if (!url) return url;
+  const key = import.meta.env.VITE_GOOGLE_MAPS_KEY as string | undefined;
+  if (!key) return url;
+  try {
+    const parsed = new URL(url);
+    if (!GOOGLE_PHOTO_HOSTS.includes(parsed.hostname) || parsed.searchParams.has('key')) return url;
+    parsed.searchParams.set('key', key);
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 export function PhotoStrip({ photos, icon = 'hotel' }: { photos?: string[]; icon?: 'hotel' | 'flight' | 'image' }) {
   const [failed, setFailed] = useState(false);
-  const first = photos?.find(Boolean);
-  if (!first || failed) return <EmptyPhoto icon={icon} />;
+  const rawFirst = photos?.find(Boolean);
+  if (!rawFirst || failed) return <EmptyPhoto icon={icon} />;
+  const first = withMapsKey(rawFirst);
   return (
     <Box
       sx={{
