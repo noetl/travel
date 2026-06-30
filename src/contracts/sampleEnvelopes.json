@@ -714,6 +714,33 @@
     }
   },
   {
+    "widget_type": "hotel_confirmation",
+    "variant": "default",
+    "payload": {
+      "booking_reference": "HB-TEST-XKQAYC",
+      "hotel_name": "Sample Test Hotel Madrid",
+      "status": "CONFIRMED",
+      "check_in": "2026-07-10",
+      "check_out": "2026-07-12",
+      "total_amount": "240.00",
+      "total_currency": "EUR",
+      "destination": "Madrid",
+      "ctas": [
+        "view_full",
+        "new_search"
+      ]
+    },
+    "schema_version": 1,
+    "ai_adjustments": {
+      "annotations": [
+        {
+          "target": "widget",
+          "text": "sample"
+        }
+      ]
+    }
+  },
+  {
     "widget_type": "notification",
     "variant": "default",
     "payload": {
