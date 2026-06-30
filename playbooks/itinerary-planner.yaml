@@ -3593,11 +3593,18 @@ workflow:
                 name = str(booking.get("hotel_name") or (hotel_card or {}).get("name") or "Hotel")
                 nights = slot_state.get("nights") if isinstance(slot_state.get("nights"), int) else None
                 nightly = _money_num((hotel_card or {}).get("price_per_night"))
-                if amount is None and nightly is not None and nights and nights > 0:
-                    amount = round(nightly * nights, 2)
                 detail_bits = []
-                if nightly is not None and nights and nights > 0:
-                    detail_bits.append(f"{nightly:.2f} {currency} x {nights} nights")
+                if amount is not None:
+                    # Real booking total is authoritative. HotelBeds minRate
+                    # (price_per_night) is often the whole-stay rate, so don't
+                    # assert a nightly x nights product that won't reconcile —
+                    # report the real total over N nights.
+                    if nights and nights > 0:
+                        detail_bits.append(f"{nights} nights")
+                elif nightly is not None and nights and nights > 0:
+                    # Selected-not-booked: estimate the subtotal from the card.
+                    amount = round(nightly * nights, 2)
+                    detail_bits.append(f"est. {nightly:.2f} {currency} x {nights} nights")
                 if ref:
                     detail_bits.append(f"ref {ref}")
                 elif not booking:
