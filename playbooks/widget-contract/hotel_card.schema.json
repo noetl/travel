@@ -91,13 +91,18 @@
     "distance_from_center": {
       "type": "string"
     },
+    "rate_key": {
+      "type": "string",
+      "description": "Bookable HotelBeds rateKey carried from search so the Book CTA can drive book_hotel (noetl/ai-meta#162)."
+    },
     "ctas": {
       "type": "array",
       "items": {
         "type": "string",
         "enum": [
           "watch_in_detail",
-          "show_numbers"
+          "show_numbers",
+          "book"
         ]
       }
     },

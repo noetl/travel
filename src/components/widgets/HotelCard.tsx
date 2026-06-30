@@ -43,7 +43,16 @@ export function HotelCard({ payload, variantId = 'compact', onWidgetEvent }: Wid
           {data.ctas?.length ? (
             <Stack direction="row" spacing={1}>
               {data.ctas.includes('watch_in_detail') ? <ActionButton label="Watch In Detail" actionId={`view_hotel:${data.hotel_id}`} onWidgetEvent={onWidgetEvent} /> : null}
-              {data.ctas.includes('show_numbers') ? <ActionButton label="Show Numbers" actionId={`pick_hotel:${data.hotel_id}`} onWidgetEvent={onWidgetEvent} variant="contained" /> : null}
+              {data.ctas.includes('show_numbers') ? <ActionButton label="Show Numbers" actionId={`pick_hotel:${data.hotel_id}`} onWidgetEvent={onWidgetEvent} variant={data.ctas.includes('book') ? 'text' : 'contained'} /> : null}
+              {data.ctas.includes('book') ? (
+                <ActionButton
+                  label="Book"
+                  actionId={`book_hotel:${data.hotel_id}`}
+                  value={data.rate_key ? { hotel_id: data.hotel_id, rate_key: data.rate_key } : { hotel_id: data.hotel_id }}
+                  onWidgetEvent={onWidgetEvent}
+                  variant="contained"
+                />
+              ) : null}
             </Stack>
           ) : null}
         </Stack>

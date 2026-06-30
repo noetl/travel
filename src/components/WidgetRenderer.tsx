@@ -22,6 +22,7 @@ import filter_panelSchema from '../../playbooks/widget-contract/filter_panel.sch
 import property_blockSchema from '../../playbooks/widget-contract/property_block.schema.json';
 import itinerary_summarySchema from '../../playbooks/widget-contract/itinerary_summary.schema.json';
 import order_confirmationSchema from '../../playbooks/widget-contract/order_confirmation.schema.json';
+import hotel_confirmationSchema from '../../playbooks/widget-contract/hotel_confirmation.schema.json';
 import notificationSchema from '../../playbooks/widget-contract/notification.schema.json';
 import error_cardSchema from '../../playbooks/widget-contract/error_card.schema.json';
 import clarify_questionSchema from '../../playbooks/widget-contract/clarify_question.schema.json';
@@ -46,6 +47,7 @@ import { FilterPanel } from './widgets/FilterPanel';
 import { PropertyBlock } from './widgets/PropertyBlock';
 import { ItinerarySummary } from './widgets/ItinerarySummary';
 import { OrderConfirmation } from './widgets/OrderConfirmation';
+import { HotelConfirmation } from './widgets/HotelConfirmation';
 import { Notification } from './widgets/Notification';
 import { ErrorCard } from './widgets/ErrorCard';
 import { ClarifyQuestion } from './widgets/ClarifyQuestion';
@@ -81,6 +83,7 @@ const payloadSchemas: Record<string, AnySchema> = {
   property_block: property_blockSchema,
   itinerary_summary: itinerary_summarySchema,
   order_confirmation: order_confirmationSchema,
+  hotel_confirmation: hotel_confirmationSchema,
   notification: notificationSchema,
   error_card: error_cardSchema,
   clarify_question: clarify_questionSchema,
@@ -111,6 +114,7 @@ const componentMap: Record<string, React.ComponentType<WidgetComponentProps>> = 
   property_block: PropertyBlock,
   itinerary_summary: ItinerarySummary,
   order_confirmation: OrderConfirmation,
+  hotel_confirmation: HotelConfirmation,
   notification: Notification,
   error_card: ErrorCard,
   clarify_question: ClarifyQuestion,

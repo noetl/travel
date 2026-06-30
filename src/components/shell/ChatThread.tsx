@@ -328,7 +328,7 @@ export function ChatThread({
   const visibleMessages = useMemo(
     () =>
       activeView === 'orders'
-        ? messages.filter((message) => 'envelope' in message && message.envelope?.widget_type === 'order_confirmation')
+        ? messages.filter((message) => 'envelope' in message && (message.envelope?.widget_type === 'order_confirmation' || message.envelope?.widget_type === 'hotel_confirmation'))
         : messages,
     [activeView, messages]
   );
@@ -348,6 +348,15 @@ export function ChatThread({
           id: message.id,
           label: `Booking ${ref}`,
           subtitle: amount,
+          widgetType
+        });
+      } else if (widgetType === 'hotel_confirmation') {
+        const ref = String(payload.booking_reference || 'booking');
+        const amount = payload.total_amount ? `${payload.total_currency || ''} ${payload.total_amount}`.trim() : '';
+        orders.push({
+          id: message.id,
+          label: `Hotel ${ref}`,
+          subtitle: [payload.hotel_name, amount].filter(Boolean).join(' · '),
           widgetType
         });
       } else if (widgetType === 'flight_list' || widgetType === 'flight_card') {
@@ -445,7 +454,7 @@ export function ChatThread({
           text: extractBotMessage(execution),
           envelope,
           executionId,
-          view: envelope?.widget_type === 'order_confirmation' ? 'orders' : 'searches'
+          view: envelope?.widget_type === 'order_confirmation' || envelope?.widget_type === 'hotel_confirmation' ? 'orders' : 'searches'
         }
       ]);
     } catch (caught) {

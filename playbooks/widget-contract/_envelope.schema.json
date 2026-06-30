@@ -36,6 +36,7 @@
         "property_block",
         "itinerary_summary",
         "order_confirmation",
+        "hotel_confirmation",
         "notification",
         "error_card",
         "clarify_question",
