@@ -2896,6 +2896,7 @@ workflow:
       code: |
         import copy
         import json
+        import re
 
         def _as_dict(value):
             if isinstance(value, dict):
@@ -3115,25 +3116,48 @@ workflow:
                 card["address"] = str(address)
             return card
 
+        def _plain_text(value, limit):
+            # HotelBeds activity descriptions arrive as multi-KB HTML blobs.
+            # Strip tags + collapse whitespace so a card carries a short
+            # plain-text teaser, not the raw markup. noetl/ai-meta#155 follow-up
+            # (activities-trim): a 10-card activity_list with raw [:600] HTML
+            # descriptions is duplicated ~6x across the render result
+            # (widgets / first_widget / final_slot_state / post_docs /
+            # post_events), pushing render_widget_chat to ~75 KB on a fresh
+            # thread and over the 100 KB result-tier offload threshold once
+            # prior-provider slot_state accumulates -> the render result is
+            # offloaded to a noetl:// ref that 404s on prod and the widget
+            # renders blank. Short plain text keeps every copy small.
+            text = str(value or "")
+            text = re.sub(r"<[^>]+>", " ", text)
+            for entity, repl in (("&nbsp;", " "), ("&amp;", "&"), ("&#39;", "'"),
+                                 ("&quot;", '"'), ("&lt;", "<"), ("&gt;", ">")):
+                text = text.replace(entity, repl)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text[:limit]
+
         def _activity_card(activity):
             # HotelBeds activities_dispatch _activity_summary shape:
             # {code, name, type, country_code, country_name, currency,
             #  amount_from, modalities_count, modalities:[{code,name,duration}],
             #  content}. Optional fields are only emitted when present so the
             # activity_list schema's minimal required set always validates.
+            # Heavy fields are aggressively trimmed (see _plain_text) so the
+            # card stays ~0.5 KB and the render result stays well under the
+            # 100 KB offload budget even with accumulated slot_state.
             activity = activity if isinstance(activity, dict) else {}
             card = {
                 "activity_code": str(activity.get("code") or activity.get("activityCode") or ""),
-                "name": str(activity.get("name") or "Activity"),
+                "name": _plain_text(activity.get("name") or "Activity", 120) or "Activity",
                 "currency": str(activity.get("currency") or "EUR"),
                 "ctas": ["view_details", "add_to_itinerary"],
             }
             a_type = activity.get("type")
             if a_type:
-                card["type"] = str(a_type)
+                card["type"] = str(a_type)[:40]
             country = activity.get("country_name") or activity.get("country_code")
             if country:
-                card["country"] = str(country)
+                card["country"] = str(country)[:60]
             amount = activity.get("amount_from")
             try:
                 if amount is not None and float(amount) >= 0:
@@ -3145,22 +3169,20 @@ workflow:
                 card["modalities_count"] = mcount
             modalities = activity.get("modalities") if isinstance(activity.get("modalities"), list) else []
             norm_modalities = []
-            for modality in modalities[:5]:
+            for modality in modalities[:2]:
                 if not isinstance(modality, dict):
                     continue
                 entry = {}
-                if modality.get("code") is not None:
-                    entry["code"] = str(modality.get("code"))
                 if modality.get("name") is not None:
-                    entry["name"] = str(modality.get("name"))
+                    entry["name"] = _plain_text(modality.get("name"), 60)
                 if modality.get("duration") is not None:
                     entry["duration"] = modality.get("duration")
                 norm_modalities.append(entry)
             if norm_modalities:
                 card["modalities"] = norm_modalities
-            desc = activity.get("content")
+            desc = _plain_text(activity.get("content"), 160)
             if desc:
-                card["description"] = str(desc)[:600]
+                card["description"] = desc
             return card
 
         def _transfer_card(service):
