@@ -3407,14 +3407,25 @@ workflow:
             normalised_activities = [_activity_card(activity) for activity in activities[:10] if isinstance(activity, dict)]
             activity_codes = [card.get("activity_code") for card in normalised_activities if card.get("activity_code")]
             next_state["activity_search_results"] = activity_codes
-            next_state["activity_offers"] = normalised_activities
+            # noetl/ai-meta#165 (v62) — do NOT persist the full activity cards in
+            # slot_state. The activity_list widget renders from this turn's
+            # tool_summary["activities"]; nothing downstream (summary, rate_key,
+            # any later render) reads slot_state["activity_offers"]. Carrying ~6KB
+            # of dead cards turn-over-turn bloated the guided-sequence slot to the
+            # point where the off-server drive's per-hop reconcile (#156 flag OFF,
+            # #130/#163 family) wedged the summary + Confirm turns on a full walk.
+            # Keep only the lightweight activity_search_results marker the routing
+            # elif chain uses to advance the stage.
             next_state["total_results_seen"] = len(activities)
         elif first_tool == "mcp/hotelbeds-transfers.search_transfers":
             transfers = _as_list(inner.get("transfers") or inner.get("items"))
             normalised_transfers = [_transfer_card(service) for service in transfers[:10] if isinstance(service, dict)]
             transfer_ids = [card.get("transfer_id") for card in normalised_transfers if card.get("transfer_id")]
             next_state["transfer_search_results"] = transfer_ids
-            next_state["transfer_offers"] = normalised_transfers
+            # noetl/ai-meta#165 (v62) — same slot-trim as activity_offers above:
+            # the transfer_list renders from this turn's tool_summary["transfers"]
+            # and nothing reads slot_state["transfer_offers"] later, so it is not
+            # persisted. Keep only the transfer_search_results routing marker.
             next_state["total_results_seen"] = len(transfers)
         elif first_tool == "mcp/hotelbeds.book_hotel":
             # noetl/ai-meta#162 — normalise the HotelBeds booking envelope into
