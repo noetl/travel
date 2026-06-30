@@ -23,7 +23,13 @@ metadata:
     Flight intent fills origin/destination/dates/party (defaulting dates
     forward, party to one adult, origin to the home metro) so a follow-up is
     asked only when the destination is truly absent.
-  version: "1.6"
+
+    Hotels are bookable end-to-end (noetl/ai-meta#162), mirroring the Duffel
+    flight pattern: a "Book" CTA on a hotel card sets picked_hotel_id + a book
+    intent, the planner carries the hotel's rate_key (captured from search) to
+    mcp/hotelbeds.book_hotel (checkRate→bookings, TEST/SANDBOX only), and a
+    hotel_confirmation widget renders the real booking reference.
+  version: "1.7"
   agent: true
   tags: [muno, itinerary, trip-planner, event-sourced, widgets]
   terminal:
@@ -450,6 +456,7 @@ workflow:
         book_flight_now = False
         view_flight_now = False
         view_order_now = False
+        book_hotel_now = False
         if event_type in ("user_widget_submit", "user_widget_cta_click"):
             submitted = _as_dict(payload.get("submitted_value") or payload.get("value"))
             action_id = str(payload.get("action_id") or submitted.get("action_id") or "").strip()
@@ -491,10 +498,23 @@ workflow:
                 # search/booking branches.
                 view_order_now = True
             if "hotel" in action_id or submitted.get("hotel_id"):
-                updates["picked_hotel_id"] = submitted.get("hotel_id") or action_id.replace("pick_hotel:", "")
+                # action ids: view_hotel:<id> (details), pick_hotel:<id>
+                # (numbers), book_hotel:<id> (booking). Parse the id cleanly
+                # rather than stripping a single prefix so view/book carry the
+                # bare hotel_id.
+                hotel_id_from_action = action_id.split(":", 1)[1] if ":" in action_id else action_id
+                updates["picked_hotel_id"] = submitted.get("hotel_id") or hotel_id_from_action
+                # noetl/ai-meta#162 — a Book CTA carries the booking intent (the
+                # Duffel book_offer analogue). The rate_key is normally looked
+                # up from the picked hotel_offer card below, but honour an
+                # explicit one on the submit payload too.
+                if action_id.startswith("book_hotel:"):
+                    book_hotel_now = True
+                if submitted.get("rate_key"):
+                    updates["picked_hotel_rate_key"] = str(submitted.get("rate_key"))
 
         wants_calendar = "show" in lowered_text and ("schedule" in lowered_text or "calendar" in lowered_text)
-        wants_order = book_flight_now or any(word in lowered_text for word in ("order", "book", "booking", "confirm", "purchase"))
+        wants_order = book_flight_now or book_hotel_now or any(word in lowered_text for word in ("order", "book", "booking", "confirm", "purchase"))
         # HotelBeds replaces the removed Amadeus hotels path. A hotel-intent
         # query (e.g. "hotels in Paris") routes to mcp/hotelbeds.search_hotels.
         wants_hotel = any(word in lowered_text for word in ("hotel", "accommodation", "lodging", "place to stay", "where to stay"))
@@ -561,6 +581,23 @@ workflow:
         party_ready = isinstance(next_state.get("party"), dict)
         picked_flight = bool(next_state.get("picked_flight_offer_id"))
         picked_hotel = bool(next_state.get("picked_hotel_id"))
+
+        # noetl/ai-meta#162 — resolve the bookable rate_key for the picked
+        # hotel. Prefer an explicit one carried on the submit; otherwise look it
+        # up from the hotel_offers cards captured at search time (mirrors how a
+        # picked flight offer id is already in slot_state). Also grab the hotel
+        # name/price for the confirmation summary.
+        picked_hotel_rate_key = str(next_state.get("picked_hotel_rate_key") or "")
+        picked_hotel_card = {}
+        if picked_hotel:
+            for _card in (next_state.get("hotel_offers") if isinstance(next_state.get("hotel_offers"), list) else []):
+                if isinstance(_card, dict) and str(_card.get("hotel_id")) == str(next_state.get("picked_hotel_id")):
+                    picked_hotel_card = _card
+                    if not picked_hotel_rate_key:
+                        picked_hotel_rate_key = str(_card.get("rate_key") or "")
+                    break
+        if picked_hotel_rate_key:
+            next_state["picked_hotel_rate_key"] = picked_hotel_rate_key
 
         def _test_passengers(party):
             party = party if isinstance(party, dict) else {}
@@ -698,6 +735,25 @@ workflow:
                 },
             })
             render_intent = {"kind": "show_flights"}
+        elif picked_hotel and wants_order and picked_hotel_rate_key and not next_state.get("hotel_booking_ref"):
+            # noetl/ai-meta#162 — hotel booking, mirroring the Duffel
+            # create_order branch. The rate_key captured at search time drives
+            # mcp/hotelbeds.book_hotel (checkRate→bookings, TEST/SANDBOX only).
+            # Positioned above the places + guided-flow-flights branches so a
+            # Book click on a hotel-only thread books instead of re-searching.
+            hb_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+            tool_requests.append({
+                "tool": "mcp/hotelbeds.book_hotel",
+                "arguments": {
+                    "rate_key": picked_hotel_rate_key,
+                    "holder_name": "Alex",
+                    "holder_surname": "Traveler",
+                    "rooms": int(hb_party.get("rooms") or 1),
+                    "adults": int(hb_party.get("adults") or 1),
+                    "children": len(hb_party.get("children") or []),
+                },
+            })
+            render_intent = {"kind": "hotel_confirmation"}
         elif wants_calendar:
             render_intent = {"kind": "calendar_live"}
         elif region_ready and ("places_seen" not in next_state or region_restated):
@@ -837,6 +893,8 @@ workflow:
           when: "{{ extract_turn.first_tool == 'mcp/duffel.create_order' }}"
         - step: call_hotelbeds_hotels
           when: "{{ extract_turn.first_tool == 'mcp/hotelbeds.search_hotels' }}"
+        - step: call_hotelbeds_book
+          when: "{{ extract_turn.first_tool == 'mcp/hotelbeds.book_hotel' }}"
         - step: call_hotelbeds_activities
           when: "{{ extract_turn.first_tool == 'mcp/hotelbeds-activities.search_activities' }}"
         - step: call_hotelbeds_transfers
@@ -2745,6 +2803,26 @@ workflow:
       arcs:
         - step: normalize_tool_response
 
+  - step: call_hotelbeds_book
+    desc: Dispatch a HotelBeds TEST/SANDBOX booking (checkRate→bookings) through the MCP playbook
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/hotelbeds
+      # noetl/ai-meta#162 — mirror call_hotelbeds_hotels: block for the child's
+      # real booking envelope ({status, data: {booking: {...}, booking_reference}}),
+      # not the async-start status. book_hotel is TEST/SANDBOX-guarded MCP-side.
+      return_result: true
+      result_step: hotelbeds_dispatch
+      timeout: 120
+      payload:
+        method: tools/call
+        tool: book_hotel
+        arguments: "{{ extract_turn.first_tool_arguments }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: normalize_tool_response
+
   - step: call_hotelbeds_activities
     desc: Dispatch a HotelBeds Activities availability search through the MCP playbook
     tool:
@@ -2814,6 +2892,7 @@ workflow:
         hotels_result: "{{ call_hotelbeds_hotels | default({}) }}"
         activities_result: "{{ call_hotelbeds_activities | default({}) }}"
         transfers_result: "{{ call_hotelbeds_transfers | default({}) }}"
+        book_result: "{{ call_hotelbeds_book | default({}) }}"
       code: |
         import copy
         import json
@@ -2992,6 +3071,13 @@ workflow:
                         break
                     except (TypeError, ValueError):
                         continue
+            # noetl/ai-meta#162 — carry the bookable rateKey from search so the
+            # Book CTA can drive mcp/hotelbeds.book_hotel. Only hotels with a
+            # rate_key get the "book" CTA; rate-less hotels keep the prior CTAs.
+            rate_key = str(hotel.get("rateKey") or "")
+            ctas = ["watch_in_detail", "show_numbers"]
+            if rate_key:
+                ctas.append("book")
             card = {
                 "hotel_id": str(hotel.get("code") or hotel.get("hotel_id") or ""),
                 "name": str(hotel.get("name") or "Hotel"),
@@ -2999,8 +3085,10 @@ workflow:
                 "photos": [],
                 "amenities": [],
                 "currency": str(hotel.get("currency") or "EUR"),
-                "ctas": ["watch_in_detail", "show_numbers"],
+                "ctas": ctas,
             }
+            if rate_key:
+                card["rate_key"] = rate_key
             if score_count:
                 card["score_count"] = score_count
             if 0 <= star <= 5 and star > 0:
@@ -3155,6 +3243,7 @@ workflow:
             "mcp/hotelbeds.search_hotels": hotels_result,
             "mcp/hotelbeds-activities.search_activities": activities_result,
             "mcp/hotelbeds-transfers.search_transfers": transfers_result,
+            "mcp/hotelbeds.book_hotel": book_result,
         }
         envelope = _as_dict(by_tool.get(first_tool))
         data = _as_dict(envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope)
@@ -3218,6 +3307,31 @@ workflow:
             next_state["transfer_search_results"] = transfer_ids
             next_state["transfer_offers"] = normalised_transfers
             next_state["total_results_seen"] = len(transfers)
+        elif first_tool == "mcp/hotelbeds.book_hotel":
+            # noetl/ai-meta#162 — normalise the HotelBeds booking envelope into
+            # a hotel_confirmation payload (mirrors the create_order → order
+            # path). Fall back to the picked hotel card / slot dates when the
+            # provider omits a field so the confirmation always has a name+dates.
+            booking = _as_dict(inner.get("booking") or inner)
+            picked_card = {}
+            for _c in (next_state.get("hotel_offers") if isinstance(next_state.get("hotel_offers"), list) else []):
+                if isinstance(_c, dict) and str(_c.get("hotel_id")) == str(next_state.get("picked_hotel_id")):
+                    picked_card = _c
+                    break
+            normalised_booking = {
+                "booking_reference": str(booking.get("reference") or inner.get("booking_reference") or ""),
+                "hotel_name": str(booking.get("hotel_name") or inner.get("hotel_name") or picked_card.get("name") or "Hotel"),
+                "status": str(booking.get("status") or inner.get("status") or "CONFIRMED"),
+                "check_in": str(booking.get("checkIn") or inner.get("checkIn") or next_state.get("check_in_date") or ""),
+                "check_out": str(booking.get("checkOut") or inner.get("checkOut") or next_state.get("check_out_date") or ""),
+                "total_amount": str(booking.get("totalNet") if booking.get("totalNet") is not None else (inner.get("totalNet") if inner.get("totalNet") is not None else "0.00")),
+                "total_currency": str(booking.get("currency") or inner.get("currency") or picked_card.get("currency") or "EUR"),
+                "destination": str(booking.get("destinationName") or booking.get("zoneName") or (next_state.get("region") or {}).get("label") or ""),
+                "ctas": ["new_search"],
+            }
+            if ok and normalised_booking["booking_reference"]:
+                next_state["hotel_booking_ref"] = normalised_booking["booking_reference"]
+                next_state["last_hotel_booking"] = normalised_booking
 
         summary = {
             "call_id": call_id,
@@ -3239,6 +3353,8 @@ workflow:
             summary["activities"] = normalised_activities
         elif first_tool == "mcp/hotelbeds-transfers.search_transfers":
             summary["transfers"] = normalised_transfers
+        elif first_tool == "mcp/hotelbeds.book_hotel":
+            summary["hotel_booking"] = normalised_booking
         # noetl/ai-meta#135 — keep this step's result under the 100 KB
         # result-tier offload threshold. A result >100 KB is offloaded to
         # object storage and the off-server state builder hands the NEXT step
@@ -3443,7 +3559,15 @@ workflow:
             # offer_no_longer_available, HTTP 422) is dead, so re-submitting the
             # same offer_id just fails again. Redirect any create_order failure
             # to a fresh flight search so the user gets live, bookable offers.
-            retry_tool = "mcp/duffel.search_offers" if tool == "mcp/duffel.create_order" else tool
+            # noetl/ai-meta#162 — same shape for a failed hotel booking: a stale
+            # rateKey (checkrate_failed / booking_failed) can't be re-booked, so
+            # redirect to a fresh hotel search.
+            if tool == "mcp/duffel.create_order":
+                retry_tool = "mcp/duffel.search_offers"
+            elif tool == "mcp/hotelbeds.book_hotel":
+                retry_tool = "mcp/hotelbeds.search_hotels"
+            else:
+                retry_tool = tool
             widgets.append(_env("error_card", "default", {
                 "title": "I could not complete that search",
                 "description": _as_dict(tool_summary).get("response_summary", "The provider returned an error. You can retry or continue without this step."),
@@ -3579,6 +3703,23 @@ workflow:
                 "ctas": ["view_full", "new_search"],
             }))
             bot_message = "Your Duffel test order is confirmed."
+        elif intent == "hotel_confirmation":
+            # noetl/ai-meta#162 — render the HotelBeds TEST booking. Prefer the
+            # freshly normalised booking from this turn, fall back to the cached
+            # last_hotel_booking so a re-render after the fact still works.
+            booking = _as_dict(tool_summary.get("hotel_booking")) or _as_dict(slot_state.get("last_hotel_booking"))
+            widgets.append(_env("hotel_confirmation", "default", {
+                "booking_reference": booking.get("booking_reference") or slot_state.get("hotel_booking_ref") or "pending",
+                "hotel_name": booking.get("hotel_name") or "Hotel",
+                "status": booking.get("status") or "CONFIRMED",
+                "check_in": booking.get("check_in") or default_from,
+                "check_out": booking.get("check_out") or default_to,
+                "total_amount": booking.get("total_amount") or "0.00",
+                "total_currency": booking.get("total_currency") or "EUR",
+                "destination": booking.get("destination") or slot_state.get("region", {}).get("label", ""),
+                "ctas": ["new_search"],
+            }))
+            bot_message = "Your HotelBeds test booking is confirmed."
         elif intent == "order_detail":
             # Back-compat: re-render the cached order without refetching from
             # Duffel. Newer travel UI handles View full order as a client-side

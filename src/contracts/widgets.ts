@@ -27,6 +27,7 @@ export interface WidgetEnvelope {
     | 'property_block'
     | 'itinerary_summary'
     | 'order_confirmation'
+    | 'hotel_confirmation'
     | 'notification'
     | 'error_card'
     | 'clarify_question'
@@ -313,7 +314,11 @@ export interface HotelCardPayload {
   available_rooms?: number;
   address?: string;
   distance_from_center?: string;
-  ctas?: ('watch_in_detail' | 'show_numbers')[];
+  /**
+   * Bookable HotelBeds rateKey carried from search so the Book CTA can drive book_hotel (noetl/ai-meta#162).
+   */
+  rate_key?: string;
+  ctas?: ('watch_in_detail' | 'show_numbers' | 'book')[];
   ai_adjustments?: {
     emphasis?: string;
     annotations?: {
@@ -365,7 +370,11 @@ export interface HotelCardPayload {
   available_rooms?: number;
   address?: string;
   distance_from_center?: string;
-  ctas?: ('watch_in_detail' | 'show_numbers')[];
+  /**
+   * Bookable HotelBeds rateKey carried from search so the Book CTA can drive book_hotel (noetl/ai-meta#162).
+   */
+  rate_key?: string;
+  ctas?: ('watch_in_detail' | 'show_numbers' | 'book')[];
   ai_adjustments?: {
     emphasis?: string;
     annotations?: {
@@ -379,6 +388,22 @@ export interface HotelCardPayload {
       action_id?: string;
     };
   };
+}
+
+
+/**
+ * HotelBeds test-environment booking receipt.
+ */
+export interface HotelConfirmationPayload {
+  booking_reference: string;
+  hotel_name: string;
+  status?: string;
+  check_in?: string;
+  check_out?: string;
+  total_amount: string;
+  total_currency: string;
+  destination?: string;
+  ctas?: ('view_full' | 'new_search')[];
 }
 
 
@@ -420,7 +445,11 @@ export interface HotelCardPayload {
   available_rooms?: number;
   address?: string;
   distance_from_center?: string;
-  ctas?: ('watch_in_detail' | 'show_numbers')[];
+  /**
+   * Bookable HotelBeds rateKey carried from search so the Book CTA can drive book_hotel (noetl/ai-meta#162).
+   */
+  rate_key?: string;
+  ctas?: ('watch_in_detail' | 'show_numbers' | 'book')[];
   ai_adjustments?: {
     emphasis?: string;
     annotations?: {
@@ -522,7 +551,11 @@ export interface HotelCardPayload {
   available_rooms?: number;
   address?: string;
   distance_from_center?: string;
-  ctas?: ('watch_in_detail' | 'show_numbers')[];
+  /**
+   * Bookable HotelBeds rateKey carried from search so the Book CTA can drive book_hotel (noetl/ai-meta#162).
+   */
+  rate_key?: string;
+  ctas?: ('watch_in_detail' | 'show_numbers' | 'book')[];
   ai_adjustments?: {
     emphasis?: string;
     annotations?: {
@@ -753,6 +786,7 @@ export const WIDGET_TYPES = [
   "flight_list",
   "hotel_card",
   "hotel_compare",
+  "hotel_confirmation",
   "hotel_list",
   "itinerary_summary",
   "loading_card",
@@ -769,5 +803,5 @@ export const WIDGET_TYPES = [
   "user_text"
 ] as const;
 export type WidgetType = typeof WIDGET_TYPES[number];
-export type WidgetPayload = ActionChooserPayload | ActivityListPayload | BotTextPayload | CalendarViewPayload | ClarifyQuestionPayload | DateRangePickerPayload | ErrorCardPayload | FilterPanelPayload | FlightCardPayload | FlightListPayload | HotelCardPayload | HotelComparePayload | HotelListPayload | ItinerarySummaryPayload | LoadingCardPayload | MapViewPayload | NotificationPayload | OrderConfirmationPayload | PartyPickerPayload | PlaceAutocompleteInputPayload | PlaceCardPayload | PlaceListPayload | PropertyBlockPayload | TransferListPayload | TypingIndicatorPayload | UserTextPayload;
+export type WidgetPayload = ActionChooserPayload | ActivityListPayload | BotTextPayload | CalendarViewPayload | ClarifyQuestionPayload | DateRangePickerPayload | ErrorCardPayload | FilterPanelPayload | FlightCardPayload | FlightListPayload | HotelCardPayload | HotelComparePayload | HotelConfirmationPayload | HotelListPayload | ItinerarySummaryPayload | LoadingCardPayload | MapViewPayload | NotificationPayload | OrderConfirmationPayload | PartyPickerPayload | PlaceAutocompleteInputPayload | PlaceCardPayload | PlaceListPayload | PropertyBlockPayload | TransferListPayload | TypingIndicatorPayload | UserTextPayload;
 export type WidgetEnvelopeOf<TPayload = WidgetPayload> = WidgetEnvelope & { payload: TPayload };

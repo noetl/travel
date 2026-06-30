@@ -45,6 +45,7 @@ const WIDGET_ICONS: Record<string, ReactNode> = {
   place_list: <PlaceIcon fontSize="small" />,
   place_card: <PlaceIcon fontSize="small" />,
   order_confirmation: <ConfirmationNumberIcon fontSize="small" />,
+  hotel_confirmation: <HotelIcon fontSize="small" />,
   itinerary_summary: <EventNoteIcon fontSize="small" />,
   calendar_view: <EventNoteIcon fontSize="small" />
 };
