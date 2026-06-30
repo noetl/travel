@@ -581,6 +581,9 @@ workflow:
         if region_restated:
             updates["places_seen"] = []
             updates["total_results_seen"] = 0
+            # noetl/ai-meta#165 — a fresh destination after a finalized trip
+            # starts a new plan, so drop the terminal trip_map lock.
+            updates["trip_confirmed"] = False
 
         next_state = _normalise_region_fields(_deep_merge(slot_state, updates))
         region_ready = isinstance(next_state.get("region"), dict)
