@@ -3423,6 +3423,8 @@ workflow:
       code: |
         import json
         import uuid
+        import re
+        import copy
         from datetime import date, datetime, timezone, timedelta
 
         def _as_dict(value):
@@ -3494,26 +3496,253 @@ workflow:
             "default_to": default_to,
         })
 
+        # noetl/ai-meta#165 — the itinerary summary + calendar must reflect the
+        # REAL booked flight (PNR/price/times) and hotel (name/rate/dates/ref)
+        # carried in slot_state after create_order / book_hotel, not the prior
+        # hardcoded ~$960 + "Depart SFO 08:00" placeholders. These helpers pull
+        # the picked offer / hotel cards and booking financials out of
+        # slot_state so a partial itinerary (flight only, hotel only, neither)
+        # summarises gracefully without fabricating missing pieces.
+        def _money_num(value):
+            try:
+                return float(str(value).replace(",", "").strip())
+            except (TypeError, ValueError):
+                return None
+
+        def _norm_dt(value, fallback):
+            # RFC3339-valid date-time for calendar_event.start_at (the schema
+            # requires format date-time + non-empty timezone). Duffel segment
+            # `at` values may arrive without an offset; append Z so the string
+            # validates and the FE's new Date() parse is unambiguous.
+            s = str(value or "").strip()
+            if not s:
+                return str(fallback)
+            if "T" not in s:
+                s = f"{s}T12:00:00"
+            timepart = s.split("T", 1)[1]
+            if not re.search(r"(Z|[+-]\d{2}:?\d{2})$", timepart):
+                s = s + "Z"
+            return s
+
+        def _picked_flight_card():
+            # The picked Duffel offer (flight_card-shaped, built by _offer_card
+            # at search time) matched by picked_flight_offer_id. CTAs are dropped
+            # so the embedded summary card does not re-offer "Book this".
+            offers = slot_state.get("flight_offers") if isinstance(slot_state.get("flight_offers"), list) else []
+            pid = str(slot_state.get("picked_flight_offer_id") or "")
+            if not pid:
+                return None
+            for offer in offers:
+                if isinstance(offer, dict) and str(offer.get("offer_id")) == pid:
+                    card = copy.deepcopy(offer)
+                    card.pop("ctas", None)
+                    return card
+            return None
+
+        def _picked_hotel_card():
+            # The picked HotelBeds hotel (hotel_card-shaped, built by _hotel_card
+            # at search time) matched by picked_hotel_id. CTAs dropped likewise.
+            cards = slot_state.get("hotel_offers") if isinstance(slot_state.get("hotel_offers"), list) else []
+            hid = str(slot_state.get("picked_hotel_id") or "")
+            if not hid:
+                return None
+            for card in cards:
+                if isinstance(card, dict) and str(card.get("hotel_id")) == hid:
+                    out = copy.deepcopy(card)
+                    out.pop("ctas", None)
+                    return out
+            return None
+
+        def _summary_components():
+            # Real booked/selected line items. Each: {kind, label, amount,
+            # currency, detail}. amount is None when a price isn't known yet
+            # (selected but not priced) — the caller renders "price pending"
+            # rather than a fabricated number.
+            comps = []
+            order = _as_dict(slot_state.get("last_order"))
+            flight_card = _picked_flight_card()
+            if order or flight_card:
+                amount = _money_num(order.get("total_amount"))
+                currency = str(order.get("total_currency") or "USD")
+                ref = str(order.get("booking_reference") or slot_state.get("booking_reference") or "")
+                carrier = ""
+                route = ""
+                if flight_card:
+                    if amount is None:
+                        price = flight_card.get("price") if isinstance(flight_card.get("price"), dict) else {}
+                        amount = _money_num(price.get("total"))
+                        currency = str(price.get("currency") or currency)
+                    carriers = flight_card.get("carriers") if isinstance(flight_card.get("carriers"), list) else []
+                    carrier = str(carriers[0]) if carriers else str(flight_card.get("validating_airline") or "")
+                    itins = flight_card.get("itineraries") if isinstance(flight_card.get("itineraries"), list) else []
+                    segs = itins[0].get("segments") if itins and isinstance(itins[0].get("segments"), list) else []
+                    if segs:
+                        dep = (segs[0].get("departure") or {}).get("iata", "")
+                        arr = (segs[-1].get("arrival") or {}).get("iata", "")
+                        if dep or arr:
+                            route = f"{dep}→{arr}"
+                label = (f"Flight {carrier} {route}").strip() or "Flight"
+                detail = f"PNR {ref}" if ref else ("booked" if order else "selected")
+                comps.append({"kind": "flight", "label": label[:80], "amount": amount, "currency": currency, "detail": detail})
+            booking = _as_dict(slot_state.get("last_hotel_booking"))
+            hotel_card = _picked_hotel_card()
+            if booking or hotel_card:
+                amount = _money_num(booking.get("total_amount"))
+                currency = str(booking.get("total_currency") or (hotel_card or {}).get("currency") or "EUR")
+                ref = str(booking.get("booking_reference") or slot_state.get("hotel_booking_ref") or "")
+                name = str(booking.get("hotel_name") or (hotel_card or {}).get("name") or "Hotel")
+                nights = slot_state.get("nights") if isinstance(slot_state.get("nights"), int) else None
+                nightly = _money_num((hotel_card or {}).get("price_per_night"))
+                if amount is None and nightly is not None and nights and nights > 0:
+                    amount = round(nightly * nights, 2)
+                detail_bits = []
+                if nightly is not None and nights and nights > 0:
+                    detail_bits.append(f"{nightly:.2f} {currency} x {nights} nights")
+                if ref:
+                    detail_bits.append(f"ref {ref}")
+                elif not booking:
+                    detail_bits.append("selected")
+                hotel_label = name if name.lower().startswith("hotel") else f"Hotel {name}"
+                comps.append({"kind": "hotel", "label": hotel_label[:80], "amount": amount, "currency": currency, "detail": ", ".join(detail_bits)})
+            return comps
+
+        def _summary_financials(comps):
+            # Per-currency real subtotals. The single total_cost slot reports the
+            # flight's currency subtotal (else the first priced currency); mixed
+            # currencies (USD flight + EUR hotel is the common Muno case) are
+            # never summed into one misleading figure — the full per-currency
+            # breakdown rides the notes string instead.
+            subtotals = {}
+            for comp in comps:
+                if comp.get("amount") is not None:
+                    cur = comp["currency"]
+                    subtotals[cur] = round(subtotals.get(cur, 0.0) + comp["amount"], 2)
+            primary = None
+            for comp in comps:
+                if comp.get("kind") == "flight" and comp.get("amount") is not None:
+                    primary = comp["currency"]
+                    break
+            if primary is None:
+                for comp in comps:
+                    if comp.get("amount") is not None:
+                        primary = comp["currency"]
+                        break
+            if primary is None:
+                total_cost = {"amount": 0, "currency": "USD"}
+            else:
+                total_cost = {"amount": subtotals.get(primary, 0.0), "currency": primary}
+            return total_cost, subtotals
+
+        def _summary_notes(comps, subtotals):
+            lines = []
+            for comp in comps:
+                amount = comp.get("amount")
+                money_str = f"{amount:.2f} {comp['currency']}" if amount is not None else "price pending"
+                extra = f" ({comp['detail']})" if comp.get("detail") else ""
+                lines.append(f"{comp['label']} - {money_str}{extra}")
+            if not lines:
+                return "No bookings yet. Add a flight or hotel to build the itinerary."
+            if len(subtotals) > 1:
+                lines.append("Subtotals: " + " + ".join(f"{v:.2f} {k}" for k, v in subtotals.items()))
+            lines.append("Test-mode itinerary — bookings use sandbox/test wallet balance only.")
+            return "; ".join(lines)
+
+        def _summary_dates():
+            booking = _as_dict(slot_state.get("last_hotel_booking"))
+            start = booking.get("check_in") or slot_state.get("check_in_date") or default_from
+            end = booking.get("check_out") or slot_state.get("check_out_date") or default_to
+            return {"from": str(start), "to": str(end)}
+
+        def _itinerary_summary_payload():
+            comps = _summary_components()
+            total_cost, subtotals = _summary_financials(comps)
+            region = slot_state.get("region", {}) if isinstance(slot_state.get("region"), dict) else {}
+            payload = {
+                "destination": region.get("label", "Destination"),
+                "dates": _summary_dates(),
+                "traveller_party": slot_state.get("party", {"rooms": 1, "adults": 1, "children": []}),
+                "total_cost": total_cost,
+                "notes": _summary_notes(comps, subtotals),
+                "ctas": ["confirm", "edit"],
+            }
+            flight_card = _picked_flight_card()
+            if flight_card:
+                payload["picked_flight"] = flight_card
+            hotel_card = _picked_hotel_card()
+            if hotel_card:
+                payload["picked_hotel"] = hotel_card
+            return payload
+
         def _calendar_events():
             region = slot_state.get("region", {}) if isinstance(slot_state.get("region"), dict) else {}
             destination = region.get("label", "Destination")
-            city_code = region.get("city_code", "MIA")
-            start = slot_state.get("check_in_date") or default_from
-            end = slot_state.get("check_out_date") or default_to
+            booking = _as_dict(slot_state.get("last_hotel_booking"))
+            start = booking.get("check_in") or slot_state.get("check_in_date") or default_from
+            end = booking.get("check_out") or slot_state.get("check_out_date") or default_to
             order_id = slot_state.get("order_id")
             hotel_id = slot_state.get("picked_hotel_id")
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             events = []
-            if order_id or slot_state.get("picked_flight_offer_id"):
+            flight_card = _picked_flight_card()
+            itineraries = flight_card.get("itineraries") if flight_card and isinstance(flight_card.get("itineraries"), list) else []
+            real_legs = [it for it in itineraries if isinstance(it, dict) and it.get("segments")]
+            if real_legs:
+                # Real flight legs from the booked/picked offer: one depart event
+                # off the first segment and one arrive event off the last segment
+                # of each slice, using the offer's actual IATA codes + times.
+                for itinerary in real_legs:
+                    segs = [s for s in itinerary.get("segments", []) if isinstance(s, dict)]
+                    if not segs:
+                        continue
+                    dep = segs[0].get("departure") if isinstance(segs[0].get("departure"), dict) else {}
+                    arr = segs[-1].get("arrival") if isinstance(segs[-1].get("arrival"), dict) else {}
+                    dep_iata = str(dep.get("iata") or "?")
+                    arr_iata = str(arr.get("iata") or "?")
+                    events.extend([
+                        {
+                            "event_id": f"flight_depart_{uuid.uuid4().hex[:8]}",
+                            "type": "flight_depart",
+                            "start_at": _norm_dt(dep.get("at"), f"{start}T08:00:00Z"),
+                            "end_at": None,
+                            "timezone": "UTC",
+                            "title": f"Depart {dep_iata}"[:120],
+                            "location": dep_iata[:180],
+                            "notes": "Duffel test-mode flight segment",
+                            "source_order_id": order_id,
+                            "source_hotel_id": None,
+                            "created_at": now,
+                            "updated_at": now,
+                            "google_calendar_event_id": None,
+                        },
+                        {
+                            "event_id": f"flight_arrive_{uuid.uuid4().hex[:8]}",
+                            "type": "flight_arrive",
+                            "start_at": _norm_dt(arr.get("at"), f"{start}T16:00:00Z"),
+                            "end_at": None,
+                            "timezone": "UTC",
+                            "title": f"Arrive {arr_iata}"[:120],
+                            "location": arr_iata[:180],
+                            "notes": "Duffel test-mode flight segment",
+                            "source_order_id": order_id,
+                            "source_hotel_id": None,
+                            "created_at": now,
+                            "updated_at": now,
+                            "google_calendar_event_id": None,
+                        },
+                    ])
+            elif order_id or slot_state.get("picked_flight_offer_id"):
+                # Fallback: a flight is booked/picked but the offer card is no
+                # longer in slot_state — keep a minimal placeholder leg so the
+                # schedule isn't empty (times default to the trip start date).
                 events.extend([
                     {
                         "event_id": f"flight_depart_{uuid.uuid4().hex[:8]}",
                         "type": "flight_depart",
-                        "start_at": f"{start}T08:00:00-07:00",
+                        "start_at": f"{start}T08:00:00Z",
                         "end_at": None,
-                        "timezone": "America/Los_Angeles",
-                        "title": "Depart SFO",
-                        "location": "SFO",
+                        "timezone": "UTC",
+                        "title": "Flight departs",
+                        "location": "",
                         "notes": "Duffel test-mode flight segment",
                         "source_order_id": order_id,
                         "source_hotel_id": None,
@@ -3524,11 +3753,11 @@ workflow:
                     {
                         "event_id": f"flight_arrive_{uuid.uuid4().hex[:8]}",
                         "type": "flight_arrive",
-                        "start_at": f"{start}T16:00:00-04:00",
+                        "start_at": f"{start}T16:00:00Z",
                         "end_at": None,
-                        "timezone": "America/New_York",
-                        "title": f"Arrive {city_code}",
-                        "location": city_code,
+                        "timezone": "UTC",
+                        "title": "Flight arrives",
+                        "location": "",
                         "notes": "Duffel test-mode flight segment",
                         "source_order_id": order_id,
                         "source_hotel_id": None,
@@ -3542,11 +3771,11 @@ workflow:
                     {
                         "event_id": f"check_in_{uuid.uuid4().hex[:8]}",
                         "type": "check_in",
-                        "start_at": f"{start}T15:00:00-04:00",
+                        "start_at": f"{start}T15:00:00Z",
                         "end_at": None,
-                        "timezone": "America/New_York",
-                        "title": f"Check in at {destination}",
-                        "location": destination,
+                        "timezone": "UTC",
+                        "title": f"Check in at {destination}"[:120],
+                        "location": destination[:180],
                         "notes": "Default hotel check-in time",
                         "source_order_id": None,
                         "source_hotel_id": hotel_id,
@@ -3557,11 +3786,11 @@ workflow:
                     {
                         "event_id": f"check_out_{uuid.uuid4().hex[:8]}",
                         "type": "check_out",
-                        "start_at": f"{end}T11:00:00-04:00",
+                        "start_at": f"{end}T11:00:00Z",
                         "end_at": None,
-                        "timezone": "America/New_York",
-                        "title": f"Check out from {destination}",
-                        "location": destination,
+                        "timezone": "UTC",
+                        "title": f"Check out from {destination}"[:120],
+                        "location": destination[:180],
                         "notes": "Default hotel check-out time",
                         "source_order_id": None,
                         "source_hotel_id": hotel_id,
@@ -3761,14 +3990,7 @@ workflow:
             bot_message = "Here are the booking details."
         elif intent == "summary":
             calendar_events = _calendar_events()
-            widgets.append(_env("itinerary_summary", "default", {
-                "destination": slot_state.get("region", {}).get("label", "Destination"),
-                "dates": {"from": default_from, "to": default_to},
-                "traveller_party": slot_state.get("party", {"rooms": 1, "adults": 1, "children": []}),
-                "total_cost": {"amount": 960, "currency": "USD"},
-                "notes": "Test-mode itinerary. Duffel orders use wallet balance only.",
-                "ctas": ["confirm", "edit"],
-            }))
+            widgets.append(_env("itinerary_summary", "default", _itinerary_summary_payload()))
             widgets.append(_env("calendar_view", "compact", {
                 "trip_id": trip_id,
                 "display_events": calendar_events,
@@ -3790,17 +4012,10 @@ workflow:
         elif intent == "summarize":
             # User restated their intent on an already-populated thread.
             # Render the itinerary_summary so they see their current state
-            # rather than a generic bot_text fallback.
+            # (real booked flight/hotel + computed total) rather than a generic
+            # bot_text fallback.
             calendar_events = _calendar_events()
-            region = slot_state.get("region", {}) if isinstance(slot_state.get("region"), dict) else {}
-            widgets.append(_env("itinerary_summary", "default", {
-                "destination": region.get("label", "Destination"),
-                "dates": {"from": default_from, "to": default_to},
-                "traveller_party": slot_state.get("party", {"rooms": 1, "adults": 1, "children": []}),
-                "total_cost": {"amount": 0, "currency": "USD"},
-                "notes": "Current itinerary state. Add more details to refine.",
-                "ctas": ["confirm", "edit"],
-            }))
+            widgets.append(_env("itinerary_summary", "default", _itinerary_summary_payload()))
             bot_message = "Here is the current itinerary state."
         else:
             missing = _as_dict(render_intent).get("missing") or []
@@ -3814,15 +4029,7 @@ workflow:
                 and slot_state.get("party")
             )
             if not missing and core_slots_present:
-                region = slot_state.get("region", {}) if isinstance(slot_state.get("region"), dict) else {}
-                widgets.append(_env("itinerary_summary", "default", {
-                    "destination": region.get("label", "Destination"),
-                    "dates": {"from": default_from, "to": default_to},
-                    "traveller_party": slot_state.get("party", {"rooms": 1, "adults": 1, "children": []}),
-                    "total_cost": {"amount": 0, "currency": "USD"},
-                    "notes": "Current itinerary state.",
-                    "ctas": ["confirm", "edit"],
-                }))
+                widgets.append(_env("itinerary_summary", "default", _itinerary_summary_payload()))
                 bot_message = "Here is the current itinerary state."
             elif "region" in missing:
                 widgets.append(_env("place_autocomplete_input", "default", {
