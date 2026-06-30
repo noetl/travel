@@ -512,6 +512,13 @@ workflow:
                     book_hotel_now = True
                 if submitted.get("rate_key"):
                     updates["picked_hotel_rate_key"] = str(submitted.get("rate_key"))
+            # noetl/ai-meta#165 — the itinerary_summary "Confirm" CTA finalizes
+            # the trip (renders the trip map) instead of dead-ending on a
+            # re-rendered summary; "Edit" drops back to the editable summary.
+            if action_id == "confirm":
+                updates["trip_confirmed"] = True
+            elif action_id == "edit":
+                updates["trip_confirmed"] = False
 
         wants_calendar = "show" in lowered_text and ("schedule" in lowered_text or "calendar" in lowered_text)
         wants_order = book_flight_now or book_hotel_now or any(word in lowered_text for word in ("order", "book", "booking", "confirm", "purchase"))
@@ -581,6 +588,7 @@ workflow:
         party_ready = isinstance(next_state.get("party"), dict)
         picked_flight = bool(next_state.get("picked_flight_offer_id"))
         picked_hotel = bool(next_state.get("picked_hotel_id"))
+        trip_confirmed = bool(next_state.get("trip_confirmed"))
 
         # noetl/ai-meta#162 — resolve the bookable rate_key for the picked
         # hotel. Prefer an explicit one carried on the submit; otherwise look it
@@ -640,7 +648,13 @@ workflow:
         if not party_ready:
             render_intent["missing"].append("party")
 
-        if wants_hotel and region_ready:
+        if trip_confirmed:
+            # noetl/ai-meta#165 — the user tapped Confirm on the summary: the
+            # trip is finalized. Render the trip on a map (the terminal view)
+            # instead of dead-ending on a re-rendered summary. "Edit" clears
+            # trip_confirmed and drops back to the editable summary.
+            render_intent = {"kind": "trip_map"}
+        elif wants_hotel and region_ready:
             # HotelBeds availability search (the slot Amadeus hotels vacated).
             # Geolocation is resolved provider-side from the city/coords; stay
             # dates default forward when the user hasn't pinned them yet.
@@ -796,9 +810,79 @@ workflow:
                 },
             })
             render_intent = {"kind": "order_confirmation"}
+        elif picked_flight and next_state.get("order_id") and not next_state.get("hotel_search_results"):
+            # noetl/ai-meta#165 — guided booking sequence. Once the flight is
+            # booked, walk the user through the remaining stages (hotels →
+            # activities → transfers → summary) instead of dead-ending on the
+            # summary after flights. Each stage fires its search once (guarded
+            # by the stage's *_search_results marker), so the next tap advances
+            # to the following stage; the summary is reached only after
+            # transfers. Explicit asks ("hotels", "activities", …) are handled
+            # by the wants_* branches above and still work at any point.
+            hp = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+            g_check_in = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
+            try:
+                g_check_out = next_state.get("check_out_date") or (date.fromisoformat(g_check_in) + timedelta(days=4)).isoformat()
+            except Exception:
+                g_check_out = (date.today() + timedelta(days=34)).isoformat()
+            g_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
+            tool_requests.append({
+                "tool": "mcp/hotelbeds.search_hotels",
+                "arguments": {
+                    "city": g_region.get("label", ""),
+                    "city_code": g_region.get("city_code", ""),
+                    "check_in": g_check_in,
+                    "check_out": g_check_out,
+                    "adults": int(hp.get("adults") or 1),
+                    "rooms": int(hp.get("rooms") or 1),
+                    "children": len(hp.get("children") or []),
+                    "radius": 20,
+                },
+            })
+            render_intent = {"kind": "show_hotels"}
+        elif picked_flight and next_state.get("hotel_search_results") and not next_state.get("activity_search_results"):
+            ap = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+            a_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
+            a_from = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
+            try:
+                a_to = next_state.get("check_out_date") or (date.fromisoformat(a_from) + timedelta(days=4)).isoformat()
+            except Exception:
+                a_to = (date.today() + timedelta(days=34)).isoformat()
+            tool_requests.append({
+                "tool": "mcp/hotelbeds-activities.search_activities",
+                "arguments": {
+                    "destination": (a_region.get("city_code") or "").upper(),
+                    "from": a_from,
+                    "to": a_to,
+                    "adults": int(ap.get("adults") or 1),
+                    "language": "en",
+                },
+            })
+            render_intent = {"kind": "show_activities"}
+        elif picked_flight and next_state.get("activity_search_results") and not next_state.get("transfer_search_results"):
+            xp = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+            x_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
+            x_geo = _city_geo(x_region)
+            x_out_date = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
+            x_to_code = f"{x_geo.get('lat')},{x_geo.get('lng')}" if x_geo.get("lat") is not None else ""
+            tool_requests.append({
+                "tool": "mcp/hotelbeds-transfers.search_transfers",
+                "arguments": {
+                    "from_type": "IATA",
+                    "from_code": x_geo.get("airport") or (x_region.get("city_code") or "").upper(),
+                    "to_type": "GPS",
+                    "to_code": x_to_code,
+                    "outbound": f"{x_out_date}T10:00:00",
+                    "adults": int(xp.get("adults") or 1),
+                    "children": len(xp.get("children") or []),
+                    "language": "en",
+                },
+            })
+            render_intent = {"kind": "show_transfers"}
         elif picked_flight:
-            # Amadeus hotel search removed (dev API dropped). After a flight is
-            # selected the itinerary is summarised directly — no hotel hop.
+            # All guided stages have been offered (or skipped) — show the real
+            # itinerary summary. The summary's Confirm CTA finalizes the trip
+            # (trip_confirmed → trip_map above).
             render_intent = {"kind": "summary"}
         elif next_state.get("pending_calendar_events"):
             render_intent = {"kind": "calendar_live"}
@@ -3995,6 +4079,56 @@ workflow:
                 "ctas": ["new_search"],
             }))
             bot_message = "Here are the booking details."
+        elif intent == "trip_map":
+            # noetl/ai-meta#165 — the user tapped Confirm: finalize the trip and
+            # render it on a real map (map_view is a primary widget the live
+            # bundle already renders via VITE_GOOGLE_MAPS_KEY). Center on the
+            # destination; mark the destination and the booked/selected hotel
+            # (real coords from the hotel card). map_view carries no CTA, so it
+            # is a terminal view — the composer stays open for the next message.
+            _geo = {
+                "PAR": (48.8566, 2.3522), "MIA": (25.7617, -80.1918),
+                "NYC": (40.7128, -74.0060), "LON": (51.5074, -0.1278),
+                "BOS": (42.3601, -71.0589),
+            }
+            _region = slot_state.get("region", {}) if isinstance(slot_state.get("region"), dict) else {}
+            _code = str(_region.get("city_code") or "").upper()
+            _label_l = str(_region.get("label") or "").lower()
+            _center = _geo.get(_code)
+            if _center is None:
+                for _kl, _kc in (("paris", "PAR"), ("miami", "MIA"), ("new york", "NYC"), ("london", "LON"), ("boston", "BOS")):
+                    if _kl in _label_l:
+                        _center = _geo[_kc]
+                        break
+            _center = _center or (48.8566, 2.3522)
+            _clat, _clng = float(_center[0]), float(_center[1])
+            markers = [{
+                "lat": _clat, "lng": _clng,
+                "label": str(_region.get("label") or "Destination"),
+                "state": "normal",
+            }]
+            _hc = _picked_hotel_card()
+            _loc = (_hc or {}).get("location") if isinstance((_hc or {}).get("location"), dict) else {}
+            try:
+                if _loc.get("lat") is not None and _loc.get("lng") is not None:
+                    _hlat, _hlng = float(_loc.get("lat")), float(_loc.get("lng"))
+                    markers.append({
+                        "lat": _hlat, "lng": _hlng,
+                        "label": str((_hc or {}).get("name") or "Hotel"),
+                        "hotel_id": str((_hc or {}).get("hotel_id") or ""),
+                        "state": "selected",
+                    })
+                    _clat, _clng = _hlat, _hlng
+            except (TypeError, ValueError):
+                pass
+            widgets.append(_env("map_view", "default", {
+                "center": {"lat": _clat, "lng": _clng},
+                "zoom": 12,
+                "markers": markers,
+            }))
+            _comps = _summary_components()
+            _booked = "; ".join(c["label"] for c in _comps) or "your itinerary"
+            bot_message = f"Your trip to {_region.get('label', 'your destination')} is confirmed — {_booked}. Here it is on the map."
         elif intent == "summary":
             calendar_events = _calendar_events()
             widgets.append(_env("itinerary_summary", "default", _itinerary_summary_payload()))
