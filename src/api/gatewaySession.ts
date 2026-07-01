@@ -21,7 +21,19 @@ export interface GatewayLoginResult {
 
 export const SESSION_TOKEN_KEY = 'session_token';
 export const USER_INFO_KEY = 'user_info';
-const GATEWAY_AUTH_TIMEOUT_MS = 15_000;
+
+// The gateway runs auth (login / validate) as a multi-hop off-server drive on
+// the system worker pool. A single hop can fall to the server's ~8s reconcile
+// tick, so a slow-but-successful auth drive completes server-side around
+// 24-38s. The gateway itself waits up to AUTH_PLAYBOOK_TIMEOUT_SECS (40s in
+// prod). The client abort must safely exceed that worst case, otherwise the
+// user is locked out with "Gateway auth request timed out" while the drive is
+// still succeeding. See noetl/ai-meta#163 / #156 / #155.
+const GATEWAY_AUTH_TIMEOUT_MS = 40_000;
+// One silent retry: a transient slow drive (a hop that hit the reconcile tick
+// once) should retry rather than lock the user out. A drive that consistently
+// exceeds the timeout still surfaces the error after the second attempt.
+const GATEWAY_AUTH_MAX_ATTEMPTS = 2;
 
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '');
@@ -116,19 +128,30 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
-async function fetchGatewayAuth(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+async function fetchGatewayAuthOnce(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timeout = globalThis.setTimeout(() => controller.abort(), GATEWAY_AUTH_TIMEOUT_MS);
   try {
     return await fetch(input, { ...init, signal: controller.signal });
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw new Error(`Gateway auth request timed out after ${GATEWAY_AUTH_TIMEOUT_MS / 1000}s`);
-    }
-    throw error;
   } finally {
     globalThis.clearTimeout(timeout);
   }
+}
+
+async function fetchGatewayAuth(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  for (let attempt = 1; attempt <= GATEWAY_AUTH_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await fetchGatewayAuthOnce(input, init);
+    } catch (error) {
+      if (!isAbortError(error)) throw error;
+      // Timed out. Retry once for a transient slow drive; give up after the last attempt.
+      if (attempt === GATEWAY_AUTH_MAX_ATTEMPTS) {
+        throw new Error(`Gateway auth request timed out after ${GATEWAY_AUTH_TIMEOUT_MS / 1000}s`);
+      }
+    }
+  }
+  // Unreachable: the loop always returns a response or throws above.
+  throw new Error('Gateway auth request failed');
 }
 
 export async function loginToGateway(auth0Token: string, auth0Domain: string): Promise<GatewayLoginResult> {
