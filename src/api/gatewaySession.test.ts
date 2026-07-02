@@ -19,22 +19,48 @@ describe('gatewaySession', () => {
     vi.unstubAllGlobals();
   });
 
-  it('times out a stalled gateway login request', async () => {
+  it('retries once then times out a persistently stalled gateway login request', async () => {
     vi.useFakeTimers();
-    vi.stubGlobal(
-      'fetch',
-      vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const request = expect(loginToGateway('test-id-token', 'mestumre-development.us.auth0.com')).rejects.toThrow(
+      'Gateway auth request timed out after 40s'
+    );
+    // First 40s attempt aborts, the client retries, the second 40s attempt aborts.
+    await vi.advanceTimersByTimeAsync(80_000);
+
+    await request;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('silently retries a timed-out login and succeeds on the second attempt', async () => {
+    vi.useFakeTimers();
+    let call = 0;
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      call += 1;
+      if (call === 1) {
         return new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
         });
-      })
-    );
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ session_token: 'tok', user: { email: 'a@b.c' } })
+      } as unknown as Response);
+    });
+    vi.stubGlobal('fetch', fetchMock);
 
-    const request = expect(loginToGateway('test-id-token', 'mestumre-development.us.auth0.com')).rejects.toThrow(
-      'Gateway auth request timed out after 15s'
-    );
-    await vi.advanceTimersByTimeAsync(15_000);
+    const request = loginToGateway('test-id-token', 'mestumre-development.us.auth0.com');
+    // First attempt aborts at 40s; the retry resolves immediately.
+    await vi.advanceTimersByTimeAsync(40_000);
 
-    await request;
+    const result = await request;
+    expect(result.sessionToken).toBe('tok');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
