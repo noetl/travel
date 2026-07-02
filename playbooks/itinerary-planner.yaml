@@ -3660,9 +3660,18 @@ workflow:
             order = _as_dict(slot_state.get("last_order"))
             flight_card = _picked_flight_card()
             if order or flight_card:
-                amount = _money_num(order.get("total_amount"))
-                currency = str(order.get("total_currency") or "USD")
-                ref = str(order.get("booking_reference") or slot_state.get("booking_reference") or "")
+                # A create_order only counts as "booked" when Duffel returned a
+                # real order id / booking_reference. A FAILED create_order (e.g.
+                # a Duffel 5xx) can leave a last_order stub with total_amount 0
+                # and no reference — that is NOT a booking. Guard on a confirmed
+                # order so we (a) never price the flight from a $0 stub and
+                # (b) never label an un-booked flight "(booked)"; instead price
+                # from the picked offer and label it "selected".
+                booking_ref = str(order.get("booking_reference") or slot_state.get("booking_reference") or "")
+                confirmed_order = bool(order.get("id") or booking_ref or slot_state.get("order_id"))
+                amount = _money_num(order.get("total_amount")) if confirmed_order else None
+                currency = str(order.get("total_currency") or "USD") if confirmed_order else "USD"
+                ref = booking_ref if confirmed_order else ""
                 carrier = ""
                 route = ""
                 if flight_card:
@@ -3680,14 +3689,19 @@ workflow:
                         if dep or arr:
                             route = f"{dep}→{arr}"
                 label = (f"Flight {carrier} {route}").strip() or "Flight"
-                detail = f"PNR {ref}" if ref else ("booked" if order else "selected")
+                detail = f"PNR {ref}" if ref else ("booked" if confirmed_order else "selected")
                 comps.append({"kind": "flight", "label": label[:80], "amount": amount, "currency": currency, "detail": detail})
             booking = _as_dict(slot_state.get("last_hotel_booking"))
             hotel_card = _picked_hotel_card()
             if booking or hotel_card:
-                amount = _money_num(booking.get("total_amount"))
-                currency = str(booking.get("total_currency") or (hotel_card or {}).get("currency") or "EUR")
+                # Same guard as the flight: a hotel counts as booked only when a
+                # real booking_reference came back. A failed book_hotel leaving a
+                # stub must not price from a $0 total or claim "ref"; fall back to
+                # the picked card's nightly estimate and label it "selected".
                 ref = str(booking.get("booking_reference") or slot_state.get("hotel_booking_ref") or "")
+                confirmed_booking = bool(ref)
+                amount = _money_num(booking.get("total_amount")) if confirmed_booking else None
+                currency = str(booking.get("total_currency") or (hotel_card or {}).get("currency") or "EUR")
                 name = str(booking.get("hotel_name") or (hotel_card or {}).get("name") or "Hotel")
                 nights = slot_state.get("nights") if isinstance(slot_state.get("nights"), int) else None
                 nightly = _money_num((hotel_card or {}).get("price_per_night"))
@@ -3705,7 +3719,7 @@ workflow:
                     detail_bits.append(f"est. {nightly:.2f} {currency} x {nights} nights")
                 if ref:
                     detail_bits.append(f"ref {ref}")
-                elif not booking:
+                elif not confirmed_booking:
                     detail_bits.append("selected")
                 hotel_label = name if name.lower().startswith("hotel") else f"Hotel {name}"
                 comps.append({"kind": "hotel", "label": hotel_label[:80], "amount": amount, "currency": currency, "detail": ", ".join(detail_bits)})
