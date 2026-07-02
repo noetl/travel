@@ -207,6 +207,22 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
+// A raw browser fetch rejection ("Load failed" on Safari, "Failed to fetch" /
+// "NetworkError" elsewhere) or a bare timeout must never reach the user as its
+// cryptic native string — that reads as a silent drop. Map any transport-level
+// failure to one actionable, retryable message; pass through the specific,
+// meaningful errors (permission denied, a real playbook failure) unchanged.
+export function friendlyTurnError(caught: unknown): string {
+  const raw = caught instanceof Error ? caught.message : typeof caught === 'string' ? caught : '';
+  const transportFailure =
+    caught instanceof TypeError ||
+    /load failed|failed to fetch|networkerror|network error|timed out|timeout|temporarily unavailable/i.test(raw);
+  if (transportFailure) {
+    return 'Muno is taking longer than usual and your request did not go through. Tap Retry to try again.';
+  }
+  return raw || 'Could not submit message';
+}
+
 function firstString(...values: unknown[]): string | undefined {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) return value.trim();
@@ -322,6 +338,9 @@ export function ChatThread({
   const threadId = useRef(loadStoredThreadId());
   const activeRequest = useRef<AbortController | null>(null);
   const activeExecutionId = useRef<string | undefined>();
+  // The most recent turn's arguments, kept so an actionable error can offer a
+  // Retry that re-runs the exact same tap/message instead of losing it.
+  const lastTurn = useRef<{ eventType: string; eventPayload: Record<string, unknown>; userText?: string } | undefined>();
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
   const [highlightedId, setHighlightedId] = useState<string | undefined>();
 
@@ -420,6 +439,7 @@ export function ChatThread({
   };
 
   const runTurn = async (eventType: string, eventPayload: Record<string, unknown>, userText?: string) => {
+    lastTurn.current = { eventType, eventPayload, userText };
     const controller = new AbortController();
     activeRequest.current?.abort();
     activeRequest.current = controller;
@@ -457,11 +477,16 @@ export function ChatThread({
           view: envelope?.widget_type === 'order_confirmation' || envelope?.widget_type === 'hotel_confirmation' ? 'orders' : 'searches'
         }
       ]);
+      // Turn landed — nothing to retry.
+      lastTurn.current = undefined;
     } catch (caught) {
       if (isAbortError(caught)) {
+        // Caller-initiated cancel/new-turn — not a failure, and not retryable.
+        lastTurn.current = undefined;
         setError('Request cancelled. You can send another message.');
       } else {
-        setError(caught instanceof Error ? caught.message : 'Could not submit message');
+        // Any other failure keeps lastTurn set so the Retry button can re-run it.
+        setError(friendlyTurnError(caught));
       }
     } finally {
       if (activeRequest.current === controller) {
@@ -490,6 +515,13 @@ export function ChatThread({
       value: event.value,
       submitted_value: event.value
     });
+  };
+
+  const retryLastTurn = () => {
+    const previous = lastTurn.current;
+    if (!previous || submitting) return;
+    setError(undefined);
+    void runTurn(previous.eventType, previous.eventPayload, previous.userText);
   };
 
   const cancelRequest = () => {
@@ -590,7 +622,20 @@ export function ChatThread({
             </Button>
           </Stack>
         ) : null}
-        {error ? <Alert severity="error">{error}</Alert> : null}
+        {error ? (
+          <Alert
+            severity="error"
+            action={
+              lastTurn.current && !submitting ? (
+                <Button color="inherit" size="small" onClick={retryLastTurn}>
+                  Retry
+                </Button>
+              ) : undefined
+            }
+          >
+            {error}
+          </Alert>
+        ) : null}
       </Box>
       <Paper
         component="form"
