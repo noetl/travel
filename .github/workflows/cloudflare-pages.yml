@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
   deployments: write
+  # Required so the build job can mint a GitHub OIDC token for
+  # Workload Identity Federation (keyless GCP auth). No effect on the
+  # deploy job, which does not touch GCP.
+  id-token: write
 
 concurrency:
   group: cloudflare-pages-${{ github.ref }}
@@ -41,13 +45,63 @@ jobs:
       - name: Widget smoke
         run: npm run smoke:widgets
 
+      # ---------------------------------------------------------------
+      # Google Maps key sourcing.
+      #
+      # When Workload Identity Federation is configured (the repo var
+      # GCP_WIF_PROVIDER is set), fetch the Maps JS key from Google
+      # Secret Manager over a keyless OIDC exchange — no service-account
+      # JSON key ever touches the runner. The fetched value is masked and
+      # exported to $GITHUB_ENV as VITE_GOOGLE_MAPS_KEY so the Build step
+      # below picks it up.
+      #
+      # When GCP_WIF_PROVIDER is empty (WIF not yet set up), all three
+      # GCP steps are skipped and the Build step falls back to the
+      # existing ${{ secrets.VITE_GOOGLE_MAPS_KEY }} repo secret, so the
+      # build keeps working until the WIF setup checklist is completed.
+      # ---------------------------------------------------------------
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - name: Set up Cloud SDK
+        if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Fetch Google Maps key from Secret Manager
+        if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! MAPS_KEY="$(gcloud secrets versions access latest \
+              --secret=maps-java-script-api \
+              --project=noetl-demo-19700101)"; then
+            echo "::error::Failed to fetch secret 'maps-java-script-api' from project noetl-demo-19700101 via WIF. Verify the workloadIdentityUser binding and the roles/secretmanager.secretAccessor grant on the secret."
+            exit 1
+          fi
+          if [[ -z "${MAPS_KEY}" ]]; then
+            echo "::error::Secret 'maps-java-script-api' resolved to an empty value; refusing to build a bundle with an empty Google Maps key."
+            exit 1
+          fi
+          # Mask so the value can never surface in any subsequent log line,
+          # then hand it to the Build step via the job environment.
+          echo "::add-mask::${MAPS_KEY}"
+          echo "VITE_GOOGLE_MAPS_KEY=${MAPS_KEY}" >> "$GITHUB_ENV"
+          echo "Fetched Google Maps key from Secret Manager (value masked, length ${#MAPS_KEY})."
+
       - name: Build
         run: npm run build
         env:
           VITE_NOETL_API_BASE_URL: ${{ vars.VITE_NOETL_API_BASE_URL || 'https://gateway.mestumre.dev/api' }}
           VITE_AUTH0_DOMAIN: ${{ secrets.VITE_AUTH0_DOMAIN }}
           VITE_AUTH0_CLIENT_ID: ${{ secrets.VITE_AUTH0_CLIENT_ID }}
-          VITE_GOOGLE_MAPS_KEY: ${{ secrets.VITE_GOOGLE_MAPS_KEY }}
+          # Prefer the Secret Manager value exported above (WIF path); fall
+          # back to the repo secret when WIF is not configured so the build
+          # never breaks mid-migration.
+          VITE_GOOGLE_MAPS_KEY: ${{ env.VITE_GOOGLE_MAPS_KEY || secrets.VITE_GOOGLE_MAPS_KEY }}
 
       - name: Upload dist
         uses: actions/upload-artifact@v4
