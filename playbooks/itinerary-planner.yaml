@@ -3166,11 +3166,23 @@ workflow:
             ctas = ["watch_in_detail", "show_numbers"]
             if rate_key:
                 ctas.append("book")
+            # noetl/ai-meta — HotelBeds hotel photos. search_hotels now enriches
+            # each hotel with `images` (Content-API GIATA CDN URLs). Surface them
+            # as the card `photos` (schema: array of format:uri). Keep only
+            # http(s) URLs and cap the list; the SPA PhotoStrip renders photos[0]
+            # and falls back to the "No photo available" placeholder when empty.
+            photos = []
+            for _img in (hotel.get("images") if isinstance(hotel.get("images"), list) else []):
+                _u = str(_img or "").strip()
+                if _u.startswith("http") and _u not in photos:
+                    photos.append(_u)
+                if len(photos) >= 6:
+                    break
             card = {
                 "hotel_id": str(hotel.get("code") or hotel.get("hotel_id") or ""),
                 "name": str(hotel.get("name") or "Hotel"),
                 "score": score if 0 <= score <= 10 else 0.0,
-                "photos": [],
+                "photos": photos,
                 "amenities": [],
                 "currency": str(hotel.get("currency") or "EUR"),
                 "ctas": ctas,
