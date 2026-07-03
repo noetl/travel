@@ -482,7 +482,23 @@ workflow:
                     }
                 if place_id:
                     updates["picked_place_id"] = place_id
-                    updates["places_seen"] = [place_id]
+                # noetl/ai-meta — do NOT pre-seed places_seen here.  Leaving it
+                # unset lets the show_places gate fire a google-places geocode
+                # for the picked destination (same as the free-text region
+                # path), which captures region.lat/lng so the confirm-time trip
+                # map centres on the real destination instead of being skipped.
+                # Forward-compat: if the autocomplete selection already carries
+                # coordinates (e.g. a real Google Places pick), seed the centre
+                # directly so the map is correct even before any geocode runs.
+                _sub_loc = submitted.get("location") if isinstance(submitted.get("location"), dict) else submitted
+                _sub_ll = None
+                for _la, _lo in (("latitude", "longitude"), ("lat", "lng")):
+                    _a, _b = _sub_loc.get(_la), _sub_loc.get(_lo)
+                    if isinstance(_a, (int, float)) and isinstance(_b, (int, float)):
+                        _sub_ll = (float(_a), float(_b))
+                        break
+                if _sub_ll:
+                    updates["region_center"] = {"lat": _sub_ll[0], "lng": _sub_ll[1]}
             if action_id.startswith(("book_offer:", "pick_offer:")) or submitted.get("offer_id"):
                 offer_id_from_action = action_id.split(":", 1)[1] if ":" in action_id else action_id
                 updates["picked_flight_offer_id"] = submitted.get("offer_id") or offer_id_from_action
@@ -3371,6 +3387,42 @@ workflow:
         inner = _as_dict(data.get("data") if isinstance(data.get("data"), dict) else data)
         ok = bool(inner.get("ok", data.get("ok", not envelope.get("isError"))))
         next_state = _normalise_region_fields(copy.deepcopy(_as_dict(slot_state)))
+        # noetl/ai-meta — capture the resolved destination centroid from any
+        # tool result that carries real coordinates (google-places geocode,
+        # HotelBeds hotels) into region.lat/lng, persisted across turns so the
+        # confirm-time trip_map centres on the actual destination instead of a
+        # hardcoded fallback.
+        def _ll(item):
+            if not isinstance(item, dict):
+                return None
+            loc = item.get("location") if isinstance(item.get("location"), dict) else item
+            for _la, _lo in (("latitude", "longitude"), ("lat", "lng")):
+                a, b = loc.get(_la), loc.get(_lo)
+                # Google Places returns coordinates as strings; coerce.
+                try:
+                    if a is not None and b is not None:
+                        return (float(a), float(b))
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        def _centroid(items):
+            pts = [pt for pt in (_ll(it) for it in (items or [])) if pt is not None]
+            if not pts:
+                return None
+            return (sum(x for x, _ in pts) / len(pts), sum(y for _, y in pts) / len(pts))
+
+        def _set_center(state, ll, overwrite):
+            # Store the destination centre as a TOP-LEVEL slot field (not nested
+            # in region): render_widget_chat rebuilds slot_state via a shallow
+            # merge where the turn's slot_updates.region (which carries no
+            # coordinates) would otherwise clobber a nested region.lat/lng.
+            if not ll:
+                return
+            rc = state.get("region_center")
+            have = isinstance(rc, dict) and isinstance(rc.get("lat"), (int, float)) and isinstance(rc.get("lng"), (int, float))
+            if overwrite or not have:
+                state["region_center"] = {"lat": float(ll[0]), "lng": float(ll[1])}
         if first_tool == "mcp/google-places.search_text":
             places = _as_list(inner.get("places") or inner.get("items") or inner.get("results"))
             normalised_places = [_place_card(place) for place in places[:5] if isinstance(place, dict)]
@@ -3389,6 +3441,8 @@ workflow:
                     "kind": "city" if "locality" in first_place.get("types", []) else "landmark",
                 }
                 _normalise_region_fields(next_state)
+            # Real geocode of the searched destination -> region centre.
+            _set_center(next_state, _centroid(places[:5]), overwrite=True)
         elif first_tool == "mcp/duffel.search_offers":
             offers = _as_list(inner.get("offers") or inner.get("items") or inner.get("data"))
             normalised_offers = [_offer_card(offer) for offer in offers[:10] if isinstance(offer, dict)]
@@ -3414,6 +3468,9 @@ workflow:
             next_state["hotel_search_results"] = hotel_ids
             next_state["hotel_offers"] = normalised_hotels
             next_state["total_results_seen"] = len(hotels)
+            # Hotels cluster in the destination city -> centroid is a good city
+            # centre when no google-places geocode was captured.
+            _set_center(next_state, _centroid(normalised_hotels), overwrite=False)
         elif first_tool == "mcp/hotelbeds-activities.search_activities":
             activities = _as_list(inner.get("activities") or inner.get("items"))
             normalised_activities = [_activity_card(activity) for activity in activities[:10] if isinstance(activity, dict)]
@@ -4120,52 +4177,82 @@ workflow:
             }))
             bot_message = "Here are the booking details."
         elif intent == "trip_map":
-            # noetl/ai-meta#165 — the user tapped Confirm: finalize the trip and
+            # noetl/ai-meta — the user tapped Confirm: finalize the trip and
             # render it on a real map (map_view is a primary widget the live
-            # bundle already renders via VITE_GOOGLE_MAPS_KEY). Center on the
-            # destination; mark the destination and the booked/selected hotel
-            # (real coords from the hotel card). map_view carries no CTA, so it
-            # is a terminal view — the composer stays open for the next message.
-            _geo = {
-                "PAR": (48.8566, 2.3522), "MIA": (25.7617, -80.1918),
-                "NYC": (40.7128, -74.0060), "LON": (51.5074, -0.1278),
-                "BOS": (42.3601, -71.0589),
-            }
+            # bundle already renders via VITE_GOOGLE_MAPS_KEY). The centre is
+            # the RESOLVED destination: region.lat/lng captured from the
+            # place-search / hotel-search geocode (persisted across turns).
+            # There is deliberately NO hardcoded Paris fallback — an unknown
+            # destination without a geocode centres on the booked hotel, or the
+            # map is skipped entirely, so the map never lies about the location.
+            # map_view carries no CTA, so it is a terminal view — the composer
+            # stays open for the next message.
             _region = slot_state.get("region", {}) if isinstance(slot_state.get("region"), dict) else {}
-            _code = str(_region.get("city_code") or "").upper()
-            _label_l = str(_region.get("label") or "").lower()
-            _center = _geo.get(_code)
+            _center = None
+            # Primary: the resolved destination centre captured from the
+            # place-search / hotel-search geocode (top-level slot field).
+            _rc = slot_state.get("region_center") if isinstance(slot_state.get("region_center"), dict) else {}
+            _rlat, _rlng = _rc.get("lat"), _rc.get("lng")
+            if _rlat is None or _rlng is None:
+                # Forward-compat: also honour coordinates nested on region.
+                _rlat, _rlng = _region.get("lat"), _region.get("lng")
+            try:
+                if _rlat is not None and _rlng is not None:
+                    _center = (float(_rlat), float(_rlng))
+            except (TypeError, ValueError):
+                _center = None
             if _center is None:
-                for _kl, _kc in (("paris", "PAR"), ("miami", "MIA"), ("new york", "NYC"), ("london", "LON"), ("boston", "BOS")):
-                    if _kl in _label_l:
-                        _center = _geo[_kc]
-                        break
-            _center = _center or (48.8566, 2.3522)
-            _clat, _clng = float(_center[0]), float(_center[1])
-            markers = [{
-                "lat": _clat, "lng": _clng,
-                "label": str(_region.get("label") or "Destination"),
-                "state": "normal",
-            }]
+                # Secondary: known-city centres for a recognised destination
+                # that reached confirm without any geocoding tool run (e.g. a
+                # flight-only thread).  Still real coordinates, not a constant.
+                _geo = {
+                    "PAR": (48.8566, 2.3522), "MIA": (25.7617, -80.1918),
+                    "NYC": (40.7128, -74.0060), "LON": (51.5074, -0.1278),
+                    "BOS": (42.3601, -71.0589), "SFO": (37.7749, -122.4194),
+                    "LAX": (34.0522, -118.2437),
+                }
+                _code = str(_region.get("city_code") or "").upper()
+                _label_l = str(_region.get("label") or "").lower()
+                _center = _geo.get(_code)
+                if _center is None:
+                    for _kl, _kc in (("paris", "PAR"), ("miami", "MIA"), ("new york", "NYC"), ("london", "LON"), ("boston", "BOS"), ("san francisco", "SFO"), ("los angeles", "LAX")):
+                        if _kl in _label_l:
+                            _center = _geo[_kc]
+                            break
+            # Booked/selected hotel marker — real coords from the hotel card.
             _hc = _picked_hotel_card()
             _loc = (_hc or {}).get("location") if isinstance((_hc or {}).get("location"), dict) else {}
+            _hotel_ll = None
             try:
                 if _loc.get("lat") is not None and _loc.get("lng") is not None:
-                    _hlat, _hlng = float(_loc.get("lat")), float(_loc.get("lng"))
+                    _hotel_ll = (float(_loc.get("lat")), float(_loc.get("lng")))
+            except (TypeError, ValueError):
+                _hotel_ll = None
+            # Last-resort centre: the booked hotel's coords (still in the real
+            # destination area) — but NEVER a hardcoded Paris constant.
+            if _center is None and _hotel_ll is not None:
+                _center = _hotel_ll
+            if _center is not None:
+                _clat, _clng = float(_center[0]), float(_center[1])
+                markers = [{
+                    "lat": _clat, "lng": _clng,
+                    "label": str(_region.get("label") or "Destination"),
+                    "state": "normal",
+                }]
+                if _hotel_ll is not None:
                     markers.append({
-                        "lat": _hlat, "lng": _hlng,
+                        "lat": _hotel_ll[0], "lng": _hotel_ll[1],
                         "label": str((_hc or {}).get("name") or "Hotel"),
                         "hotel_id": str((_hc or {}).get("hotel_id") or ""),
                         "state": "selected",
                     })
-                    _clat, _clng = _hlat, _hlng
-            except (TypeError, ValueError):
-                pass
-            widgets.append(_env("map_view", "default", {
-                "center": {"lat": _clat, "lng": _clng},
-                "zoom": 12,
-                "markers": markers,
-            }))
+                widgets.append(_env("map_view", "default", {
+                    "center": {"lat": _clat, "lng": _clng},
+                    "zoom": 12,
+                    "markers": markers,
+                }))
+            # else: no reliable destination coordinates — skip the map rather
+            # than show a wrong location; the confirmation text still renders.
             _comps = _summary_components()
             _booked = "; ".join(c["label"] for c in _comps) or "your itinerary"
             bot_message = f"Your trip to {_region.get('label', 'your destination')} is confirmed — {_booked}. Here it is on the map."
