@@ -829,12 +829,27 @@ workflow:
                 },
             })
             render_intent = {"kind": "order_confirmation"}
-        elif picked_flight and next_state.get("order_id") and not next_state.get("hotel_search_results"):
-            # noetl/ai-meta#165 — guided booking sequence. Once the flight is
-            # booked, walk the user through the remaining stages (hotels →
-            # activities → transfers → summary) instead of dead-ending on the
-            # summary after flights. Each stage fires its search once (guarded
-            # by the stage's *_search_results marker), so the next tap advances
+        elif picked_flight and not next_state.get("hotel_search_results"):
+            # noetl/ai-meta — guided booking sequence. Once a flight is
+            # SELECTED (picked_flight) — regardless of whether the Duffel
+            # create_order actually succeeded — walk the user through the
+            # remaining stages (hotels → activities → transfers → summary)
+            # instead of dead-ending on a premature summary.
+            #
+            # This gate deliberately does NOT require order_id.  Duffel test
+            # bookings routinely fail (expired offer → empty order, order_id
+            # ""), and gating the ENTIRE itinerary on a successful booking
+            # collapsed the whole flow: every non-booking turn fell through
+            # to the `elif picked_flight: summary` catch-all below, showing a
+            # premature itinerary_summary whose Confirm CTA finalized an empty
+            # trip (trip_map) — the "doesn't show the full flow" dead-end.
+            # The order is still ATTEMPTED by the order_confirmation branch
+            # above; the itinerary_summary handles a selected-not-booked
+            # flight gracefully, so a failed booking no longer strands the user.
+            #
+            # Each stage fires its search once (guarded by the stage's
+            # *_search_results marker, which is set even on an empty provider
+            # response — see normalize_tool_response), so the next tap advances
             # to the following stage; the summary is reached only after
             # transfers. Explicit asks ("hotels", "activities", …) are handled
             # by the wants_* branches above and still work at any point.
@@ -3465,7 +3480,11 @@ workflow:
             hotels = _as_list(inner.get("hotels") or inner.get("items"))
             normalised_hotels = [_hotel_card(hotel) for hotel in hotels[:10] if isinstance(hotel, dict)]
             hotel_ids = [card.get("hotel_id") for card in normalised_hotels if card.get("hotel_id")]
-            next_state["hotel_search_results"] = hotel_ids
+            # Mark the stage as run even when the provider returned nothing, so
+            # the guided routing (which now advances on picked_flight, not a
+            # successful order) moves on to activities instead of re-searching
+            # hotels every turn. The marker is routing-only — never rendered.
+            next_state["hotel_search_results"] = hotel_ids or ["__searched__"]
             next_state["hotel_offers"] = normalised_hotels
             next_state["total_results_seen"] = len(hotels)
             # Hotels cluster in the destination city -> centroid is a good city
@@ -3475,7 +3494,9 @@ workflow:
             activities = _as_list(inner.get("activities") or inner.get("items"))
             normalised_activities = [_activity_card(activity) for activity in activities[:10] if isinstance(activity, dict)]
             activity_codes = [card.get("activity_code") for card in normalised_activities if card.get("activity_code")]
-            next_state["activity_search_results"] = activity_codes
+            # Routing-only marker; sentinel on empty so the stage advances to
+            # transfers rather than re-searching activities every turn.
+            next_state["activity_search_results"] = activity_codes or ["__searched__"]
             # noetl/ai-meta#165 (v62) — do NOT persist the full activity cards in
             # slot_state. The activity_list widget renders from this turn's
             # tool_summary["activities"]; nothing downstream (summary, rate_key,
@@ -3490,7 +3511,9 @@ workflow:
             transfers = _as_list(inner.get("transfers") or inner.get("items"))
             normalised_transfers = [_transfer_card(service) for service in transfers[:10] if isinstance(service, dict)]
             transfer_ids = [card.get("transfer_id") for card in normalised_transfers if card.get("transfer_id")]
-            next_state["transfer_search_results"] = transfer_ids
+            # Routing-only marker; sentinel on empty so the stage advances to
+            # the itinerary summary rather than re-searching transfers.
+            next_state["transfer_search_results"] = transfer_ids or ["__searched__"]
             # noetl/ai-meta#165 (v62) — same slot-trim as activity_offers above:
             # the transfer_list renders from this turn's tool_summary["transfers"]
             # and nothing reads slot_state["transfer_offers"] later, so it is not
