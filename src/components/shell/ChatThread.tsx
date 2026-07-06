@@ -387,6 +387,12 @@ export function ChatThread({
       } else if (widgetType === 'place_list' || widgetType === 'place_card') {
         const count = Array.isArray(payload.items) ? `${payload.items.length} places` : 'places';
         searches.push({ id: message.id, label: 'Places', subtitle: count, widgetType });
+      } else if (widgetType === 'activity_list') {
+        const count = Array.isArray(payload.items) ? `${payload.items.length} activities` : 'activities';
+        searches.push({ id: message.id, label: 'Activities', subtitle: count, widgetType });
+      } else if (widgetType === 'transfer_list') {
+        const count = Array.isArray(payload.items) ? `${payload.items.length} transfers` : 'transfers';
+        searches.push({ id: message.id, label: 'Transfers', subtitle: count, widgetType });
       } else if (widgetType === 'itinerary_summary') {
         searches.push({ id: message.id, label: 'Itinerary summary', subtitle: '', widgetType });
       } else if (widgetType === 'calendar_view') {

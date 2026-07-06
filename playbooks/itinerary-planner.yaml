@@ -528,6 +528,33 @@ workflow:
                     book_hotel_now = True
                 if submitted.get("rate_key"):
                     updates["picked_hotel_rate_key"] = str(submitted.get("rate_key"))
+            if action_id.startswith("pick_activity:") or submitted.get("activity_code"):
+                activity_id = submitted.get("activity_code") or (action_id.split(":", 1)[1] if ":" in action_id else action_id)
+                updates["picked_activity_id"] = str(activity_id or "")
+                # Persist only the selected, already-normalised card. The full
+                # activity result set stays out of slot_state to preserve the
+                # v62 offload budget fix.
+                updates["picked_activity"] = {
+                    "activity_code": str(activity_id or ""),
+                    "name": str(submitted.get("name") or "Activity")[:120],
+                    "currency": str(submitted.get("currency") or "EUR")[:8],
+                    "amount_from": submitted.get("amount_from"),
+                    "type": str(submitted.get("type") or "")[:40],
+                }
+            if action_id.startswith("pick_transfer:") or submitted.get("transfer_id"):
+                transfer_id = submitted.get("transfer_id") or (action_id.split(":", 1)[1] if ":" in action_id else action_id)
+                updates["picked_transfer_id"] = str(transfer_id or "")
+                # Same selected-card-only rule as activities; do not persist the
+                # full transfer list in slot_state.
+                updates["picked_transfer"] = {
+                    "transfer_id": str(transfer_id or ""),
+                    "vehicle_name": str(submitted.get("vehicle_name") or "")[:80],
+                    "category_name": str(submitted.get("category_name") or "")[:80],
+                    "transfer_type": str(submitted.get("transfer_type") or "")[:40],
+                    "currency": str(submitted.get("currency") or "EUR")[:8],
+                    "total_amount": submitted.get("total_amount"),
+                    "direction": str(submitted.get("direction") or "")[:40],
+                }
             # noetl/ai-meta#165 — the itinerary_summary "Confirm" CTA finalizes
             # the trip (renders the trip map) instead of dead-ending on a
             # re-rendered summary; "Edit" drops back to the editable summary.
@@ -829,12 +856,27 @@ workflow:
                 },
             })
             render_intent = {"kind": "order_confirmation"}
-        elif picked_flight and next_state.get("order_id") and not next_state.get("hotel_search_results"):
-            # noetl/ai-meta#165 — guided booking sequence. Once the flight is
-            # booked, walk the user through the remaining stages (hotels →
-            # activities → transfers → summary) instead of dead-ending on the
-            # summary after flights. Each stage fires its search once (guarded
-            # by the stage's *_search_results marker), so the next tap advances
+        elif picked_flight and not next_state.get("hotel_search_results"):
+            # noetl/ai-meta — guided booking sequence. Once a flight is
+            # SELECTED (picked_flight) — regardless of whether the Duffel
+            # create_order actually succeeded — walk the user through the
+            # remaining stages (hotels → activities → transfers → summary)
+            # instead of dead-ending on a premature summary.
+            #
+            # This gate deliberately does NOT require order_id.  Duffel test
+            # bookings routinely fail (expired offer → empty order, order_id
+            # ""), and gating the ENTIRE itinerary on a successful booking
+            # collapsed the whole flow: every non-booking turn fell through
+            # to the `elif picked_flight: summary` catch-all below, showing a
+            # premature itinerary_summary whose Confirm CTA finalized an empty
+            # trip (trip_map) — the "doesn't show the full flow" dead-end.
+            # The order is still ATTEMPTED by the order_confirmation branch
+            # above; the itinerary_summary handles a selected-not-booked
+            # flight gracefully, so a failed booking no longer strands the user.
+            #
+            # Each stage fires its search once (guarded by the stage's
+            # *_search_results marker, which is set even on an empty provider
+            # response — see normalize_tool_response), so the next tap advances
             # to the following stage; the summary is reached only after
             # transfers. Explicit asks ("hotels", "activities", …) are handled
             # by the wants_* branches above and still work at any point.
@@ -3465,7 +3507,11 @@ workflow:
             hotels = _as_list(inner.get("hotels") or inner.get("items"))
             normalised_hotels = [_hotel_card(hotel) for hotel in hotels[:10] if isinstance(hotel, dict)]
             hotel_ids = [card.get("hotel_id") for card in normalised_hotels if card.get("hotel_id")]
-            next_state["hotel_search_results"] = hotel_ids
+            # Mark the stage as run even when the provider returned nothing, so
+            # the guided routing (which now advances on picked_flight, not a
+            # successful order) moves on to activities instead of re-searching
+            # hotels every turn. The marker is routing-only — never rendered.
+            next_state["hotel_search_results"] = hotel_ids or ["__searched__"]
             next_state["hotel_offers"] = normalised_hotels
             next_state["total_results_seen"] = len(hotels)
             # Hotels cluster in the destination city -> centroid is a good city
@@ -3475,7 +3521,9 @@ workflow:
             activities = _as_list(inner.get("activities") or inner.get("items"))
             normalised_activities = [_activity_card(activity) for activity in activities[:10] if isinstance(activity, dict)]
             activity_codes = [card.get("activity_code") for card in normalised_activities if card.get("activity_code")]
-            next_state["activity_search_results"] = activity_codes
+            # Routing-only marker; sentinel on empty so the stage advances to
+            # transfers rather than re-searching activities every turn.
+            next_state["activity_search_results"] = activity_codes or ["__searched__"]
             # noetl/ai-meta#165 (v62) — do NOT persist the full activity cards in
             # slot_state. The activity_list widget renders from this turn's
             # tool_summary["activities"]; nothing downstream (summary, rate_key,
@@ -3490,7 +3538,9 @@ workflow:
             transfers = _as_list(inner.get("transfers") or inner.get("items"))
             normalised_transfers = [_transfer_card(service) for service in transfers[:10] if isinstance(service, dict)]
             transfer_ids = [card.get("transfer_id") for card in normalised_transfers if card.get("transfer_id")]
-            next_state["transfer_search_results"] = transfer_ids
+            # Routing-only marker; sentinel on empty so the stage advances to
+            # the itinerary summary rather than re-searching transfers.
+            next_state["transfer_search_results"] = transfer_ids or ["__searched__"]
             # noetl/ai-meta#165 (v62) — same slot-trim as activity_offers above:
             # the transfer_list renders from this turn's tool_summary["transfers"]
             # and nothing reads slot_state["transfer_offers"] later, so it is not
@@ -3709,6 +3759,9 @@ workflow:
         def _picked_hotel_card():
             # The picked HotelBeds hotel (hotel_card-shaped, built by _hotel_card
             # at search time) matched by picked_hotel_id. CTAs dropped likewise.
+            # Older/prod slot_state may carry numeric fields as strings. Since
+            # itinerary_summary embeds this as a nested hotel_card, scrub those
+            # cached cards back to the schema shape before rendering.
             cards = slot_state.get("hotel_offers") if isinstance(slot_state.get("hotel_offers"), list) else []
             hid = str(slot_state.get("picked_hotel_id") or "")
             if not hid:
@@ -3717,6 +3770,27 @@ workflow:
                 if isinstance(card, dict) and str(card.get("hotel_id")) == hid:
                     out = copy.deepcopy(card)
                     out.pop("ctas", None)
+                    for key in ("price_per_night", "star_rating", "score"):
+                        if key in out:
+                            try:
+                                out[key] = float(out[key])
+                            except (TypeError, ValueError):
+                                out.pop(key, None)
+                    loc = out.get("location") if isinstance(out.get("location"), dict) else None
+                    if loc is not None:
+                        clean_loc = {}
+                        if loc.get("city"):
+                            clean_loc["city"] = str(loc.get("city"))
+                        try:
+                            if loc.get("lat") is not None and loc.get("lng") is not None:
+                                clean_loc["lat"] = float(loc.get("lat"))
+                                clean_loc["lng"] = float(loc.get("lng"))
+                        except (TypeError, ValueError):
+                            pass
+                        if clean_loc:
+                            out["location"] = clean_loc
+                        else:
+                            out.pop("location", None)
                     return out
             return None
 
@@ -3792,6 +3866,32 @@ workflow:
                     detail_bits.append("selected")
                 hotel_label = name if name.lower().startswith("hotel") else f"Hotel {name}"
                 comps.append({"kind": "hotel", "label": hotel_label[:80], "amount": amount, "currency": currency, "detail": ", ".join(detail_bits)})
+            activity = _as_dict(slot_state.get("picked_activity"))
+            if activity:
+                name = str(activity.get("name") or "Activity")
+                amount = _money_num(activity.get("amount_from"))
+                currency = str(activity.get("currency") or "EUR")
+                detail_bits = [str(activity.get("type") or "").strip(), "selected"]
+                comps.append({
+                    "kind": "activity",
+                    "label": name[:80],
+                    "amount": amount,
+                    "currency": currency,
+                    "detail": ", ".join(bit for bit in detail_bits if bit),
+                })
+            transfer = _as_dict(slot_state.get("picked_transfer"))
+            if transfer:
+                label = str(transfer.get("vehicle_name") or transfer.get("category_name") or transfer.get("transfer_type") or "Transfer")
+                amount = _money_num(transfer.get("total_amount"))
+                currency = str(transfer.get("currency") or "EUR")
+                detail_bits = [str(transfer.get("direction") or "").strip(), "selected"]
+                comps.append({
+                    "kind": "transfer",
+                    "label": label[:80],
+                    "amount": amount,
+                    "currency": currency,
+                    "detail": ", ".join(bit for bit in detail_bits if bit),
+                })
             return comps
 
         def _summary_financials(comps):
