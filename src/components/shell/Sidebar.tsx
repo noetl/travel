@@ -3,8 +3,10 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import FlightIcon from '@mui/icons-material/Flight';
 import HotelIcon from '@mui/icons-material/Hotel';
 import PlaceIcon from '@mui/icons-material/Place';
+import AirportShuttleIcon from '@mui/icons-material/AirportShuttle';
 import ConfirmationNumberIcon from '@mui/icons-material/ConfirmationNumber';
 import EventNoteIcon from '@mui/icons-material/EventNote';
+import LocalActivityIcon from '@mui/icons-material/LocalActivity';
 import {
   Avatar,
   Box,
@@ -44,6 +46,8 @@ const WIDGET_ICONS: Record<string, ReactNode> = {
   hotel_card: <HotelIcon fontSize="small" />,
   place_list: <PlaceIcon fontSize="small" />,
   place_card: <PlaceIcon fontSize="small" />,
+  activity_list: <LocalActivityIcon fontSize="small" />,
+  transfer_list: <AirportShuttleIcon fontSize="small" />,
   order_confirmation: <ConfirmationNumberIcon fontSize="small" />,
   hotel_confirmation: <HotelIcon fontSize="small" />,
   itinerary_summary: <EventNoteIcon fontSize="small" />,

@@ -26,12 +26,11 @@ name = "travel"
 pages_build_output_dir = "dist"
 ```
 
-Manual deploy remains available:
-
-```bash
-npm run build
-npm run deploy:cf
-```
+Do not use a local/manual Wrangler deploy for production. Production deploys
+must go through the keyed GitHub Actions workflow so the build receives the
+restricted Google Maps browser key from Secret Manager through Workload
+Identity Federation. A keyless local bundle will load the shell but break map
+and photo surfaces.
 
 This is the Muno equivalent of the established NoETL GUI playbook path:
 
@@ -59,12 +58,21 @@ Required GitHub Actions secrets:
 - `CLOUDFLARE_ACCOUNT_ID`
 - `VITE_AUTH0_DOMAIN`
 - `VITE_AUTH0_CLIENT_ID`
-- `VITE_GOOGLE_MAPS_KEY`
 
-Optional GitHub Actions variable:
+Required GitHub Actions variables for the WIF key path:
+
+- `GCP_WIF_PROVIDER`
+- `GCP_DEPLOY_SA`
+
+Optional GitHub Actions variables:
 
 - `VITE_NOETL_API_BASE_URL` (defaults to `https://gateway.mestumre.dev/api`)
 - `VITE_GATEWAY_BASE_URL` (defaults to `https://gateway.mestumre.dev`)
+
+Legacy fallback secret:
+
+- `VITE_GOOGLE_MAPS_KEY` — only for temporary WIF migration fallback. The
+  production path should fetch GSM secret `maps-java-script-api` through WIF.
 
 The Cloudflare token only needs permission to deploy the Pages project. A token
 with Cloudflare Pages edit access for the account is sufficient.
@@ -106,7 +114,7 @@ npm run build
 The build receives:
 
 - Auth0 SPA fields from `auth0_client`
-- Google Maps browser key from `google-maps-widget-key`
+- Google Maps browser key from GSM secret `maps-java-script-api`
 - NoETL API base URL for the gateway surface
 
 Only browser-safe values are compiled into the Vite bundle.
