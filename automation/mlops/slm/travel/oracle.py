@@ -427,7 +427,8 @@ def extract(turn):
     wants_flight = any(
         w in low for w in
         ("flight", "flights", "fly", "flying", "airfare", "airline", "plane",
-         "air ticket", "nonstop", "non-stop", "one-way", "round-trip", "layover")
+         "air ticket", "ticket", "tickets", "nonstop", "non-stop", "one-way",
+         "round-trip", "layover", "cabin", "economy", "business class")
     )
     wants_summary = any(
         w in low for w in
@@ -435,7 +436,13 @@ def extract(turn):
          "summarize", "the plan", "itinerary", "help me decide", "which of these",
          # H4 — multi-day itinerary building is a summary turn, not a search.
          "plan 3 days", "plan a day", "combine a city", "slow travel",
-         "rough itinerary", "day by day", "vs ", " or ")
+         "rough itinerary", "day by day")
+    )
+    # A comparison is a trade-off narration, not an itinerary assembly.
+    wants_compare = any(
+        w in low for w in
+        ("vs ", " vs", "help me decide", "which of these", "better for us",
+         "which is better", "compare these", "side by side")
     )
     # I-group — an explicit correction/redo.  Without this the oracle sees a
     # populated slot_state, finds nothing left to do, and falls to `summarize`,
@@ -501,6 +508,8 @@ def extract(turn):
         render_intent = {"kind": "summarize"}
     elif merged.get("trip_confirmed"):
         render_intent = {"kind": "trip_map"}
+    elif view_order_now and merged.get("order_id"):
+        render_intent = {"kind": "order_detail"}
     elif wants_transfers and region:
         tool_requests = [
             {
@@ -615,6 +624,12 @@ def extract(turn):
         render_intent = {"kind": "calendar_live"}
     elif wants_map and merged.get("places_seen"):
         render_intent = {"kind": "trip_map"}
+    # A comparison with an active hotel list is a HOTEL comparison (E3 renders
+    # hotel_compare), not a destination trade-off — so it falls through to the
+    # hotel-refinement branch below.  Only a comparison with no result set in
+    # context is the H5 "iceland vs morocco" narration.
+    elif wants_compare and not merged.get("hotel_search_results"):
+        render_intent = {"kind": "summarize"}
     elif wants_summary and (
         region
         or merged.get("picked_flight_offer_id")
