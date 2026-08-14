@@ -44,23 +44,37 @@ slm_domain:
         fn: render
 
   # tool / output vocab the contract closes over (the enums grammar enforces)
+  # Reconciled 2026-08-14 with the live planner (catalog
+  # muno/playbooks/itinerary-planner v67) and the scenario catalog §2.  This
+  # block had drifted: it named mcp/amadeus.search_hotels (Amadeus dropped
+  # developer-API support and the planner removed that path) and omitted all
+  # three HotelBeds products plus four render intents.  Every value below is
+  # the string the planner's routing arcs match verbatim — keep in step with
+  # oracle.py TOOL_VOCAB / RENDER_INTENT_VOCAB, which the drift gate compares.
   vocab:
     tools:
       - mcp/google-places.search_text
       - mcp/duffel.search_offers
       - mcp/duffel.create_order
-      - mcp/amadeus.search_hotels
+      - mcp/hotelbeds.search_hotels
+      - mcp/hotelbeds.book_hotel
+      - mcp/hotelbeds-activities.search_activities
+      - mcp/hotelbeds-transfers.search_transfers
     render_intents:
       - collect_missing
       - show_places
       - show_flights
-      - show_hotels
       - flight_detail
       - order_confirmation
       - order_detail
+      - show_hotels
+      - hotel_confirmation
+      - show_activities
+      - show_transfers
       - summary
       - summarize
       - calendar_live
+      - trip_map
       - clarify
       - error
 

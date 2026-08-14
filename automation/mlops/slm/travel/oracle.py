@@ -47,30 +47,54 @@ CITY_MAP = {
     "tokyo": {"label": "Tokyo", "city_code": "TYO", "country_code": "JP"},
 }
 
-# the exact tool ids the extractor may emit (routing arcs match verbatim)
+# The exact tool ids the extractor may emit (routing arcs match verbatim).
+#
+# Reconciled 2026-08-14 against the live planner (catalog
+# muno/playbooks/itinerary-planner v67) and the scenario catalog §2.  Before
+# that this list still named mcp/amadeus.search_hotels and omitted all three
+# HotelBeds products, so every generated row cited a tool the planner no
+# longer has and the drift gate could not pass.  Amadeus dropped
+# developer-API support; hotels/activities/transfers are HotelBeds APITUDE,
+# each its own product with its own credential.
 TOOL_GOOGLE_PLACES = "mcp/google-places.search_text"
 TOOL_DUFFEL_OFFERS = "mcp/duffel.search_offers"
 TOOL_DUFFEL_ORDER = "mcp/duffel.create_order"
-TOOL_AMADEUS_HOTELS = "mcp/amadeus.search_hotels"
+TOOL_HOTELBEDS_HOTELS = "mcp/hotelbeds.search_hotels"
+TOOL_HOTELBEDS_BOOK = "mcp/hotelbeds.book_hotel"
+TOOL_HOTELBEDS_ACTIVITIES = "mcp/hotelbeds-activities.search_activities"
+TOOL_HOTELBEDS_TRANSFERS = "mcp/hotelbeds-transfers.search_transfers"
 TOOL_VOCAB = [
     TOOL_GOOGLE_PLACES,
     TOOL_DUFFEL_OFFERS,
     TOOL_DUFFEL_ORDER,
-    TOOL_AMADEUS_HOTELS,
+    TOOL_HOTELBEDS_HOTELS,
+    TOOL_HOTELBEDS_BOOK,
+    TOOL_HOTELBEDS_ACTIVITIES,
+    TOOL_HOTELBEDS_TRANSFERS,
 ]
 
-# render_intent.kind enum (bridge between the two passes)
+# Retired — kept as a name only so an older seed row referencing it fails the
+# vocab gate loudly instead of silently matching nothing.
+TOOL_RETIRED = ["mcp/amadeus.search_hotels"]
+
+# render_intent.kind enum (bridge between the two passes).  Reconciled with
+# the scenario catalog §2 in the same pass as TOOL_VOCAB: show_activities,
+# show_transfers, hotel_confirmation and trip_map were missing.
 RENDER_INTENT_VOCAB = [
     "collect_missing",
     "show_places",
     "show_flights",
-    "show_hotels",
     "flight_detail",
     "order_confirmation",
     "order_detail",
+    "show_hotels",
+    "hotel_confirmation",
+    "show_activities",
+    "show_transfers",
     "summary",
     "summarize",
     "calendar_live",
+    "trip_map",
     "clarify",
     "error",
 ]
@@ -274,13 +298,18 @@ def extract(turn):
     elif merged.get("picked_flight_offer_id") and not merged.get("hotel_search_results"):
         tool_requests = [
             {
-                "tool": TOOL_AMADEUS_HOTELS,
+                "tool": TOOL_HOTELBEDS_HOTELS,
+                # Argument names follow the HotelBeds provider's inputSchema
+                # (automation/agents/mcp/hotelbeds search_hotels), not the
+                # retired Amadeus shape: snake_case check_in/check_out, and a
+                # city hint rather than an IATA cityCode.
                 "arguments": {
-                    "cityCode": city_code,
-                    "checkInDate": merged.get("check_in_date"),
-                    "checkOutDate": merged.get("check_out_date"),
+                    "city_code": city_code,
+                    "check_in": merged.get("check_in_date"),
+                    "check_out": merged.get("check_out_date"),
                     "adults": (merged.get("party") or {}).get("adults", 1),
-                    "amadeus_env": turn.get("amadeus_env", "test"),
+                    "rooms": 1,
+                    "children": 0,
                 },
             }
         ]
@@ -392,7 +421,7 @@ def _tool_summary(extraction, slot_state):
             "tool": tool,
             "data": {"offers": _fixture_flights(region, slot_state.get("check_in_date", "2026-07-10"))},
         }
-    if tool == TOOL_AMADEUS_HOTELS:
+    if tool == TOOL_HOTELBEDS_HOTELS:
         return {"ok": True, "tool": tool, "data": {"hotels": _fixture_hotels(region)}}
     if tool == TOOL_DUFFEL_ORDER:
         return {
