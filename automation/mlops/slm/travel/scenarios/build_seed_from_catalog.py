@@ -41,6 +41,33 @@ OUT = os.path.join(ROOT, "datasets", "seed", "travel_catalog_turns.jsonl")
 ROADMAP_GROUPS = {"M", "N", "O"}
 ROADMAP_CELLS = {"L2", "L3", "L4", "L5", "L6"}
 
+# Widget-driven cells carry a typed action payload, not free text.  The first
+# build emitted `action_id: <scenario_id>` ("cta.flight.select"), which is not
+# an id the planner ever emits -- so those rows exercised nothing.  These are
+# the real action ids from the widget contract.
+WIDGET_ACTIONS = {
+    "K1":  {"action_id": "pick_place:paris"},
+    "K2":  {"action_id": "date:submit", "from": "2026-09-10", "to": "2026-09-14"},
+    "K3":  {"action_id": "party:submit", "adults": 2, "children": []},
+    "K4":  {"action_id": "filter:apply", "board": "BB", "amenities": ["wifi"]},
+    "K5":  {"action_id": "view_offer:off_fixture_0001"},
+    "K6":  {"action_id": "book_offer:off_fixture_0001"},
+    "K7":  {"action_id": "pick_hotel:hot_fixture_0001"},
+    "K8":  {"action_id": "book_hotel:hot_fixture_0001", "rate_key": "rk_fixture"},
+    "K9":  {"action_id": "book_activity:act_fixture_0001"},
+    "K10": {"action_id": "view_map"},
+    "D6":  {"action_id": "book_offer:off_fixture_0001"},
+    "E5":  {"action_id": "pick_hotel:hot_fixture_0001", "rate_key": "rk_fixture"},
+    "E6":  {"action_id": "book_hotel:hot_fixture_0001", "rate_key": "rk_fixture"},
+    "F4":  {"action_id": "book_activity:act_fixture_0001"},
+    "G3":  {"action_id": "book_transfer:xf_fixture_0001"},
+    "H2":  {"action_id": "view_calendar"},
+    "H3":  {"action_id": "view_map"},
+}
+
+# Cells whose precondition IS a failed/empty provider response.
+PROVIDER_ERROR_CELLS = {"J4", "G5"}
+
 SEP = "·"  # the '·' the catalog uses between inline fields
 
 FIELD_KEYS = (
@@ -184,8 +211,8 @@ SLOT_PRESETS = {
     "B1": (), "B2": (), "B3": ("region",), "B4": (), "B5": (),
     "B6": ("region", "places"),
     # C — slot collection: partial by design.
-    "C1": (), "C2": (), "C3": (), "C4": ("region",), "C5": (),
-    "C6": ("region",), "C7": (),
+    "C1": (), "C2": (), "C3": (), "C4": ("region", "places"), "C5": (),
+    "C6": ("region", "places"), "C7": (),
     # D — flights: searchable once region+dates+party are known.
     "D1": ("region", "dates", "party", "places"),
     "D2": ("region", "dates", "party", "places"),
@@ -195,9 +222,9 @@ SLOT_PRESETS = {
     "D6": ("region", "dates", "party", "places", "flights", "picked_flight"),
     # E — hotels: the catalog reaches these directly from region+dates+party.
     "E1": ("region", "dates", "party", "places"),
-    "E2": ("region", "dates", "party", "places"),
+    "E2": ("region", "dates", "party", "places", "hotels"),
     "E3": ("region", "dates", "party", "places", "hotels"),
-    "E4": ("region", "dates", "party", "places"),
+    "E4": ("region", "dates", "party", "places", "hotels"),
     "E5": ("region", "dates", "party", "places", "hotels"),
     "E6": ("region", "dates", "party", "places", "hotels", "picked_hotel"),
     "E7": ("region", "dates", "party", "places"),
@@ -324,10 +351,19 @@ def build_rows(scenarios: list[dict]) -> list[dict]:
             prompts = [None]
         for idx, prompt in enumerate(prompts, start=1):
             if prompt is None:
-                payload = {"action_id": sc["scenario_id"]}
+                payload = dict(WIDGET_ACTIONS.get(cell, {"action_id": "confirm"}))
             else:
                 payload = {"text": prompt}
+            row_extra = {}
+            # J4 / G5 declare a provider-sparse or provider-down precondition
+            # ("tool_summary with zero results / provider error").  That is a
+            # turn-level input, so it is carried explicitly rather than left to
+            # the oracle to guess -- without it those cells cannot produce the
+            # `error` intent the catalog declares.
+            if cell in PROVIDER_ERROR_CELLS:
+                row_extra["tool_error"] = True
             rows.append({
+                **row_extra,
                 # --- the 5 keys oracle.run_turn() consumes ---
                 "id": f"{sc['scenario_id']}#{idx:02d}",
                 "intent_label": sc["scenario_id"],

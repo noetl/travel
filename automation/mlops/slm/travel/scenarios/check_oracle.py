@@ -40,6 +40,7 @@ def main() -> int:
     live = [r for r in rows if r["eval_split"] != "roadmap"]
 
     agree = disagree = undeclared = errors = 0
+    unparseable = set()
     by_cell: dict[str, dict] = {}
     pairs = collections.Counter()
     tools_seen = set()
@@ -48,6 +49,13 @@ def main() -> int:
     for r in live:
         cell = r["coverage_id"]
         want = (r.get("declared_render_intent") or "").strip()
+        # The declared intent is parsed out of catalog prose, so it can pick up
+        # a stray word ("render_intent per active search" -> "per").  A value
+        # outside the vocabulary is a PARSE miss, not a disagreement; scoring it
+        # would inflate the divergence with a measurement artifact.
+        if want and want not in m.RENDER_INTENT_VOCAB:
+            unparseable.add((cell, want))
+            want = ""
         try:
             out = m.run_turn(r)
         except Exception as exc:  # noqa: BLE001
@@ -85,6 +93,9 @@ def main() -> int:
     print(f"  disagree           : {disagree}"
           f"{f'  ({100*disagree/scored:.1f}%)' if scored else ''}")
     print(f"rows with no declared intent (not scored): {undeclared}")
+    if unparseable:
+        print(f"declared values that are not in the vocabulary (parse misses, "
+              f"not scored): {sorted(unparseable)}")
     print(f"oracle errors        : {errors}")
     print()
     print(f"distinct render intents the oracle produced: "
