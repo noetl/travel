@@ -1,0 +1,336 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: hotel_cards
+  path: muno/playbooks/hotel-cards
+  description: |
+    HotelBeds hotel search returning the Muno hotel-card JSON shape.
+
+    Calls the registered HotelBeds APITUDE provider
+    (automation/agents/mcp/hotelbeds, tool `search_hotels`) and maps its
+    availability summary onto the card contract the SPA renders:
+
+      id, name, stars, bedType, price, breakfastIncluded, image,
+      __renderDetailCard, location, rating, ratingLabel, pricePerNight,
+      totalPrice, nights, amenities, description, category, rooms[]
+
+    Credentials are by reference only: the provider reads the HotelBeds
+    apikey/secret from GCP Secret Manager (`hotelbeds-hotels-test`) using the
+    worker pod's Workload Identity.  This playbook never sees or carries them,
+    and the provider is pinned to the TEST/SANDBOX host
+    (api.test.hotelbeds.com) — no live booking is reachable from here.
+
+    TWO FIELDS ARE PRODUCT PLACEHOLDERS, not derived facts.  `ratingLabel`
+    (8.7 -> "Excellent") and `category` ("Premium") are ranking/presentation
+    decisions product owns and has not yet made — see
+    PRODUCT_INPUTS_REQUIRED §1 and playbooks/travel-slm/implementation-plan.md
+    §5 items 9 and 10.  Both are computed by the single function
+    `_product_placeholder` below and by nothing else, so replacing them with
+    the real policy is a one-function change.  Every OTHER field on the card
+    is real provider data or a plain arithmetic derivation of it.
+
+    Nothing on the card is invented.  Where the provider cannot supply a
+    field, the card carries the empty value rather than a plausible-looking
+    guess: HotelBeds availability returns only the cheapest bookable rate per
+    hotel, so `rooms[]` has one real entry, and `amenities` carries only what
+    the board code actually attests.  A fuller `rooms[]` / facilities list
+    needs an additive passthrough in the shared provider (see
+    "Known limits" below) — deliberately not done here, because the live
+    itinerary planner resolves that provider at latest version.
+
+    Known limits (each is a provider gap, not a mapping bug):
+    - rooms[]    : one real bookable rate per hotel, not the full room list.
+    - amenities  : derived from boardName only; the facilities list lives in
+                   the HotelBeds Content API, which the provider does not
+                   expose today.
+    - description: composed from real fields (category, zone, board); the
+                   provider does not surface the Content API description.
+  version: "1.0"
+  agent: false
+  tags: [muno, hotels, hotelbeds, widgets, cards]
+  capabilities: [mcp:hotelbeds]
+
+workload:
+  # The provider needs coordinates OR a name in its own fallback table — and
+  # that table holds six cities (paris/miami/boston/new york/london + codes).
+  # Anything else returns `validation_error: could not resolve a geolocation`,
+  # so prefer explicit lat/lng and treat `city` as a label.  Caller-supplied
+  # coordinates take precedence over the table in the provider.
+  # Default: Monterey, California — the locale of the card contract sample.
+  city: "Monterey, California"
+  latitude: 36.6002
+  longitude: -121.8947
+  radius: 20
+  check_in: "2026-09-10"
+  check_out: "2026-09-14"
+  adults: 2
+  rooms: 1
+  children: 0
+  limit: 10
+
+workflow:
+  - step: start
+    desc: Entry point — the Rust runtime requires a step named `start`
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: search_hotels
+
+  - step: search_hotels
+    desc: HotelBeds availability through the registered MCP provider (TEST env)
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/hotelbeds
+      # noetl/ai-meta#136 — block for the child's real result so
+      # `search_hotels` carries the availability payload rather than the
+      # async-start envelope.
+      return_result: true
+      result_step: hotelbeds_dispatch
+      timeout: 120
+      payload:
+        method: tools/call
+        tool: search_hotels
+        arguments:
+          city: "{{ workload.city }}"
+          latitude: "{{ workload.latitude }}"
+          longitude: "{{ workload.longitude }}"
+          radius: "{{ workload.radius }}"
+          check_in: "{{ workload.check_in }}"
+          check_out: "{{ workload.check_out }}"
+          adults: "{{ workload.adults }}"
+          rooms: "{{ workload.rooms }}"
+          children: "{{ workload.children }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: map_cards
+
+  - step: map_cards
+    desc: Map HotelBeds availability onto the Muno hotel-card contract
+    tool:
+      kind: python
+      input:
+        search_result: "{{ search_hotels | default({}) }}"
+        check_in: "{{ workload.check_in }}"
+        check_out: "{{ workload.check_out }}"
+        adults: "{{ workload.adults }}"
+        children: "{{ workload.children }}"
+      code: |
+        import json
+        import re
+        from datetime import date
+
+        CURRENCY_SYMBOL = {"USD": "$", "EUR": "€", "GBP": "£"}
+
+        # ── THE ONE PRODUCT-BLOCKED FUNCTION ──────────────────────────────
+        # `ratingLabel` and `category` are product ranking/presentation
+        # decisions (PRODUCT_INPUTS_REQUIRED §1; plan §5 items 9 and 10).
+        # They are NOT derivable from the provider response.  The bands and
+        # buckets below are a labelled stand-in chosen only so the card
+        # shape is complete; they are not a product decision and must not be
+        # cited as one.  Replace this function body — nothing else — when
+        # product answers.
+        PLACEHOLDER = True
+
+        def _product_placeholder(rating, stars, min_rate):
+            # ratingLabel: sample contract maps 8.7 -> "Excellent".
+            label = ""
+            if isinstance(rating, (int, float)) and rating > 0:
+                if rating >= 9.0:
+                    label = "Exceptional"
+                elif rating >= 8.0:
+                    label = "Excellent"
+                elif rating >= 7.0:
+                    label = "Very good"
+                elif rating >= 6.0:
+                    label = "Good"
+                else:
+                    label = "Fair"
+            # category: sample contract shows "Premium".
+            category = ""
+            if isinstance(stars, int) and stars > 0:
+                category = {5: "Luxury", 4: "Premium", 3: "Comfort"}.get(stars, "Essential")
+            return label, category
+        # ──────────────────────────────────────────────────────────────────
+
+        def _as_dict(value):
+            return value if isinstance(value, dict) else {}
+
+        def _as_list(value):
+            return value if isinstance(value, list) else []
+
+        def _num(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _money(amount, currency):
+            if amount is None:
+                return ""
+            sym = CURRENCY_SYMBOL.get((currency or "").upper(), "")
+            whole = int(round(amount))
+            return f"{sym}{whole}" if sym else f"{whole} {currency or ''}".strip()
+
+        def _nights(check_in, check_out):
+            try:
+                return max(1, (date.fromisoformat(check_out) - date.fromisoformat(check_in)).days)
+            except (TypeError, ValueError):
+                return 1
+
+        def _stars(hotel):
+            # HotelBeds categoryCode looks like "4EST" / "5EST"; categoryName
+            # like "4 STARS".  Take the first integer found in either.
+            for field in ("categoryCode", "categoryName"):
+                m = re.search(r"(\d)", str(hotel.get(field) or ""))
+                if m:
+                    return int(m.group(1))
+            return 0
+
+        def _rating(hotel):
+            # reviews[] entries carry {rate, reviewCount, type}. Use the first
+            # with a usable rate; normalise a /5 scale to /10 so the card's
+            # `rating` is always out of 10 as the contract sample shows.
+            for review in _as_list(hotel.get("reviews")):
+                rate = _num(_as_dict(review).get("rate"))
+                if rate is None or rate <= 0:
+                    continue
+                return round(rate * 2, 1) if rate <= 5 else round(rate, 1)
+            return None
+
+        def _breakfast(board):
+            b = str(board or "").upper()
+            return "BREAKFAST" in b or b in ("BB", "DESAYUNO")
+
+        def _amenities(hotel):
+            # ONLY what the response actually attests. HotelBeds availability
+            # carries no facilities list (that is the Content API), so this is
+            # deliberately short rather than padded with plausible guesses.
+            out = []
+            if _breakfast(hotel.get("boardName")):
+                out.append("Breakfast")
+            return out
+
+        def _description(hotel, stars):
+            bits = []
+            if stars:
+                bits.append(f"{stars}-star")
+            zone = hotel.get("zoneName") or hotel.get("destinationName")
+            if zone:
+                bits.append(f"in {zone}")
+            board = hotel.get("boardName")
+            if board:
+                bits.append(f"— {str(board).title()} rate")
+            return " ".join(bits).strip()
+
+        def _rooms(hotel, currency, image, nights):
+            # HotelBeds availability surfaces ONE bookable rate per hotel
+            # through this provider (the cheapest). Emit exactly that — a
+            # padded room list would be invented inventory.
+            rate_key = hotel.get("rateKey")
+            if not rate_key:
+                return []
+            # minRate is the net for the WHOLE stay. The card contract's room
+            # prices sit alongside pricePerNight on the same scale (sample:
+            # pricePerNight 220, rooms 180/280/240), so divide — showing the
+            # stay total here reads as a nightly rate and overstates it by
+            # the night count.
+            net = _num(hotel.get("minRate"))
+            per_night = round(net / nights, 2) if net is not None else None
+            try:
+                sleeps = int(adults) + int(children)
+            except (TypeError, ValueError):
+                sleeps = 2
+            return [{
+                "id": f"h{hotel.get('code')}-r1",
+                "type": hotel.get("roomName") or "Standard Room",
+                "price": _money(per_night, currency),
+                "totalPrice": net,
+                "sleeps": sleeps,
+                # HotelBeds rateClass "NRF" == non-refundable.
+                "refundable": str(hotel.get("rateClass") or "").upper() != "NRF",
+                "image": image,
+                # carried so a downstream book step can re-price this rate
+                "rate_key": rate_key,
+            }]
+
+        envelope = _as_dict(search_result)
+        data = _as_dict(envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope)
+        inner = _as_dict(data.get("data") if isinstance(data.get("data"), dict) else data)
+        hotels = _as_list(inner.get("hotels"))
+        provider_error = envelope.get("isError") or inner.get("error")
+
+        nights = _nights(check_in, check_out)
+        cards = []
+        for hotel in hotels:
+            hotel = _as_dict(hotel)
+            currency = hotel.get("currency")
+            stars = _stars(hotel)
+            rating = _rating(hotel)
+            total = _num(hotel.get("minRate"))
+            per_night = round(total / nights, 2) if total is not None else None
+            images = _as_list(hotel.get("images"))
+            image = images[0] if images else ""
+            label, category = _product_placeholder(rating, stars, total)
+            cards.append({
+                "id": f"h{hotel.get('code')}",
+                "name": hotel.get("name") or "",
+                "stars": stars,
+                "bedType": hotel.get("roomName") or "",
+                "price": _money(per_night, currency),
+                "breakfastIncluded": _breakfast(hotel.get("boardName")),
+                "image": image,
+                "__renderDetailCard": True,
+                "location": hotel.get("destinationName") or hotel.get("zoneName") or "",
+                "rating": rating,
+                "ratingLabel": label,
+                "pricePerNight": per_night,
+                "totalPrice": total,
+                "nights": nights,
+                "amenities": _amenities(hotel),
+                "description": _description(hotel, stars),
+                "category": category,
+                "rooms": _rooms(hotel, currency, image, nights),
+            })
+
+        result = {
+            "hotels": cards,
+            "count": len(cards),
+            "nights": nights,
+            "currency": inner.get("meta", {}).get("currency") if isinstance(inner.get("meta"), dict) else None,
+            "check_in": check_in,
+            "check_out": check_out,
+            "source": "hotelbeds",
+            "hotelbeds_env": inner.get("hotelbeds_env"),
+            "provider_error": provider_error or None,
+            # Machine-readable marker so a reader (or a test) can tell which
+            # card fields are NOT product-decided yet.
+            "placeholder_fields": ["ratingLabel", "category"] if PLACEHOLDER else [],
+        }
+        globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: final_result
+
+  - step: final_result
+    desc: Return the mapped hotel cards to the caller
+    tool:
+      kind: python
+      input:
+        mapped: "{{ map_cards | default({}) }}"
+      code: |
+        result = mapped if isinstance(mapped, dict) else {}
+        globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: end
+    desc: Terminal step — matches the `start`/`end` convention the MCP provider
+      playbooks use, so the execution reaches a completed terminal node.
+    tool:
+      kind: noop
