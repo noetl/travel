@@ -44,6 +44,10 @@ workload:
   gcp_project: noetl-demo-19700101
   ai_provider: openai
   llm_extraction_model: gpt-4o
+  # Kill switch for the LLM extraction added in v68 (noetl/ai-meta#268).
+  # Set false in an execute payload to force the heuristic without a
+  # re-register; the heuristic remains the fallback on any LLM failure.
+  llm_extraction_enabled: true
   llm_chat_model: gpt-4o-mini
   openai_secret_path: projects/1014428265962/secrets/openai-api-key/versions/1
   anthropic_secret_path: projects/1014428265962/secrets/anthropic-api-key/versions/1
@@ -200,12 +204,15 @@ workflow:
         anthropic_api_key: "{{ keychain.anthropic_token.api_key | default('') }}"
         flight_provider: "{{ workload.flight_provider | default('duffel') }}"
         duffel_env: "{{ workload.duffel_env | default('test') }}"
+        llm_extraction_enabled: "{{ workload.llm_extraction_enabled | default(true) }}"
       code: |
         import copy
         import json
         import re
         import uuid
         from datetime import date, datetime, timezone, timedelta
+        import urllib.error
+        import urllib.request
 
         def _as_dict(value):
             if isinstance(value, dict):
@@ -961,6 +968,177 @@ workflow:
         ):
             render_intent = {"kind": "summarize"}
 
+        # ── LLM extraction (noetl/ai-meta#268) ────────────────────────────
+        # Until now `fallback_used` was the literal True and no OpenAI call
+        # existed anywhere in this playbook: the keychain entry, the
+        # `openai_api_key` input, the model name, temperature and
+        # response_format were all present, and nothing read them.  Every
+        # existence-based check passed while the planner had no LLM arm at
+        # all -- heuristic-only since the commit that claimed to add one.
+        #
+        # Shape of the fix: the heuristic above has ALREADY produced a
+        # complete answer, so it is a genuine fallback rather than a second
+        # code path.  The LLM runs after it and only replaces the result on a
+        # successful, VALIDATED parse.  Any failure keeps the heuristic.
+        #
+        # Validation is not optional.  The routing arcs below are exclusive
+        # and non-selected targets are skipped terminally, so a tool id the
+        # arcs do not enumerate would wedge the turn with no error -- the
+        # same failure mode fixed in flight-planner.  An unknown render
+        # intent would fall through the renderer to an empty reply.  So the
+        # LLM's output is accepted only if every value is in vocabulary.
+        LLM_ALLOWED_TOOLS = {
+            "mcp/google-places.search_text",
+            "mcp/duffel.search_offers",
+            "mcp/duffel.create_order",
+            "mcp/hotelbeds.search_hotels",
+            "mcp/hotelbeds.book_hotel",
+            "mcp/hotelbeds-activities.search_activities",
+            "mcp/hotelbeds-transfers.search_transfers",
+        }
+        LLM_ALLOWED_INTENTS = {
+            "collect_missing", "show_places", "show_flights", "flight_detail",
+            "order_confirmation", "order_detail", "show_hotels",
+            "hotel_confirmation", "show_activities", "show_transfers",
+            "summary", "summarize", "calendar_live", "trip_map",
+        }
+
+        LLM_SYSTEM_PROMPT = (
+            "You are the extraction pass of a travel itinerary planner. "
+            "Read the user's turn plus the current slot state and return JSON "
+            "only -- no prose, no markdown.\n"
+            "Return exactly these keys:\n"
+            '  slot_updates: object of slot changes for THIS turn only\n'
+            '  tool_requests: array of at most ONE {\"tool\":..,\"arguments\":{..}}\n'
+            '  render_intent: {\"kind\": ..}\n'
+            "tool must be one of: " + ", ".join(sorted(LLM_ALLOWED_TOOLS)) + "\n"
+            "render_intent.kind must be one of: "
+            + ", ".join(sorted(LLM_ALLOWED_INTENTS)) + "\n"
+            "Rules: never invent prices, availability or booking references; "
+            "prefer the newest user message over stored slots; emit an empty "
+            "tool_requests array when no provider call is needed; when region, "
+            "dates or party are missing use render_intent collect_missing."
+        )
+
+        def _llm_validate(parsed):
+            """Return a normalised extraction, or raise so we fall back."""
+            if not isinstance(parsed, dict):
+                raise ValueError("llm output is not an object")
+            slot_updates = parsed.get("slot_updates")
+            if slot_updates is None:
+                slot_updates = {}
+            if not isinstance(slot_updates, dict):
+                raise ValueError("slot_updates is not an object")
+            raw_tools = parsed.get("tool_requests") or []
+            if not isinstance(raw_tools, list):
+                raise ValueError("tool_requests is not a list")
+            tools = []
+            for entry in raw_tools[:1]:  # at most one primary tool per turn
+                if not isinstance(entry, dict):
+                    raise ValueError("tool_request is not an object")
+                name = str(entry.get("tool") or "")
+                if name not in LLM_ALLOWED_TOOLS:
+                    raise ValueError("tool not in vocabulary: %s" % name[:60])
+                args = entry.get("arguments")
+                if args is None:
+                    args = {}
+                if not isinstance(args, dict):
+                    raise ValueError("tool arguments is not an object")
+                tools.append({"tool": name, "arguments": args})
+            intent = parsed.get("render_intent")
+            if isinstance(intent, str):
+                intent = {"kind": intent}
+            if not isinstance(intent, dict):
+                raise ValueError("render_intent is not an object")
+            kind = str(intent.get("kind") or "")
+            if kind not in LLM_ALLOWED_INTENTS:
+                raise ValueError("render_intent not in vocabulary: %s" % kind[:60])
+            return slot_updates, tools, intent
+
+        def _llm_extract(api_key, model, user_text, current_slots, ev_type):
+            """POST to OpenAI chat/completions with stdlib urllib.
+
+            Mirrors the library-free pattern the Google Places step in this
+            same playbook uses -- no new dependency on the worker image.
+            """
+            body = json.dumps({
+                "model": model,
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": LLM_SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps({
+                        "event_type": ev_type,
+                        "user_message": user_text,
+                        "slot_state": current_slots,
+                        "today": date.today().isoformat(),
+                    }, default=str)},
+                ],
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.openai.com/v1/chat/completions",
+                data=body,
+                headers={
+                    "Authorization": "Bearer %s" % api_key,
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            content = payload["choices"][0]["message"]["content"]
+            return json.loads(content)
+
+        llm_used = False
+        llm_error = ""
+        # `llm_extraction_enabled` is an execution-level kill switch: pass it
+        # false in the execute payload to force the heuristic without a
+        # re-register.
+        _llm_on = str(llm_extraction_enabled).strip().lower() not in (
+            "false", "0", "no", "none", "")
+        if _llm_on and str(ai_provider).lower() == "openai" and openai_api_key:
+            try:
+                _parsed = _llm_extract(
+                    openai_api_key,
+                    llm_extraction_model or "gpt-4o",
+                    text,
+                    slot_state,
+                    event_type,
+                )
+                _u, _t, _i = _llm_validate(_parsed)
+                # Accepted: replace the heuristic result wholesale and rebuild
+                # next_state through the SAME merge the heuristic uses, so
+                # every downstream step sees an unchanged shape.
+                updates = _u
+                next_state = _normalise_region_fields(_deep_merge(slot_state, updates))
+                tool_requests = _t
+                render_intent = _i
+                llm_used = True
+            except urllib.error.HTTPError as exc:
+                # Read the response body: an OpenAI 429 is either a transient
+                # rate limit or a permanent `insufficient_quota`, and the
+                # status alone cannot tell them apart -- which turns a billing
+                # problem into something that looks retryable forever.
+                try:
+                    _detail = exc.read().decode("utf-8", "replace")[:300]
+                except Exception:
+                    _detail = ""
+                # The request carried the key; the RESPONSE body does not, so
+                # this is safe to record.
+                llm_error = "HTTP %s: %s" % (exc.code, _detail or exc.reason)
+                llm_used = False
+            except Exception as exc:
+                # Never surface the key or the request body.
+                llm_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+                llm_used = False
+        elif not _llm_on:
+            llm_error = "disabled by llm_extraction_enabled"
+        elif not openai_api_key:
+            # The alias failed to resolve (see noetl/ai-meta#268) -- the
+            # heuristic still answers, but this is now VISIBLE rather than
+            # indistinguishable from a successful LLM turn.
+            llm_error = "openai_api_key unavailable"
+
         first_tool = tool_requests[0] if tool_requests else {}
         call_id = f"call_{uuid.uuid4().hex[:12]}"
         llm_contract = {
@@ -968,8 +1146,13 @@ workflow:
             "model": llm_extraction_model,
             "temperature": 0,
             "response_format": "json_object",
-            "fallback_used": True,
+            # DYNAMIC since v68: True only when the LLM call did not drive
+            # this turn.  Previously the literal True, which made a working
+            # LLM and a missing one indistinguishable.
+            "fallback_used": not llm_used,
         }
+        if llm_error:
+            llm_contract["fallback_reason"] = llm_error
         turn_events = [
             {"thread_path": thread_path, "event": input_event},
             {
