@@ -47,7 +47,13 @@ workload:
   # Vertex lives in noetl-demo-19700101, the same project already serving
   # Firestore and Places for this planner, and authenticates with the pod's
   # Workload Identity rather than an API key.
-  llm_extraction_model: gemini-2.0-flash
+  # gemini-2.5-flash, NOT 2.0/1.5: probed against this project 2026-08-17 and
+  # the entire 2.0 and 1.5 generation returns 404 "Publisher model ... not
+  # found or your project does not have access", in both us-central1 and
+  # global.  Only 2.5-flash and 2.5-pro resolve.  Flash is the cheaper tier and
+  # is ample for slot extraction; switch to gemini-2.5-pro here if quality
+  # needs it -- this is a workload key, so no code change.
+  llm_extraction_model: gemini-2.5-flash
   vertex_project: noetl-demo-19700101
   vertex_region: us-central1
   # Kill switch for the LLM extraction added in v68 (noetl/ai-meta#268).
@@ -645,6 +651,356 @@ workflow:
             updates["trip_confirmed"] = False
 
         next_state = _normalise_region_fields(_deep_merge(slot_state, updates))
+
+        # ── LLM extraction (noetl/ai-meta#268) ────────────────────────────
+        # Until now `fallback_used` was the literal True and no OpenAI call
+        # existed anywhere in this playbook: the keychain entry, the
+        # `openai_api_key` input, the model name, temperature and
+        # response_format were all present, and nothing read them.  Every
+        # existence-based check passed while the planner had no LLM arm at
+        # all -- heuristic-only since the commit that claimed to add one.
+        #
+        # Shape of the fix: the heuristic above has ALREADY produced a
+        # complete answer, so it is a genuine fallback rather than a second
+        # code path.  The LLM runs after it and only replaces the result on a
+        # successful, VALIDATED parse.  Any failure keeps the heuristic.
+        #
+        # Validation is not optional.  The routing arcs below are exclusive
+        # and non-selected targets are skipped terminally, so a tool id the
+        # arcs do not enumerate would wedge the turn with no error -- the
+        # same failure mode fixed in flight-planner.  An unknown render
+        # intent would fall through the renderer to an empty reply.  So the
+        # LLM's output is accepted only if every value is in vocabulary.
+        LLM_ALLOWED_TOOLS = {
+            "mcp/google-places.search_text",
+            "mcp/duffel.search_offers",
+            "mcp/duffel.create_order",
+            "mcp/hotelbeds.search_hotels",
+            "mcp/hotelbeds.book_hotel",
+            "mcp/hotelbeds-activities.search_activities",
+            "mcp/hotelbeds-transfers.search_transfers",
+        }
+        # The slot names the planner actually reads.  Enumerated from
+        # extract_turn itself -- NOT guessed.  Without this the model invents
+        # plausible-but-wrong keys: gemini-2.5-flash returned
+        # {"destination": "Lisbon"} for "trip to Lisbon", which merged cleanly,
+        # was read by nothing, left `region` unset, and degraded the turn to
+        # collect_missing.  It validated fine because only tools and intents
+        # were checked -- a slot key was not.
+        LLM_ALLOWED_SLOTS = {
+            "region", "party", "check_in_date", "check_out_date", "nights",
+            "flight_origin", "flight_destination", "picked_flight_offer_id",
+            "picked_hotel_id", "picked_hotel_rate_key", "picked_place_id",
+            "picked_activity_id", "picked_transfer_id", "trip_confirmed",
+            "preferences",
+        }
+        # Required argument per tool, plus the synonyms the model actually
+        # produced.  gemini-2.5-flash is not deterministic about this key: the
+        # same prompt yielded {"query": "Paris"} on one turn and
+        # {"text": "Lisbon"} on the next.  The tool name validated fine and the
+        # provider then returned "query is required", so the turn rendered an
+        # error_card -- a wrong-argument call is as fatal as a wrong tool, and
+        # was not being checked.
+        LLM_TOOL_REQUIRED_ARG = {
+            "mcp/google-places.search_text": "query",
+            "mcp/duffel.search_offers": "destination",
+            "mcp/duffel.create_order": "offer_id",
+            "mcp/hotelbeds.book_hotel": "rate_key",
+            "mcp/hotelbeds-activities.search_activities": "destination",
+            "mcp/hotelbeds-transfers.search_transfers": "from_code",
+        }
+        LLM_ARG_SYNONYMS = {
+            "query": ("text", "textQuery", "text_query", "q", "search", "place"),
+            "destination": ("dest", "to", "city", "destination_code"),
+            "check_in": ("checkIn", "check_in_date", "from"),
+            "offer_id": ("offerId", "id"),
+            "rate_key": ("rateKey",),
+            "from_code": ("fromCode", "origin_code", "from"),
+        }
+        LLM_ALLOWED_INTENTS = {
+            "collect_missing", "show_places", "show_flights", "flight_detail",
+            "order_confirmation", "order_detail", "show_hotels",
+            "hotel_confirmation", "show_activities", "show_transfers",
+            "summary", "summarize", "calendar_live", "trip_map",
+        }
+
+        LLM_SYSTEM_PROMPT = (
+            "You are the extraction pass of a travel itinerary planner. "
+            "Read the user's turn plus the current slot state and return JSON "
+            "only -- no prose, no markdown.\n"
+            "Return exactly these keys:\n"
+            '  slot_updates: object of slot changes for THIS turn only\n'
+            '  tool_requests: array of at most ONE {\"tool\":..,\"arguments\":{..}}\n'
+            '  render_intent: {\"kind\": ..}\n'
+            "tool must be one of: " + ", ".join(sorted(LLM_ALLOWED_TOOLS)) + "\n"
+            "render_intent.kind must be one of: "
+            + ", ".join(sorted(LLM_ALLOWED_INTENTS)) + "\n"
+            "slot_updates keys must come from: "
+            + ", ".join(sorted(LLM_ALLOWED_SLOTS)) + "\n"
+            "`region` is an OBJECT: {\"label\": \"Lisbon\", \"city_code\": "
+            "\"LIS\", \"country_code\": \"PT\"} -- never a bare string, and "
+            "never a key called `destination`. Always set `region` when the "
+            "user names a place.\n"
+            "Choose the tool by what the user ASKED FOR, not by what is "
+            "missing: hotels -> mcp/hotelbeds.search_hotels (show_hotels); "
+            "flights -> mcp/duffel.search_offers (show_flights); things to do "
+            "-> mcp/hotelbeds-activities.search_activities (show_activities); "
+            "airport transfer -> mcp/hotelbeds-transfers.search_transfers "
+            "(show_transfers). Only use mcp/google-places.search_text "
+            "(show_places) when the user named a destination WITHOUT asking "
+            "for one of those -- e.g. \"trip to Lisbon\".\n"
+            "`party` is an OBJECT: {\"adults\": 2, \"children\": []}. Dates are "
+            "ISO yyyy-mm-dd strings.\n"
+            "ALWAYS fill `region.city_code` with the 3-letter IATA city code "
+            "(Lisbon -> LIS, Paris -> PAR), and set `flight_origin` / "
+            "`flight_destination` to IATA codes too (San Francisco -> SFO). "
+            "The planner cannot look these up for cities outside a small "
+            "table, so omitting them makes a flight search unroutable.\n"
+            "Required argument per tool: "
+            + "; ".join("%s -> %s" % (k, v)
+                        for k, v in sorted(LLM_TOOL_REQUIRED_ARG.items())) + "\n"
+            "Use exactly those argument names -- `query`, not `text`.\n"
+            "For mcp/duffel.search_offers, `origin` and `destination` MUST be "
+            "3-letter IATA airport/city codes (SFO, LIS, CDG) -- never city "
+            "names.\n"
+            "Do NOT wait for dates or party before calling a provider: the "
+            "planner defaults missing dates forward and party to one adult, so "
+            "a search intent with only a place is actionable NOW. Emit the "
+            "provider tool on the first turn and let the planner fill the "
+            "rest; use collect_missing ONLY when no destination is known.\n"
+            "Rules: never invent prices, availability or booking references; "
+            "prefer the newest user message over stored slots; emit an empty "
+            "tool_requests array when no provider call is needed; when region, "
+            "dates or party are missing use render_intent collect_missing."
+        )
+
+        def _llm_validate(parsed):
+            """Return a normalised extraction, or raise so we fall back."""
+            if not isinstance(parsed, dict):
+                raise ValueError("llm output is not an object")
+            slot_updates = parsed.get("slot_updates")
+            if slot_updates is None:
+                slot_updates = {}
+            if not isinstance(slot_updates, dict):
+                raise ValueError("slot_updates is not an object")
+            unknown = [k for k in slot_updates if k not in LLM_ALLOWED_SLOTS]
+            if unknown:
+                # Reject rather than drop: a model that names slots the planner
+                # does not read has misunderstood the contract, and silently
+                # keeping the rest would leave the turn worse than the
+                # heuristic -- which is the floor this path must never go under.
+                raise ValueError("slot_updates has unknown keys: %s"
+                                 % ",".join(sorted(unknown))[:80])
+            raw_tools = parsed.get("tool_requests") or []
+            if not isinstance(raw_tools, list):
+                raise ValueError("tool_requests is not a list")
+            tools = []
+            for entry in raw_tools[:1]:  # at most one primary tool per turn
+                if not isinstance(entry, dict):
+                    raise ValueError("tool_request is not an object")
+                name = str(entry.get("tool") or "")
+                if name not in LLM_ALLOWED_TOOLS:
+                    raise ValueError("tool not in vocabulary: %s" % name[:60])
+                args = entry.get("arguments")
+                if args is None:
+                    args = {}
+                if not isinstance(args, dict):
+                    raise ValueError("tool arguments is not an object")
+                args = dict(args)
+                need = LLM_TOOL_REQUIRED_ARG.get(name)
+                if need and need not in args:
+                    # Accept a known synonym by renaming it, rather than
+                    # failing a call whose intent is unambiguous.
+                    for alt in LLM_ARG_SYNONYMS.get(need, ()):
+                        if isinstance(args.get(alt), (str, int, float)) and args.get(alt) != "":
+                            args[need] = args.pop(alt)
+                            break
+                if need and need not in args:
+                    raise ValueError(
+                        "tool %s missing required argument %r (got %s)"
+                        % (name, need, ",".join(sorted(args))[:60]))
+                # Duffel wants IATA, not city names.  The model returned
+                # {"origin": "San Francisco", "destination": "Lisbon"} and
+                # Duffel rejected the request, so the LLM path made flights
+                # WORSE than the heuristic (which maps names to codes).
+                # Normalise through the planner's own table first; anything not
+                # in it must already be a 3-letter code or the call is rejected
+                # and the heuristic answers instead.
+                if name == "mcp/duffel.search_offers":
+                    for _k in ("origin", "destination"):
+                        _v = str(args.get(_k) or "").strip()
+                        if not _v:
+                            continue
+                        if len(_v) == 3 and _v.isalpha():
+                            args[_k] = _v.upper()
+                            continue
+                        _hit = _resolve_place(_v)
+                        if _hit:
+                            args[_k] = _hit[0]
+                        else:
+                            raise ValueError(
+                                "duffel %s %r is not an IATA code and is not in "
+                                "the place table" % (_k, _v[:30]))
+                tools.append({"tool": name, "arguments": args})
+            intent = parsed.get("render_intent")
+            if isinstance(intent, str):
+                intent = {"kind": intent}
+            if not isinstance(intent, dict):
+                raise ValueError("render_intent is not an object")
+            kind = str(intent.get("kind") or "")
+            if kind not in LLM_ALLOWED_INTENTS:
+                raise ValueError("render_intent not in vocabulary: %s" % kind[:60])
+            return slot_updates, tools, intent
+
+        def _vertex_token():
+            """Mint an access token from the GKE metadata server.
+
+            Same library-free Workload-Identity pattern the Places step and the
+            mcp/vertex-ai provider use -- no google-auth dependency on the
+            worker image.  The pod's bound GSA is the identity; no key material
+            is handled here.
+            """
+            url = (
+                "http://metadata.google.internal/computeMetadata/v1/instance/"
+                "service-accounts/default/token?scopes="
+                + urllib.parse.quote(
+                    "https://www.googleapis.com/auth/cloud-platform", safe="")
+            )
+            req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8"))["access_token"]
+
+        def _llm_extract(model, user_text, current_slots, ev_type,
+                         project, region):
+            """Vertex AI Gemini generateContent, stdlib urllib only.
+
+            Swapped from OpenAI chat/completions 2026-08-17: the OpenAI account
+            has no credit (insufficient_quota, noetl/ai-meta#268), so that path
+            could never activate.  Vertex runs in noetl-demo-19700101, the same
+            project that already serves Firestore and Places for this planner.
+
+            `responseMimeType: application/json` is the Gemini equivalent of
+            OpenAI's json_object, so the parse + validation downstream is
+            unchanged.
+            """
+            host = ("aiplatform.googleapis.com" if region == "global"
+                    else region + "-aiplatform.googleapis.com")
+            endpoint = (
+                "https://%s/v1/projects/%s/locations/%s/publishers/google/models/%s"
+                ":generateContent" % (host, project, region, model)
+            )
+            body = json.dumps({
+                "systemInstruction": {"parts": [{"text": LLM_SYSTEM_PROMPT}]},
+                "contents": [{
+                    "role": "user",
+                    "parts": [{"text": json.dumps({
+                        "event_type": ev_type,
+                        "user_message": user_text,
+                        "slot_state": current_slots,
+                        "today": date.today().isoformat(),
+                    }, default=str)}],
+                }],
+                "generationConfig": {
+                    "temperature": 0,
+                    "responseMimeType": "application/json",
+                },
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                endpoint,
+                data=body,
+                headers={
+                    "Authorization": "Bearer %s" % _vertex_token(),
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            cands = payload.get("candidates") or []
+            if not cands:
+                # A safety block or empty candidate list is a failure, not an
+                # empty answer -- fall back rather than emit a blank turn.
+                raise ValueError("vertex returned no candidates: %s"
+                                 % json.dumps(payload)[:200])
+            parts = ((cands[0].get("content") or {}).get("parts") or [])
+            text_out = "".join(p.get("text", "") for p in parts)
+            return json.loads(text_out)
+
+        llm_used = False
+        llm_error = ""
+        # `llm_extraction_enabled` is an execution-level kill switch: pass it
+        # false in the execute payload to force the heuristic without a
+        # re-register.
+        _llm_on = str(llm_extraction_enabled).strip().lower() not in (
+            "false", "0", "no", "none", "")
+        # Vertex needs no API key: the pod's Workload Identity is the
+        # credential, so this path no longer depends on OpenAI quota.
+        if _llm_on:
+            try:
+                _parsed = _llm_extract(
+                    llm_extraction_model or "gemini-2.0-flash",
+                    text,
+                    slot_state,
+                    event_type,
+                    vertex_project or "noetl-demo-19700101",
+                    vertex_region or "us-central1",
+                )
+                _u, _t, _i = _llm_validate(_parsed)
+                # Accepted: replace the heuristic result wholesale and rebuild
+                # then routes and builds provider arguments from the enriched
+                # state -- the model is a slot extractor, not a call builder.
+                updates = _u
+                # Every provider branch in the chain below gates on
+                # region_ready.  The model often fills flight_destination
+                # without also setting region, which leaves the turn
+                # unroutable and it falls out to the autocomplete prompt.
+                # Derive region from the flight destination so the heuristic
+                # can route -- deterministic glue, not a second decision.
+                if not updates.get("region") and not slot_state.get("region"):
+                    _fd = str(updates.get("flight_destination") or "").strip()
+                    if _fd:
+                        _hit = _resolve_place(_fd)
+                        if _hit:
+                            updates["region"] = {"label": _hit[1],
+                                                 "city_code": _hit[0],
+                                                 "country_code": _hit[2],
+                                                 "kind": "city"}
+                        elif len(_fd) == 3 and _fd.isalpha():
+                            updates["region"] = {"label": _fd.upper(),
+                                                 "city_code": _fd.upper(),
+                                                 "kind": "city"}
+                    # Last resort: an airport code in the raw text.  "airport
+                    # transfer from CDG to my hotel" names no city, so the
+                    # model leaves region unset and the transfer branch --
+                    # which gates on region_ready -- never fires.
+                    if not updates.get("region"):
+                        _hit2 = _resolve_place(text)
+                        if _hit2:
+                            updates["region"] = {"label": _hit2[1],
+                                                 "city_code": _hit2[0],
+                                                 "country_code": _hit2[2],
+                                                 "kind": "city"}
+                next_state = _normalise_region_fields(_deep_merge(slot_state, updates))
+                llm_used = True
+            except urllib.error.HTTPError as exc:
+                # Read the response body.  A Vertex 403 distinguishes a missing
+                # IAM role from a disabled API, and a 404 means the model name
+                # is not available in this project/region -- the status alone
+                # cannot tell those apart, which would make a one-command fix
+                # look like a code problem.  The body carries no credential
+                # (the token rides the request header, not the response).
+                try:
+                    _detail = exc.read().decode("utf-8", "replace")[:300]
+                except Exception:
+                    _detail = ""
+                llm_error = "HTTP %s: %s" % (exc.code, _detail or exc.reason)
+                llm_used = False
+            except Exception as exc:
+                llm_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+                llm_used = False
+        else:
+            llm_error = "disabled by llm_extraction_enabled"
+
         region_ready = isinstance(next_state.get("region"), dict)
         dates_ready = bool(next_state.get("check_in_date") and next_state.get("check_out_date"))
         party_ready = isinstance(next_state.get("party"), dict)
@@ -984,214 +1340,6 @@ workflow:
             and region_ready and dates_ready and party_ready
         ):
             render_intent = {"kind": "summarize"}
-
-        # ── LLM extraction (noetl/ai-meta#268) ────────────────────────────
-        # Until now `fallback_used` was the literal True and no OpenAI call
-        # existed anywhere in this playbook: the keychain entry, the
-        # `openai_api_key` input, the model name, temperature and
-        # response_format were all present, and nothing read them.  Every
-        # existence-based check passed while the planner had no LLM arm at
-        # all -- heuristic-only since the commit that claimed to add one.
-        #
-        # Shape of the fix: the heuristic above has ALREADY produced a
-        # complete answer, so it is a genuine fallback rather than a second
-        # code path.  The LLM runs after it and only replaces the result on a
-        # successful, VALIDATED parse.  Any failure keeps the heuristic.
-        #
-        # Validation is not optional.  The routing arcs below are exclusive
-        # and non-selected targets are skipped terminally, so a tool id the
-        # arcs do not enumerate would wedge the turn with no error -- the
-        # same failure mode fixed in flight-planner.  An unknown render
-        # intent would fall through the renderer to an empty reply.  So the
-        # LLM's output is accepted only if every value is in vocabulary.
-        LLM_ALLOWED_TOOLS = {
-            "mcp/google-places.search_text",
-            "mcp/duffel.search_offers",
-            "mcp/duffel.create_order",
-            "mcp/hotelbeds.search_hotels",
-            "mcp/hotelbeds.book_hotel",
-            "mcp/hotelbeds-activities.search_activities",
-            "mcp/hotelbeds-transfers.search_transfers",
-        }
-        LLM_ALLOWED_INTENTS = {
-            "collect_missing", "show_places", "show_flights", "flight_detail",
-            "order_confirmation", "order_detail", "show_hotels",
-            "hotel_confirmation", "show_activities", "show_transfers",
-            "summary", "summarize", "calendar_live", "trip_map",
-        }
-
-        LLM_SYSTEM_PROMPT = (
-            "You are the extraction pass of a travel itinerary planner. "
-            "Read the user's turn plus the current slot state and return JSON "
-            "only -- no prose, no markdown.\n"
-            "Return exactly these keys:\n"
-            '  slot_updates: object of slot changes for THIS turn only\n'
-            '  tool_requests: array of at most ONE {\"tool\":..,\"arguments\":{..}}\n'
-            '  render_intent: {\"kind\": ..}\n'
-            "tool must be one of: " + ", ".join(sorted(LLM_ALLOWED_TOOLS)) + "\n"
-            "render_intent.kind must be one of: "
-            + ", ".join(sorted(LLM_ALLOWED_INTENTS)) + "\n"
-            "Rules: never invent prices, availability or booking references; "
-            "prefer the newest user message over stored slots; emit an empty "
-            "tool_requests array when no provider call is needed; when region, "
-            "dates or party are missing use render_intent collect_missing."
-        )
-
-        def _llm_validate(parsed):
-            """Return a normalised extraction, or raise so we fall back."""
-            if not isinstance(parsed, dict):
-                raise ValueError("llm output is not an object")
-            slot_updates = parsed.get("slot_updates")
-            if slot_updates is None:
-                slot_updates = {}
-            if not isinstance(slot_updates, dict):
-                raise ValueError("slot_updates is not an object")
-            raw_tools = parsed.get("tool_requests") or []
-            if not isinstance(raw_tools, list):
-                raise ValueError("tool_requests is not a list")
-            tools = []
-            for entry in raw_tools[:1]:  # at most one primary tool per turn
-                if not isinstance(entry, dict):
-                    raise ValueError("tool_request is not an object")
-                name = str(entry.get("tool") or "")
-                if name not in LLM_ALLOWED_TOOLS:
-                    raise ValueError("tool not in vocabulary: %s" % name[:60])
-                args = entry.get("arguments")
-                if args is None:
-                    args = {}
-                if not isinstance(args, dict):
-                    raise ValueError("tool arguments is not an object")
-                tools.append({"tool": name, "arguments": args})
-            intent = parsed.get("render_intent")
-            if isinstance(intent, str):
-                intent = {"kind": intent}
-            if not isinstance(intent, dict):
-                raise ValueError("render_intent is not an object")
-            kind = str(intent.get("kind") or "")
-            if kind not in LLM_ALLOWED_INTENTS:
-                raise ValueError("render_intent not in vocabulary: %s" % kind[:60])
-            return slot_updates, tools, intent
-
-        def _vertex_token():
-            """Mint an access token from the GKE metadata server.
-
-            Same library-free Workload-Identity pattern the Places step and the
-            mcp/vertex-ai provider use -- no google-auth dependency on the
-            worker image.  The pod's bound GSA is the identity; no key material
-            is handled here.
-            """
-            url = (
-                "http://metadata.google.internal/computeMetadata/v1/instance/"
-                "service-accounts/default/token?scopes="
-                + urllib.parse.quote(
-                    "https://www.googleapis.com/auth/cloud-platform", safe="")
-            )
-            req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read().decode("utf-8"))["access_token"]
-
-        def _llm_extract(model, user_text, current_slots, ev_type,
-                         project, region):
-            """Vertex AI Gemini generateContent, stdlib urllib only.
-
-            Swapped from OpenAI chat/completions 2026-08-17: the OpenAI account
-            has no credit (insufficient_quota, noetl/ai-meta#268), so that path
-            could never activate.  Vertex runs in noetl-demo-19700101, the same
-            project that already serves Firestore and Places for this planner.
-
-            `responseMimeType: application/json` is the Gemini equivalent of
-            OpenAI's json_object, so the parse + validation downstream is
-            unchanged.
-            """
-            host = ("aiplatform.googleapis.com" if region == "global"
-                    else region + "-aiplatform.googleapis.com")
-            endpoint = (
-                "https://%s/v1/projects/%s/locations/%s/publishers/google/models/%s"
-                ":generateContent" % (host, project, region, model)
-            )
-            body = json.dumps({
-                "systemInstruction": {"parts": [{"text": LLM_SYSTEM_PROMPT}]},
-                "contents": [{
-                    "role": "user",
-                    "parts": [{"text": json.dumps({
-                        "event_type": ev_type,
-                        "user_message": user_text,
-                        "slot_state": current_slots,
-                        "today": date.today().isoformat(),
-                    }, default=str)}],
-                }],
-                "generationConfig": {
-                    "temperature": 0,
-                    "responseMimeType": "application/json",
-                },
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                endpoint,
-                data=body,
-                headers={
-                    "Authorization": "Bearer %s" % _vertex_token(),
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            cands = payload.get("candidates") or []
-            if not cands:
-                # A safety block or empty candidate list is a failure, not an
-                # empty answer -- fall back rather than emit a blank turn.
-                raise ValueError("vertex returned no candidates: %s"
-                                 % json.dumps(payload)[:200])
-            parts = ((cands[0].get("content") or {}).get("parts") or [])
-            text_out = "".join(p.get("text", "") for p in parts)
-            return json.loads(text_out)
-
-        llm_used = False
-        llm_error = ""
-        # `llm_extraction_enabled` is an execution-level kill switch: pass it
-        # false in the execute payload to force the heuristic without a
-        # re-register.
-        _llm_on = str(llm_extraction_enabled).strip().lower() not in (
-            "false", "0", "no", "none", "")
-        # Vertex needs no API key: the pod's Workload Identity is the
-        # credential, so this path no longer depends on OpenAI quota.
-        if _llm_on:
-            try:
-                _parsed = _llm_extract(
-                    llm_extraction_model or "gemini-2.0-flash",
-                    text,
-                    slot_state,
-                    event_type,
-                    vertex_project or "noetl-demo-19700101",
-                    vertex_region or "us-central1",
-                )
-                _u, _t, _i = _llm_validate(_parsed)
-                # Accepted: replace the heuristic result wholesale and rebuild
-                # next_state through the SAME merge the heuristic uses, so
-                # every downstream step sees an unchanged shape.
-                updates = _u
-                next_state = _normalise_region_fields(_deep_merge(slot_state, updates))
-                tool_requests = _t
-                render_intent = _i
-                llm_used = True
-            except urllib.error.HTTPError as exc:
-                # Read the response body.  A Vertex 403 distinguishes a missing
-                # IAM role from a disabled API, and a 404 means the model name
-                # is not available in this project/region -- the status alone
-                # cannot tell those apart, which would make a one-command fix
-                # look like a code problem.  The body carries no credential
-                # (the token rides the request header, not the response).
-                try:
-                    _detail = exc.read().decode("utf-8", "replace")[:300]
-                except Exception:
-                    _detail = ""
-                llm_error = "HTTP %s: %s" % (exc.code, _detail or exc.reason)
-                llm_used = False
-            except Exception as exc:
-                llm_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
-                llm_used = False
-        else:
-            llm_error = "disabled by llm_extraction_enabled"
 
         first_tool = tool_requests[0] if tool_requests else {}
         call_id = f"call_{uuid.uuid4().hex[:12]}"
