@@ -707,7 +707,15 @@ workflow:
             # instead of dead-ending on a re-rendered summary. "Edit" clears
             # trip_confirmed and drops back to the editable summary.
             render_intent = {"kind": "trip_map"}
-        elif wants_hotel and region_ready:
+        # `not wants_transfers` gives the transfer intent precedence without
+        # moving either branch.  "airport transfer from CDG to my hotel" is the
+        # natural phrasing and names BOTH providers; because the hotel branch
+        # was tested first it won, and a transfer request returned a hotel list
+        # — proven against prod 2026-08-17 ("... to my hotel" ->
+        # call_hotelbeds_hotels, while "airport transfer from CDG" alone
+        # correctly returned 10 transfers).  "Transfer" is the specific intent;
+        # "hotel" here is only the destination of the ride.
+        elif wants_hotel and not wants_transfers and region_ready:
             # HotelBeds availability search (the slot Amadeus hotels vacated).
             # Geolocation is resolved provider-side from the city/coords; stay
             # dates default forward when the user hasn't pinned them yet.

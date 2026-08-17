@@ -1423,10 +1423,24 @@ workflow:
             else:
                 safe_widgets.append(item)
         calendar_events = _calendar_events()
-        post_docs = []
+        # The final slot state is persisted on EVERY turn, not only when a tool
+        # ran.  Previously both this doc and the api_calls doc sat behind
+        # `tool_summary.get("tool")`, so a turn whose summary was empty wrote
+        # nothing: `persist_render_docs_atomically` is gated on
+        # `post_docs | length > 0` and was skipped, dropping the state that
+        # `normalize_tool_response` had just computed — including `places_seen`.
+        #
+        # The visible effect was a thread that could never advance: turn 1
+        # resolved the place, the write was skipped, turn 2 reloaded a state
+        # with no `places_seen` and resolved the place again, so the flight
+        # branch was unreachable and Duffel was never called.  Every execution
+        # still reported COMPLETED.  The live planner avoids this by persisting
+        # unconditionally in one `persist_all_atomically` step.
+        post_docs = [
+            {"path": f"{thread_path}/slot_state/current", "doc": slot_state, "merge": False},
+        ]
         if isinstance(tool_summary, dict) and tool_summary.get("tool"):
             post_docs.extend([
-                {"path": f"{thread_path}/slot_state/current", "doc": slot_state, "merge": False},
                 {
                     "path": f"{thread_path}/api_calls/{tool_summary.get('call_id')}",
                     "doc": {
@@ -1503,9 +1517,16 @@ workflow:
         globals().update({"result": result})
     next:
       spec: { mode: exclusive }
+      # ONE unconditional arc.  `post_docs` now always carries the slot-state
+      # doc, so the old `length == 0` branch is dead — and leaving it would
+      # actively break the turn: `append_render_events_atomically` was a direct
+      # target of this exclusive branch, so it was marked skipped TERMINALLY
+      # here and could then never be entered via persist_render_docs, ending
+      # the execution before `final_result`.  Same trap as `render_widget_chat`
+      # on the tool-dispatch branch; the rule is that a convergence point must
+      # not also be an arc of an exclusive branch.
       arcs:
         - step: persist_render_docs_atomically
-          when: "{{ render_widget_chat.post_docs | length > 0 }}"
           set:
             ctx.first_widget: "{{ render_widget_chat.first_widget }}"
             ctx.second_widget: "{{ render_widget_chat.second_widget }}"
@@ -1513,15 +1534,6 @@ workflow:
             ctx.bot_message: "{{ render_widget_chat.bot_message }}"
             ctx.final_slot_state: "{{ render_widget_chat.final_slot_state }}"
             ctx.post_docs: "{{ render_widget_chat.post_docs }}"
-            ctx.post_events: "{{ render_widget_chat.post_events }}"
-        - step: append_render_events_atomically
-          when: "{{ render_widget_chat.post_docs | length == 0 }}"
-          set:
-            ctx.first_widget: "{{ render_widget_chat.first_widget }}"
-            ctx.second_widget: "{{ render_widget_chat.second_widget }}"
-            ctx.has_second_widget: "{{ render_widget_chat.has_second_widget | default(false) }}"
-            ctx.bot_message: "{{ render_widget_chat.bot_message }}"
-            ctx.final_slot_state: "{{ render_widget_chat.final_slot_state }}"
             ctx.post_events: "{{ render_widget_chat.post_events }}"
 
   - step: persist_render_docs_atomically
