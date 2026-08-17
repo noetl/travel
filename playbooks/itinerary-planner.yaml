@@ -42,8 +42,14 @@ workload:
   pg_auth: pg_k8s
   gcp_auth: google_oauth
   gcp_project: noetl-demo-19700101
-  ai_provider: openai
-  llm_extraction_model: gpt-4o
+  ai_provider: vertex-ai
+  # Vertex AI (Gemini) replaces OpenAI for extraction — see noetl/ai-meta#268.
+  # Vertex lives in noetl-demo-19700101, the same project already serving
+  # Firestore and Places for this planner, and authenticates with the pod's
+  # Workload Identity rather than an API key.
+  llm_extraction_model: gemini-2.0-flash
+  vertex_project: noetl-demo-19700101
+  vertex_region: us-central1
   # Kill switch for the LLM extraction added in v68 (noetl/ai-meta#268).
   # Set false in an execute payload to force the heuristic without a
   # re-register; the heuristic remains the fallback on any LLM failure.
@@ -205,6 +211,8 @@ workflow:
         flight_provider: "{{ workload.flight_provider | default('duffel') }}"
         duffel_env: "{{ workload.duffel_env | default('test') }}"
         llm_extraction_enabled: "{{ workload.llm_extraction_enabled | default(true) }}"
+        vertex_project: "{{ workload.vertex_project | default('noetl-demo-19700101') }}"
+        vertex_region: "{{ workload.vertex_region | default('us-central1') }}"
       code: |
         import copy
         import json
@@ -212,6 +220,7 @@ workflow:
         import uuid
         from datetime import date, datetime, timezone, timedelta
         import urllib.error
+        import urllib.parse
         import urllib.request
 
         def _as_dict(value):
@@ -1063,39 +1072,79 @@ workflow:
                 raise ValueError("render_intent not in vocabulary: %s" % kind[:60])
             return slot_updates, tools, intent
 
-        def _llm_extract(api_key, model, user_text, current_slots, ev_type):
-            """POST to OpenAI chat/completions with stdlib urllib.
+        def _vertex_token():
+            """Mint an access token from the GKE metadata server.
 
-            Mirrors the library-free pattern the Google Places step in this
-            same playbook uses -- no new dependency on the worker image.
+            Same library-free Workload-Identity pattern the Places step and the
+            mcp/vertex-ai provider use -- no google-auth dependency on the
+            worker image.  The pod's bound GSA is the identity; no key material
+            is handled here.
             """
+            url = (
+                "http://metadata.google.internal/computeMetadata/v1/instance/"
+                "service-accounts/default/token?scopes="
+                + urllib.parse.quote(
+                    "https://www.googleapis.com/auth/cloud-platform", safe="")
+            )
+            req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8"))["access_token"]
+
+        def _llm_extract(model, user_text, current_slots, ev_type,
+                         project, region):
+            """Vertex AI Gemini generateContent, stdlib urllib only.
+
+            Swapped from OpenAI chat/completions 2026-08-17: the OpenAI account
+            has no credit (insufficient_quota, noetl/ai-meta#268), so that path
+            could never activate.  Vertex runs in noetl-demo-19700101, the same
+            project that already serves Firestore and Places for this planner.
+
+            `responseMimeType: application/json` is the Gemini equivalent of
+            OpenAI's json_object, so the parse + validation downstream is
+            unchanged.
+            """
+            host = ("aiplatform.googleapis.com" if region == "global"
+                    else region + "-aiplatform.googleapis.com")
+            endpoint = (
+                "https://%s/v1/projects/%s/locations/%s/publishers/google/models/%s"
+                ":generateContent" % (host, project, region, model)
+            )
             body = json.dumps({
-                "model": model,
-                "temperature": 0,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": LLM_SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps({
+                "systemInstruction": {"parts": [{"text": LLM_SYSTEM_PROMPT}]},
+                "contents": [{
+                    "role": "user",
+                    "parts": [{"text": json.dumps({
                         "event_type": ev_type,
                         "user_message": user_text,
                         "slot_state": current_slots,
                         "today": date.today().isoformat(),
-                    }, default=str)},
-                ],
+                    }, default=str)}],
+                }],
+                "generationConfig": {
+                    "temperature": 0,
+                    "responseMimeType": "application/json",
+                },
             }).encode("utf-8")
             req = urllib.request.Request(
-                "https://api.openai.com/v1/chat/completions",
+                endpoint,
                 data=body,
                 headers={
-                    "Authorization": "Bearer %s" % api_key,
+                    "Authorization": "Bearer %s" % _vertex_token(),
                     "Content-Type": "application/json",
                 },
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=25) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
-            content = payload["choices"][0]["message"]["content"]
-            return json.loads(content)
+            cands = payload.get("candidates") or []
+            if not cands:
+                # A safety block or empty candidate list is a failure, not an
+                # empty answer -- fall back rather than emit a blank turn.
+                raise ValueError("vertex returned no candidates: %s"
+                                 % json.dumps(payload)[:200])
+            parts = ((cands[0].get("content") or {}).get("parts") or [])
+            text_out = "".join(p.get("text", "") for p in parts)
+            return json.loads(text_out)
 
         llm_used = False
         llm_error = ""
@@ -1104,14 +1153,17 @@ workflow:
         # re-register.
         _llm_on = str(llm_extraction_enabled).strip().lower() not in (
             "false", "0", "no", "none", "")
-        if _llm_on and str(ai_provider).lower() == "openai" and openai_api_key:
+        # Vertex needs no API key: the pod's Workload Identity is the
+        # credential, so this path no longer depends on OpenAI quota.
+        if _llm_on:
             try:
                 _parsed = _llm_extract(
-                    openai_api_key,
-                    llm_extraction_model or "gpt-4o",
+                    llm_extraction_model or "gemini-2.0-flash",
                     text,
                     slot_state,
                     event_type,
+                    vertex_project or "noetl-demo-19700101",
+                    vertex_region or "us-central1",
                 )
                 _u, _t, _i = _llm_validate(_parsed)
                 # Accepted: replace the heuristic result wholesale and rebuild
@@ -1123,29 +1175,23 @@ workflow:
                 render_intent = _i
                 llm_used = True
             except urllib.error.HTTPError as exc:
-                # Read the response body: an OpenAI 429 is either a transient
-                # rate limit or a permanent `insufficient_quota`, and the
-                # status alone cannot tell them apart -- which turns a billing
-                # problem into something that looks retryable forever.
+                # Read the response body.  A Vertex 403 distinguishes a missing
+                # IAM role from a disabled API, and a 404 means the model name
+                # is not available in this project/region -- the status alone
+                # cannot tell those apart, which would make a one-command fix
+                # look like a code problem.  The body carries no credential
+                # (the token rides the request header, not the response).
                 try:
                     _detail = exc.read().decode("utf-8", "replace")[:300]
                 except Exception:
                     _detail = ""
-                # The request carried the key; the RESPONSE body does not, so
-                # this is safe to record.
                 llm_error = "HTTP %s: %s" % (exc.code, _detail or exc.reason)
                 llm_used = False
             except Exception as exc:
-                # Never surface the key or the request body.
                 llm_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
                 llm_used = False
-        elif not _llm_on:
+        else:
             llm_error = "disabled by llm_extraction_enabled"
-        elif not openai_api_key:
-            # The alias failed to resolve (see noetl/ai-meta#268) -- the
-            # heuristic still answers, but this is now VISIBLE rather than
-            # indistinguishable from a successful LLM turn.
-            llm_error = "openai_api_key unavailable"
 
         first_tool = tool_requests[0] if tool_requests else {}
         call_id = f"call_{uuid.uuid4().hex[:12]}"
