@@ -96,6 +96,12 @@ jobs:
         run: npm run build
         env:
           VITE_NOETL_API_BASE_URL: ${{ vars.VITE_NOETL_API_BASE_URL || 'https://gateway.mestumre.dev/api' }}
+          # Guest browsing for the public demo. Without this the bundle
+          # builds with guest mode off and the demo forces an Auth0 login
+          # (noetl/ai-meta#177 follow-up). Kept in lockstep with the same
+          # variable on the Cloudflare Pages project so whichever build
+          # becomes canonical serves an equivalent bundle.
+          VITE_ALLOW_GUEST: ${{ vars.VITE_ALLOW_GUEST || 'true' }}
           VITE_AUTH0_DOMAIN: ${{ secrets.VITE_AUTH0_DOMAIN }}
           VITE_AUTH0_CLIENT_ID: ${{ secrets.VITE_AUTH0_CLIENT_ID }}
           # Prefer the Secret Manager value exported above (WIF path); fall
