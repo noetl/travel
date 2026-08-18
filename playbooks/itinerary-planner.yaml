@@ -178,22 +178,138 @@ workflow:
         - step: load_slot_state
 
   - step: load_slot_state
-    desc: Load current slot projection from Firestore
+    desc: Load current slot projection from Firestore (INLINE — see note)
+    # Inlined from the mcp/firestore child playbook.  As a `kind: playbook`
+    # step this blocked on a child EXECUTION, which pays the orchestration tax
+    # a second time: measured on prod exec 347995973844213760 it took 15.1s of
+    # an 88.3s turn, and a bare mcp/firestore child measured 11.4s wall clock
+    # for 369ms of actual work.  The same class of call made inline — Places —
+    # cost 1.5s for 663ms of work.  So this is a ~14s saving for one read.
+    #
+    # This is a faithful transcription of the provider's get_doc path: the same
+    # metadata-server token mint, the same document URL, the same value
+    # decoding, and the SAME result envelope shape, so `load_slot_state.data`
+    # is byte-compatible for both consumers (extract_turn's _slot_from_loaded
+    # and the inert shadow_slm_compare step).
+    #
+    # Project is shastaratech-noetl-prod — the provider's own default, and
+    # where the thread documents actually live.  NOT the demo project: this key
+    # selects which Firestore database holds the data (noetl/ai-meta#234).
     tool:
-      kind: playbook
-      path: automation/agents/mcp/firestore
-      # noetl/ai-meta#136 — block for the child's real result so
-      # `load_slot_state.data` carries the actual Firestore projection
-      # instead of the async-start envelope.
-      return_result: true
-      result_step: firestore_dispatch
-      timeout: 90
-      payload:
-        method: tools/call
-        tool: get_doc
-        firestore_database: "{{ workload.firestore_database }}"
-        arguments:
-          path: "{{ normalize_input.thread_path }}/slot_state/current"
+      kind: python
+      input:
+        doc_path: "{{ normalize_input.thread_path }}/slot_state/current"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+      code: |
+        import json
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        METADATA_TOKEN_URL = (
+            "http://metadata.google.internal/computeMetadata/v1/instance/"
+            "service-accounts/default/token"
+        )
+
+        def _as_dict(value):
+            return value if isinstance(value, dict) else {}
+
+        def _as_list(value):
+            return value if isinstance(value, list) else []
+
+        def _safe_int(value, default=0):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _token():
+            req = urllib.request.Request(
+                METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"}, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode("utf-8") or "{}")
+            token = (payload or {}).get("access_token")
+            if not token:
+                raise RuntimeError("metadata token endpoint returned no access_token")
+            return token
+
+        def _decode_value(value):
+            value = _as_dict(value)
+            if "nullValue" in value:
+                return None
+            if "booleanValue" in value:
+                return bool(value.get("booleanValue"))
+            if "integerValue" in value:
+                return _safe_int(value.get("integerValue"), 0)
+            if "doubleValue" in value:
+                try:
+                    return float(value.get("doubleValue"))
+                except (TypeError, ValueError):
+                    return 0.0
+            for key in ("timestampValue", "stringValue", "bytesValue",
+                        "referenceValue", "geoPointValue"):
+                if key in value:
+                    return value.get(key)
+            if "arrayValue" in value:
+                return [_decode_value(i)
+                        for i in _as_list(_as_dict(value.get("arrayValue")).get("values"))]
+            if "mapValue" in value:
+                fields = _as_dict(_as_dict(value.get("mapValue")).get("fields"))
+                return {k: _decode_value(v) for k, v in fields.items()}
+            return value
+
+        def _relative_from_name(name):
+            marker = "/documents/"
+            name = str(name or "")
+            return name.split(marker, 1)[1] if marker in name else name
+
+        path = str(doc_path or "").strip().strip("/")
+        db = str(firestore_database or "(default)")
+        root = ("https://firestore.googleapis.com/v1/projects/"
+                + str(firestore_project)
+                + "/databases/" + urllib.parse.quote(db, safe="()")
+                + "/documents")
+        url = root + "/" + urllib.parse.quote(path, safe="/")
+
+        found = False
+        document = None
+        error = ""
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"Authorization": "Bearer %s" % _token(),
+                         "Accept": "application/json"},
+                method="GET")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = json.loads(resp.read().decode("utf-8") or "{}")
+            fields = _as_dict(body.get("fields"))
+            document = {
+                "name": body.get("name"),
+                "path": _relative_from_name(body.get("name")),
+                "createTime": body.get("createTime"),
+                "updateTime": body.get("updateTime"),
+                "data": {k: _decode_value(v) for k, v in fields.items()},
+            }
+            found = True
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                # A brand-new thread has no projection yet.  Not an error --
+                # the turn starts from an empty slot state.
+                found = False
+            else:
+                error = "HTTP %s: %s" % (
+                    exc.code, exc.read().decode("utf-8", "replace")[:300])
+        except Exception as exc:
+            error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+
+        # Same envelope the mcp/firestore child returned, so downstream
+        # accessors are unchanged.
+        result = {
+            "data": {"found": found, "path": path, "document": document},
+            "load_error": error,
+        }
+        globals().update({"result": result})
     next:
       spec: { mode: exclusive }
       arcs:
