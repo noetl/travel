@@ -935,7 +935,12 @@ workflow:
             "false", "0", "no", "none", "")
         # Vertex needs no API key: the pod's Workload Identity is the
         # credential, so this path no longer depends on OpenAI quota.
-        if _llm_on:
+        # A widget event is a typed payload the heuristic parses exactly; the
+        # model adds nothing and costs a round trip.  Free text is where it
+        # earns its place (resolving "Lisbon", which the gazetteer cannot).
+        _structured_event = event_type in ("user_widget_submit",
+                                           "user_widget_cta_click")
+        if _llm_on and not _structured_event:
             try:
                 _parsed = _llm_extract(
                     llm_extraction_model or "gemini-2.0-flash",
@@ -946,10 +951,26 @@ workflow:
                     vertex_region or "us-central1",
                 )
                 _u, _t, _i = _llm_validate(_parsed)
-                # Accepted: replace the heuristic result wholesale and rebuild
-                # then routes and builds provider arguments from the enriched
-                # state -- the model is a slot extractor, not a call builder.
-                updates = _u
+                # MERGE, never replace.  The heuristic has already parsed the
+                # deterministic parts of the turn -- in particular a widget
+                # payload (submit_dates -> check_in_date/check_out_date/nights,
+                # party picker, place select, filter apply).  Replacing
+                # `updates` wholesale discarded all of it whenever the model
+                # returned {} for a structured event, which is what it does:
+                # the prompt describes free-text turns, not widget payloads.
+                #
+                # Live symptom: the user picked 2026-09-17 -> 2026-09-21 in the
+                # date picker, the heuristic parsed it correctly, the model
+                # returned {} , `updates` became {} , the dates never reached
+                # slot_state, and the next turn re-rendered the date picker --
+                # an unbreakable loop with fallback_used=false and every
+                # execution reporting COMPLETED.
+                #
+                # The model may ADD slots it inferred and OVERRIDE what it is
+                # more confident about, but it must never DELETE a slot the
+                # deterministic path already established.
+                updates = dict(updates or {})
+                updates.update(_u or {})
                 # Every provider branch in the chain below gates on
                 # region_ready.  The model often fills flight_destination
                 # without also setting region, which leaves the turn
@@ -998,6 +1019,8 @@ workflow:
             except Exception as exc:
                 llm_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
                 llm_used = False
+        elif _structured_event:
+            llm_error = "skipped: structured widget event parsed deterministically"
         else:
             llm_error = "disabled by llm_extraction_enabled"
 
