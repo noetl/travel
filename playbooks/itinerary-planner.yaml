@@ -60,6 +60,10 @@ workload:
   # Set false in an execute payload to force the heuristic without a
   # re-register; the heuristic remains the fallback on any LLM failure.
   llm_extraction_enabled: true
+  # Rule 2 (flights spec) — the platform's declared default departure airport.
+  # An explicit origin in the user's message always wins.  Set to "" to force
+  # the planner to ask for an origin instead of assuming one.
+  default_origin: "SFO"
   llm_chat_model: gpt-4o-mini
   openai_secret_path: projects/1014428265962/secrets/openai-api-key/versions/1
   anthropic_secret_path: projects/1014428265962/secrets/anthropic-api-key/versions/1
@@ -333,6 +337,7 @@ workflow:
         flight_provider: "{{ workload.flight_provider | default('duffel') }}"
         duffel_env: "{{ workload.duffel_env | default('test') }}"
         llm_extraction_enabled: "{{ workload.llm_extraction_enabled | default(true) }}"
+        default_origin: "{{ workload.default_origin | default('SFO') }}"
         vertex_project: "{{ workload.vertex_project | default('noetl-demo-19700101') }}"
         vertex_region: "{{ workload.vertex_region | default('us-central1') }}"
       code: |
@@ -423,6 +428,21 @@ workflow:
             "jfk": ("JFK", "New York", "US"), "newark": ("EWR", "New York", "US"),
             "ewr": ("EWR", "New York", "US"), "lga": ("LGA", "New York", "US"),
             "paris": ("PAR", "Paris", "FR"), "par": ("PAR", "Paris", "FR"),
+            # Widened 2026-08-19: an explicit origin the gazetteer did not know
+            # fell through to the platform default, which rule 2 / F3 forbid
+            # ("Do not overwrite explicit origin with profile origin").
+            "lisbon": ("LIS", "Lisbon", "PT"), "lis": ("LIS", "Lisbon", "PT"),
+            "porto": ("OPO", "Porto", "PT"), "opo": ("OPO", "Porto", "PT"),
+            "madrid": ("MAD", "Madrid", "ES"), "mad": ("MAD", "Madrid", "ES"),
+            "barcelona": ("BCN", "Barcelona", "ES"), "bcn": ("BCN", "Barcelona", "ES"),
+            "rome": ("ROM", "Rome", "IT"), "rom": ("ROM", "Rome", "IT"),
+            "berlin": ("BER", "Berlin", "DE"), "ber": ("BER", "Berlin", "DE"),
+            "amsterdam": ("AMS", "Amsterdam", "NL"), "ams": ("AMS", "Amsterdam", "NL"),
+            "dublin": ("DUB", "Dublin", "IE"), "dub": ("DUB", "Dublin", "IE"),
+            "athens": ("ATH", "Athens", "GR"), "ath": ("ATH", "Athens", "GR"),
+            "istanbul": ("IST", "Istanbul", "TR"), "ist": ("IST", "Istanbul", "TR"),
+            "dubai": ("DXB", "Dubai", "AE"), "dxb": ("DXB", "Dubai", "AE"),
+            "tokyo": ("TYO", "Tokyo", "JP"), "tyo": ("TYO", "Tokyo", "JP"),
             "cdg": ("CDG", "Paris", "FR"), "orly": ("ORY", "Paris", "FR"), "ory": ("ORY", "Paris", "FR"),
             "miami": ("MIA", "Miami", "US"), "mia": ("MIA", "Miami", "US"),
             "london": ("LON", "London", "GB"), "lon": ("LON", "London", "GB"),
@@ -479,6 +499,20 @@ workflow:
                 end = match.group(2) or (date.fromisoformat(start) + timedelta(days=4)).isoformat()
                 return start, end
             return None, None
+
+        # Did the user actually state a RANGE, or did _date_hint derive the
+        # end date?  A derived checkout is right for a hotel stay (a stay
+        # needs one) but must never become a flight `return_date` -- that
+        # turns a one-way ask into a round-trip search the user never
+        # requested, which is the same fabricated-input defect as guessing a
+        # route.  Rule 4 / F4.
+        def _dates_are_explicit_range(text):
+            lowered = text.lower()
+            if re.search(r"20\d\d-\d\d-\d\d\s*(?:to|-|through)\s*20\d\d-\d\d-\d\d", text):
+                return True
+            return any(w in lowered for w in (
+                "return", "returning", "round trip", "round-trip", "roundtrip",
+                "coming back", "come back", "back on", "and back"))
 
         def _party_hint(text):
             lowered = text.lower()
@@ -559,6 +593,7 @@ workflow:
             "_PLACE_CODES": _PLACE_CODES,
             "_resolve_place": _resolve_place,
             "_flight_route": _flight_route,
+            "_dates_are_explicit_range": _dates_are_explicit_range,
         })
 
         slot_state = _normalise_region_fields(_slot_from_loaded(loaded_slot_state))
@@ -571,6 +606,9 @@ workflow:
         if start:
             updates["check_in_date"] = start
             updates["check_out_date"] = end
+            # Provenance, not a date: only an explicitly stated range (or an
+            # explicit return) may drive a flight return_date.
+            updates["dates_explicit_range"] = _dates_are_explicit_range(text)
             try:
                 updates["nights"] = max(1, (date.fromisoformat(end) - date.fromisoformat(start)).days)
             except Exception:
@@ -601,6 +639,7 @@ workflow:
             if "date" in action_id or ("from" in submitted and "to" in submitted):
                 updates["check_in_date"] = submitted.get("from")
                 updates["check_out_date"] = submitted.get("to")
+                updates["dates_explicit_range"] = True
                 updates["nights"] = submitted.get("nights")
             if "party" in action_id or "adults" in submitted:
                 updates["party"] = {
@@ -701,6 +740,81 @@ workflow:
             elif action_id == "edit":
                 updates["trip_confirmed"] = False
 
+        def _platform_origin():
+            # Rule 2 — origin inference.  `default_origin` is the platform's
+            # declared default departure airport, not a guess: it is a workload
+            # key an operator sets, and an explicit origin in the user's message
+            # always overrides it (the caller checks flight_origin first).
+            # Empty => no platform context => the gate below asks for it.
+            return str(default_origin or "").strip().upper()
+
+        def _flight_passengers(party):
+            # Rule 10 — children and lap infants.
+            #   under 2 (24 months)  -> lap infant, no seat
+            #   one lap infant per ticketed adult; any extra infant needs a seat
+            #   2..11                -> child with a seat
+            # Duffel wants passenger objects; an infant without a seat is
+            # `infant_without_seat`, an infant WITH a seat is a normal child
+            # passenger carrying its age.
+            party = party if isinstance(party, dict) else {}
+            adults = max(1, int(party.get("adults") or 1))
+            kids = party.get("children") if isinstance(party.get("children"), list) else []
+            ages = []
+            for k in kids:
+                if isinstance(k, dict) and k.get("age") is not None:
+                    try:
+                        ages.append(int(k["age"]))
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    try:
+                        ages.append(int(k))
+                    except (TypeError, ValueError):
+                        pass
+            pax = [{"type": "adult"} for _ in range(adults)]
+            infants = [a for a in ages if a < 2]
+            seated = [a for a in ages if a >= 2]
+            lap = infants[:adults]                  # one per ticketed adult
+            overflow = infants[adults:]             # must buy a seat
+            for _ in lap:
+                pax.append({"type": "infant_without_seat"})
+            for a in overflow + seated:
+                pax.append({"age": a})
+            return pax, len(lap), len(overflow)
+
+        def _flight_args(origin, destination, departure, state):
+            # Builds the Duffel search arguments from the canonical slots.
+            # Only provider-supported fields are sent; F7 preferences that
+            # Duffel cannot filter on (baggage, fare flexibility, departure
+            # window) stay in slot_state and are NOT claimed as applied.
+            state = state if isinstance(state, dict) else {}
+            f = state.get("flight_filters") if isinstance(state.get("flight_filters"), dict) else {}
+            party = state.get("party") if isinstance(state.get("party"), dict) else {}
+            pax, _lap, _ovf = _flight_passengers(party)
+            args = {
+                "origin": str(origin).upper(),
+                "destination": str(destination).upper(),
+                "departure_date": departure,
+                "adults": max(1, int(party.get("adults") or 1)),
+                "passengers": pax,
+                "cabin_class": f.get("cabin_class") or "economy",
+            }
+            # Trip type.  A return leg is sent only when the user actually
+            # asked for one -- an explicit round trip, or a stated date RANGE.
+            # `check_out_date` alone is not evidence of that: a single date
+            # ("on 2026-10-10") derives a checkout at +4 days for the hotel
+            # side, and sending it as `return_date` silently turned a one-way
+            # ask into a round-trip search priced accordingly.  Same class of
+            # defect as guessing a route (rule 4 / F4).
+            _round_trip = (f.get("trip_type") == "round_trip"
+                           or bool(state.get("dates_explicit_range")))
+            if (f.get("trip_type") != "one_way" and _round_trip
+                    and state.get("check_out_date")):
+                args["return_date"] = state.get("check_out_date")
+            if f.get("max_connections") is not None:
+                args["max_connections"] = int(f["max_connections"])
+            return args
+
         wants_calendar = "show" in lowered_text and ("schedule" in lowered_text or "calendar" in lowered_text)
         wants_order = book_flight_now or book_hotel_now or any(word in lowered_text for word in ("order", "book", "booking", "confirm", "purchase"))
         # HotelBeds replaces the removed Amadeus hotels path. A hotel-intent
@@ -718,6 +832,27 @@ workflow:
         # HotelBeds, so flight words are checked independently; the elif chain
         # below gives hotels/transfers/activities priority when both appear.
         wants_flight = any(word in lowered_text for word in ("flight", "flights", "fly", "flying", "airfare", "airline", "plane", "air ticket"))
+
+        # F9 -- CORRECTIONS AND PREFERENCE CHANGES.  "actually make it
+        # business class" carries no flight keyword, so keyword matching alone
+        # dropped the turn into the guided itinerary flow and asked for
+        # travellers -- losing an established flight context and the search
+        # the user was correcting.  A thread that already has a flight route
+        # stays a flight thread when the turn only adjusts a flight-relevant
+        # slot, and does NOT when the user genuinely switches subject (hotels,
+        # activities, transfers, booking) -- those branches sit above this one
+        # and match on their own keywords.
+        _flight_context = bool(
+            (slot_state.get("flight_origin") or slot_state.get("flight_destination"))
+            and slot_state.get("check_in_date"))
+        _flight_adjustment = any(word in lowered_text for word in (
+            "business class", "first class", "premium economy", "economy",
+            "nonstop", "non-stop", "direct", "layover", "stopover", "connection",
+            "cheaper", "earlier", "later", "morning", "evening", "red-eye",
+            "one way", "one-way", "round trip", "round-trip", "carry-on",
+            "checked bag", "baggage", "refundable", "aisle", "window"))
+        if _flight_context and _flight_adjustment and not wants_flight:
+            wants_flight = True
 
         # Resolve a flight route ("from NYC to Paris") so a direct flight
         # request fills origin + destination + region in one turn. The parsed
@@ -899,6 +1034,27 @@ workflow:
                 slot_updates = {}
             if not isinstance(slot_updates, dict):
                 raise ValueError("slot_updates is not an object")
+            # The model reliably uses provider-ish names for a few slots.
+            # Rename them rather than rejecting the payload: a single aliased
+            # key used to fail validation and discard EVERY other slot in the
+            # same turn, which is how an explicit origin went missing and the
+            # platform default silently won (spec rule 2 / F3 forbid that).
+            _SLOT_ALIASES = {
+                "departure_date": "check_in_date",
+                "return_date": "check_out_date",
+                "depart_date": "check_in_date",
+                "start_date": "check_in_date",
+                "end_date": "check_out_date",
+                "origin": "flight_origin",
+                "destination": "flight_destination",
+                "travelers": "party",
+                "passengers": "party",
+            }
+            for _from, _to in _SLOT_ALIASES.items():
+                if _from in slot_updates and _to not in slot_updates:
+                    slot_updates[_to] = slot_updates.pop(_from)
+                elif _from in slot_updates:
+                    slot_updates.pop(_from)
             unknown = [k for k in slot_updates if k not in LLM_ALLOWED_SLOTS]
             if unknown:
                 # Reject rather than drop: a model that names slots the planner
@@ -1140,6 +1296,110 @@ workflow:
         else:
             llm_error = "disabled by llm_extraction_enabled"
 
+        # ── Flights use-case spec (owner 2026-08-19) ─────────────────────
+        # Rules 1/4/6/7/9/10 + F5/F7/F8.  All of this is deterministic; the
+        # LLM contributes slots, it does not decide any of these.
+
+        # Rule 1 — trip length -> a flight-radius RANKING HINT.  The spec is
+        # explicit that this is a hint, never a filter: it orders candidates,
+        # it never removes one.
+        def _radius_hint(nights_value, low_text):
+            try:
+                n = int(nights_value) if nights_value is not None else None
+            except (TypeError, ValueError):
+                n = None
+            if n is None:
+                if "weekend" in low_text:
+                    n = 2
+                elif "few days" in low_text or "long weekend" in low_text:
+                    n = 4
+                elif "week" in low_text:
+                    n = 7
+            if n is None:
+                return None
+            if n <= 2:
+                return 2
+            if n <= 5:
+                return 4
+            if n <= 9:
+                return 9
+            return None          # 10-14+ days: no default cap
+
+        # F7 — hard route/fare constraints.  Only the ones Duffel accepts as
+        # search parameters are passed to the provider; the rest are stored as
+        # preferences and NOT claimed (spec: "Do not claim baggage or
+        # flexibility without fare-rule data").
+        # Rule 1 — store the hint so the ranker and the UI can see it.  It is
+        # recorded as a hint, never applied as a filter.
+        _hint = _radius_hint(next_state.get("nights"), lowered_text)
+        if _hint is not None and next_state.get("max_flight_hours") != _hint:
+            updates["max_flight_hours"] = _hint
+            next_state["max_flight_hours"] = _hint
+
+        flt = next_state.get("flight_filters") if isinstance(next_state.get("flight_filters"), dict) else {}
+        flt = dict(flt)
+        if any(w in lowered_text for w in ("nonstop", "non-stop", "direct flight", "no layover", "no stops")):
+            flt["max_connections"] = 0
+        elif "one layover" in lowered_text or "one stop" in lowered_text:
+            flt["max_connections"] = 1
+        for _cab, _kw in (("business", ("business class", "business-class")),
+                          ("first", ("first class",)),
+                          ("premium_economy", ("premium economy",)),
+                          ("economy", ("economy",))):
+            if any(k in lowered_text for k in _kw):
+                flt["cabin_class"] = _cab
+                break
+        if "checked bag" in lowered_text or "checked baggage" in lowered_text:
+            flt["baggage"] = "checked"          # preference only — see below
+        elif "carry-on" in lowered_text or "carry on" in lowered_text:
+            flt["baggage"] = "carry_on"
+        if "flexible" in lowered_text and "fare" in lowered_text:
+            flt["fare_flexibility"] = "flexible"
+        if "morning" in lowered_text:
+            flt["depart_window"] = "morning"
+        elif "evening" in lowered_text:
+            flt["depart_window"] = "evening"
+        if "one-way" in lowered_text or "one way" in lowered_text or "not back" in lowered_text:
+            flt["trip_type"] = "one_way"
+        elif "round trip" in lowered_text or "round-trip" in lowered_text or "return" in lowered_text:
+            flt["trip_type"] = "round_trip"
+        if flt:
+            updates["flight_filters"] = flt
+            next_state["flight_filters"] = flt
+
+        # F5 — budget cap.  Duffel has no price parameter, so this is a
+        # post-filter on returned fares plus a controlled relaxation offer.
+        _bm = re.search(r"(?:under|below|less than|max|budget of)\s*[€$£]?\s*(\d{2,5})", lowered_text)
+        if not _bm:
+            _bm = re.search(r"[€$£]\s*(\d{2,5})", lowered_text)
+        if _bm:
+            _low = lowered_text
+            _cur = ("EUR" if ("€" in text or "eur" in _low)
+                    else "GBP" if ("£" in text or "gbp" in _low)
+                    else "USD")
+            budget = {"cap": int(_bm.group(1)), "currency": _cur,
+                      "basis": "total" if "for everyone" in lowered_text or "total" in lowered_text else "per_person"}
+            updates["budget"] = budget
+            next_state["budget"] = budget
+        if any(w in lowered_text for w in ("cheapest", "price matters", "lowest fare", "affordable", "budget ticket")):
+            _b = dict(next_state.get("budget") or {})
+            _b["priority"] = "price"
+            updates["budget"] = _b
+            next_state["budget"] = _b
+
+        # Rule 8 — stale invalidation.  Any change to a search-affecting slot
+        # invalidates prior offers and the selection; carrying old prices
+        # forward is what the spec forbids in F9.
+        _STALE_KEYS = ("region", "flight_origin", "flight_destination",
+                       "check_in_date", "check_out_date", "party", "budget",
+                       "flight_filters")
+        if any(k in updates for k in _STALE_KEYS):
+            for _k in ("flight_search_results", "flight_offers", "flight_groups",
+                       "picked_flight_offer_id", "order_id"):
+                if next_state.get(_k) is not None:
+                    next_state[_k] = None
+                    updates[_k] = None
+
         region_ready = isinstance(next_state.get("region"), dict)
         dates_ready = bool(next_state.get("check_in_date") and next_state.get("check_out_date"))
         party_ready = isinstance(next_state.get("party"), dict)
@@ -1300,20 +1560,35 @@ workflow:
             # places default so an explicit flight ask is never shown places.
             fl_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
             fl_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
-            fl_departure = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
-            fl_destination = next_state.get("flight_destination") or fl_region.get("city_code") or "PAR"
-            fl_origin = next_state.get("flight_origin") or "NYC"
-            tool_requests.append({
-                "tool": "mcp/duffel.search_offers",
-                "arguments": {
-                    "origin": fl_origin,
-                    "destination": fl_destination,
-                    "departure_date": fl_departure,
-                    "adults": int(fl_party.get("adults") or 1),
-                    "cabin_class": "economy",
-                },
-            })
-            render_intent = {"kind": "show_flights"}
+            fl_departure = next_state.get("check_in_date")
+            fl_destination = next_state.get("flight_destination") or fl_region.get("city_code")
+            fl_origin = next_state.get("flight_origin") or _platform_origin()
+
+            # Rule 4 — REQUIRED-INPUT GATING.  This branch used to fabricate
+            # every missing input (origin "NYC", destination "PAR",
+            # departure = today+30) and search anyway, so "find flights to
+            # Paris" silently searched dates the user never chose and
+            # "flights for July 10-14" silently searched Paris.  The spec
+            # forbids exactly that (rule 4; F2 "do not search for a
+            # destination alone"; F3/F4 "do not guess dates", "do not invent
+            # a destination").  Ask for the blocking input instead.
+            _missing_flight = []
+            if not fl_origin:
+                _missing_flight.append("origin")
+            if not fl_destination:
+                _missing_flight.append("destination")
+            if not fl_departure:
+                _missing_flight.append("dates")
+            if _missing_flight:
+                render_intent = {"kind": "collect_missing", "missing": _missing_flight,
+                                 "blocking": "flight_search"}
+            else:
+                tool_requests.append({
+                    "tool": "mcp/duffel.search_offers",
+                    "arguments": _flight_args(fl_origin, fl_destination, fl_departure,
+                                              next_state),
+                })
+                render_intent = {"kind": "show_flights"}
         elif picked_hotel and wants_order and picked_hotel_rate_key and not next_state.get("hotel_booking_ref"):
             # noetl/ai-meta#162 — hotel booking, mirroring the Duffel
             # create_order branch. The rate_key captured at search time drives
@@ -1350,17 +1625,24 @@ workflow:
             # party) and no offers yet. Honor a previously-parsed origin /
             # destination when present, else fall back to the home-metro
             # default (SFO) and the region city code.
-            tool_requests.append({
-                "tool": "mcp/duffel.search_offers",
-                "arguments": {
-                    "origin": next_state.get("flight_origin") or "SFO",
-                    "destination": next_state.get("flight_destination") or next_state["region"].get("city_code") or "MIA",
-                    "departure_date": next_state.get("check_in_date"),
-                    "adults": next_state.get("party", {}).get("adults", 1),
-                    "cabin_class": "economy",
-                },
-            })
-            render_intent = {"kind": "show_flights"}
+            _gf_origin = next_state.get("flight_origin") or _platform_origin()
+            _gf_dest = (next_state.get("flight_destination")
+                        or next_state["region"].get("city_code"))
+            if not _gf_origin or not _gf_dest:
+                # Same gate as the explicit-intent branch: the guided flow had
+                # its own fabricated fallbacks ("SFO" / "MIA").
+                render_intent = {"kind": "collect_missing",
+                                 "missing": ([] if _gf_origin else ["origin"])
+                                            + ([] if _gf_dest else ["destination"]),
+                                 "blocking": "flight_search"}
+            else:
+                tool_requests.append({
+                    "tool": "mcp/duffel.search_offers",
+                    "arguments": _flight_args(_gf_origin, _gf_dest,
+                                              next_state.get("check_in_date"),
+                                              next_state),
+                })
+                render_intent = {"kind": "show_flights"}
         elif picked_flight and view_flight_now:
             render_intent = {"kind": "flight_detail"}
         elif picked_flight and view_order_now and next_state.get("order_id"):
@@ -2442,13 +2724,26 @@ workflow:
             return_date = _text(args.get("return_date") or args.get("returnDate"))
             if return_date:
                 slices.append({"origin": destination, "destination": origin, "departure_date": return_date})
+            # F8 — honour an explicit passenger mix (children + lap infants
+            # per rule 10) when the caller supplies one; fall back to N adults.
+            _pax = args.get("passengers")
+            if not (isinstance(_pax, list) and _pax):
+                _pax = [{"type": "adult"} for _ in range(adults)]
             payload = {
                 "data": {
                     "slices": slices,
-                    "passengers": [{"type": "adult"} for _ in range(adults)],
+                    "passengers": _pax,
                     "cabin_class": cabin,
                 }
             }
+            # F7 — nonstop / max one stop.  Duffel accepts this as a search
+            # parameter, so it is a real filter rather than a post-filter.
+            _mc = args.get("max_connections")
+            if _mc is not None:
+                try:
+                    payload["data"]["max_connections"] = max(0, int(_mc))
+                except (TypeError, ValueError):
+                    pass
             ok, status_code, body = _request("POST", "/air/offer_requests", payload=payload, params={"return_offers": "true"})
             data = body.get("data") if isinstance(body, dict) else {}
             offers = _as_list(data.get("offers") if isinstance(data, dict) else [])
@@ -3134,13 +3429,26 @@ workflow:
             return_date = _text(args.get("return_date") or args.get("returnDate"))
             if return_date:
                 slices.append({"origin": destination, "destination": origin, "departure_date": return_date})
+            # F8 — honour an explicit passenger mix (children + lap infants
+            # per rule 10) when the caller supplies one; fall back to N adults.
+            _pax = args.get("passengers")
+            if not (isinstance(_pax, list) and _pax):
+                _pax = [{"type": "adult"} for _ in range(adults)]
             payload = {
                 "data": {
                     "slices": slices,
-                    "passengers": [{"type": "adult"} for _ in range(adults)],
+                    "passengers": _pax,
                     "cabin_class": cabin,
                 }
             }
+            # F7 — nonstop / max one stop.  Duffel accepts this as a search
+            # parameter, so it is a real filter rather than a post-filter.
+            _mc = args.get("max_connections")
+            if _mc is not None:
+                try:
+                    payload["data"]["max_connections"] = max(0, int(_mc))
+                except (TypeError, ValueError):
+                    pass
             ok, status_code, body = _request("POST", "/air/offer_requests", payload=payload, params={"return_offers": "true"})
             data = body.get("data") if isinstance(body, dict) else {}
             offers = _as_list(data.get("offers") if isinstance(data, dict) else [])
@@ -3679,6 +3987,122 @@ workflow:
                 "segments": [_segment_card(segment) for segment in segments],
             }
 
+        def _radius_hint_state(state):
+            # Rule 1 — same mapping as the extraction step, applied to stored
+            # nights.  Ranking hint only.
+            try:
+                n = int(state.get("nights")) if state.get("nights") is not None else None
+            except (TypeError, ValueError):
+                n = None
+            if n is None:
+                return None
+            if n <= 2:
+                return 2
+            if n <= 5:
+                return 4
+            if n <= 9:
+                return 9
+            return None
+
+        def _offer_price(card):
+            try:
+                return float((card.get("price") or {}).get("total"))
+            except (TypeError, ValueError):
+                return None
+
+        def _iso_minutes(dur):
+            # "PT5H30M" -> 330.  Returns None when unparseable so an offer with
+            # no duration never wins "fastest" by accident.
+            m = re.match(r"^PT(?:(\d+)H)?(?:(\d+)M)?$", str(dur or "").strip().upper())
+            if not m or not (m.group(1) or m.group(2)):
+                return None
+            return int(m.group(1) or 0) * 60 + int(m.group(2) or 0)
+
+        def _offer_minutes(card):
+            total = 0
+            got = False
+            for it in (card.get("itineraries") or []):
+                mins = _iso_minutes(it.get("duration"))
+                if mins is not None:
+                    total += mins
+                    got = True
+            if not got:
+                return _iso_minutes(card.get("duration"))
+            return total
+
+        def _rank_offer_groups(cards, state):
+            # Rule 6 — Cheapest / Fastest / Best value on every flight result.
+            #
+            # Best value is NOT the absolute cheapest (the spec says so
+            # explicitly).  It is chosen from the stronger fast/convenient
+            # candidates: take the faster half of the set (min 3), then pick
+            # the best price-per-hour among those.  Ties break toward fewer
+            # stops.  Because the pool excludes the slow tail, best-value can
+            # only coincide with cheapest when the cheapest fare is also
+            # genuinely fast — which is the intended meaning.
+            #
+            # Rule 1's radius hint and rule 9's layover preference are applied
+            # here as ORDERING nudges, never as filters: nothing is removed
+            # from the result set.
+            cards = [c for c in (cards or []) if isinstance(c, dict)]
+            if not cards:
+                return {"cheapest": None, "fastest": None, "best_value": None,
+                        "radius_hint_hours": None, "considered": 0}
+            state = state if isinstance(state, dict) else {}
+            hint = _radius_hint_state(state)
+
+            priced = [c for c in cards if _offer_price(c) is not None]
+            timed = [c for c in cards if _offer_minutes(c) is not None]
+            cheapest = min(priced, key=_offer_price) if priced else None
+            # "Fastest" = shortest total travel time, tie-broken by fewer stops.
+            fastest = min(timed, key=lambda c: (_offer_minutes(c), int(c.get("stops") or 0))) if timed else None
+
+            best = None
+            pool = [c for c in timed if _offer_price(c) is not None]
+            if pool:
+                pool.sort(key=lambda c: (_offer_minutes(c), int(c.get("stops") or 0)))
+                keep = max(3, (len(pool) + 1) // 2)
+                strong = pool[:keep]
+                # Rule 1: prefer candidates inside the duration hint when the
+                # hint exists and at least one candidate satisfies it.
+                if hint:
+                    inside = [c for c in strong if (_offer_minutes(c) or 0) <= hint * 60]
+                    if inside:
+                        strong = inside
+                # Rule 9: on short trips avoid connections when a nonstop is
+                # among the strong candidates.
+                nights = state.get("nights")
+                try:
+                    nights = int(nights) if nights is not None else None
+                except (TypeError, ValueError):
+                    nights = None
+                if nights is not None and nights <= 5:
+                    nonstop = [c for c in strong if int(c.get("stops") or 0) == 0]
+                    if nonstop:
+                        strong = nonstop
+                best = min(strong, key=lambda c: (
+                    _offer_price(c) / max(1.0, (_offer_minutes(c) or 60) / 60.0),
+                    int(c.get("stops") or 0),
+                ))
+
+            def _ref(c):
+                if not c:
+                    return None
+                return {
+                    "offer_id": c.get("offer_id"),
+                    "price": (c.get("price") or {}).get("total"),
+                    "currency": (c.get("price") or {}).get("currency"),
+                    "duration_minutes": _offer_minutes(c),
+                    "stops": int(c.get("stops") or 0),
+                }
+            return {
+                "cheapest": _ref(cheapest),
+                "fastest": _ref(fastest),
+                "best_value": _ref(best),
+                "radius_hint_hours": hint,
+                "considered": len(cards),
+            }
+
         def _offer_card(offer):
             itineraries = [_itinerary_card(item) for item in offer.get("itineraries", [])] if isinstance(offer.get("itineraries"), list) else []
             carriers = offer.get("carriers") if isinstance(offer.get("carriers"), list) else offer.get("validatingAirlineCodes") if isinstance(offer.get("validatingAirlineCodes"), list) else []
@@ -4016,8 +4440,34 @@ workflow:
             for offer in offers[:10]:
                 if isinstance(offer, dict):
                     offer_ids.append(offer.get("id") or offer.get("offer_id"))
+            # F5 — budget cap is a POST-filter: Duffel has no price parameter,
+            # so the cap is applied to what the provider actually returned.
+            # Nothing is invented and nothing is silently dropped — the
+            # excluded count is reported so the renderer can offer a
+            # relaxation instead of pretending the cap matched.
+            _budget = slot_state.get("budget") if isinstance(slot_state.get("budget"), dict) else {}
+            _cap_val = _budget.get("cap")
+            _over_budget = 0
+            if _cap_val:
+                _kept = []
+                for _c in normalised_offers:
+                    if _offer_price(_c) is not None and _offer_price(_c) > float(_cap_val):
+                        _over_budget += 1
+                    else:
+                        _kept.append(_c)
+                # If NOTHING meets the cap the list becomes empty on purpose:
+                # the renderer then raises an error_card naming the budget as
+                # the blocking constraint and offers `raise_budget`.  Keeping
+                # the over-budget fares here would silently ignore a hard
+                # constraint, which F5 and rule 7 both forbid.
+                normalised_offers = _kept
+                offer_ids = [c.get("offer_id") for c in _kept]
+
+            groups = _rank_offer_groups(normalised_offers, slot_state)
             next_state["flight_search_results"] = offer_ids
             next_state["flight_offers"] = normalised_offers
+            next_state["flight_groups"] = groups
+            next_state["flight_over_budget_count"] = _over_budget
             next_state["total_results_seen"] = len(offers)
         elif first_tool == "mcp/duffel.create_order":
             order = _as_dict(inner.get("order") or inner)
@@ -4108,6 +4558,8 @@ workflow:
             summary["places"] = normalised_places
         elif first_tool == "mcp/duffel.search_offers":
             summary["offers"] = normalised_offers
+            summary["groups"] = groups
+            summary["over_budget_excluded"] = _over_budget
         elif first_tool == "mcp/duffel.create_order":
             summary["order"] = normalised_order
         elif first_tool == "mcp/hotelbeds.search_hotels":
@@ -4705,33 +5157,84 @@ workflow:
             bot_message = "Here are transfer options from HotelBeds. Pick one for your trip."
         elif intent == "show_flights":
             offers = tool_summary.get("offers") if isinstance(tool_summary.get("offers"), list) else []
-            flight_items = offers[:10] or [{
-                "offer_id": "synthetic-offer-1",
-                "price": {"total": "220.00", "currency": "USD"},
-                "itineraries": [{"duration": "PT5H30M", "segments": [{
-                    "departure": {"iata": "SFO", "at": f"{slot_state.get('check_in_date', default_from)}T08:00:00"},
-                    "arrival": {"iata": slot_state.get("region", {}).get("city_code", "MIA"), "at": f"{slot_state.get('check_in_date', default_from)}T16:00:00"},
-                    "carrier": "DU", "flight_number": "100", "duration": "PT5H30M", "stops": 0,
-                }]}],
-                "carriers": ["DU"],
-                "duration": "PT5H30M",
-                "stops": 0,
-                "validating_airline": "DU",
-                "ctas": ["view_details", "book_this"],
-            }]
-            # noetl/ai-meta#155 (P3) — total_count + emphasis must reflect the
-            # real offer set, not a hardcoded 1. With 10 live Duffel offers the
-            # widget previously claimed total_count=1 and emphasised a synthetic
-            # offer_id. Derive both from the rendered items.
-            emphasis_id = str(flight_items[0].get("offer_id") or "synthetic-offer-1")
-            widgets.append(_env("flight_list", "default", {
-                "title": "Flight options",
-                "items": flight_items,
-                "emphasis_offer_id": emphasis_id,
-                "total_count": len(offers) or 1,
-                "currency": "USD",
-            }))
-            bot_message = "Here is the first flight batch. Book one to create a Duffel test order."
+            flight_items = offers[:10]
+
+            # Rule 7 / F10 — NEVER fabricate inventory.  This branch used to
+            # fall back to a synthetic offer with a hardcoded $220 price when
+            # the provider returned nothing, so an empty or failed Duffel
+            # response showed the user a flight that does not exist.  The spec
+            # forbids it twice over ("Do not invent inventory"; "Do not
+            # fabricate flights, prices, or availability"), and it is the kind
+            # of silent wrongness that reads as success.
+            #
+            # An empty result is now an error_card that names the blocking
+            # constraint and offers only controlled relaxations for the user to
+            # choose — it never applies one silently.
+            if not flight_items:
+                _f = slot_state.get("flight_filters") if isinstance(slot_state.get("flight_filters"), dict) else {}
+                _b = slot_state.get("budget") if isinstance(slot_state.get("budget"), dict) else {}
+                _excluded = tool_summary.get("over_budget_excluded") or 0
+                _blocking = []
+                _alts = []
+                if _b.get("cap") and _excluded:
+                    _blocking.append("budget %s %s" % (_b.get("cap"), _b.get("currency") or ""))
+                    _alts.append("raise_budget")
+                if _f.get("max_connections") == 0:
+                    _blocking.append("nonstop only")
+                    _alts.append("allow_one_stop")
+                if _f.get("cabin_class") and _f.get("cabin_class") != "economy":
+                    _blocking.append(str(_f.get("cabin_class")).replace("_", " "))
+                    _alts.append("try_economy")
+                _alts += ["flexible_dates", "nearby_airports"]
+                _reason = ("No flights matched " + ", ".join(_blocking) + "."
+                           if _blocking else
+                           "The airline search returned no flights for this route and date.")
+                widgets.append(_env("error_card", "default", {
+                    "title": "No matching flights",
+                    "message": _reason + " I have kept your route, dates and travellers — "
+                               "pick one of these and I will re-run the search.",
+                    "reason_code": "no_flight_results",
+                    "blocking_constraints": _blocking,
+                    "alternatives": _alts,
+                    "ctas": _alts,
+                }))
+                bot_message = _reason + " Nothing was changed automatically."
+            else:
+                # noetl/ai-meta#155 (P3) — total_count + emphasis reflect the
+                # real offer set, not a hardcoded 1.
+                _groups = tool_summary.get("groups") if isinstance(tool_summary.get("groups"), dict) else {}
+                _bv = (_groups.get("best_value") or {}) if _groups else {}
+                # Rule 6 — emphasise Best value, not the first row.
+                emphasis_id = str(_bv.get("offer_id") or flight_items[0].get("offer_id") or "")
+                _cur = ((flight_items[0].get("price") or {}).get("currency")) or "USD"
+                widgets.append(_env("flight_list", "default", {
+                    "title": "Flight options",
+                    "items": flight_items,
+                    "emphasis_offer_id": emphasis_id,
+                    "total_count": len(offers) or len(flight_items),
+                    "currency": _cur,
+                    # Rule 6 — the three result groups travel with the widget so
+                    # the SPA can label rows without re-deriving the ranking.
+                    "groups": _groups,
+                }))
+                def _grp_line(label, ref):
+                    if not ref:
+                        return None
+                    mins = ref.get("duration_minutes")
+                    dur = ("%dh%02dm" % (mins // 60, mins % 60)) if mins else "duration n/a"
+                    return "%s %s %s · %s · %s" % (
+                        label, ref.get("price") or "?", ref.get("currency") or "",
+                        dur,
+                        "nonstop" if not ref.get("stops") else "%d stop(s)" % ref.get("stops"))
+                _lines = [x for x in (
+                    _grp_line("Cheapest:", _groups.get("cheapest")),
+                    _grp_line("Fastest:", _groups.get("fastest")),
+                    _grp_line("Best value:", _groups.get("best_value")),
+                ) if x]
+                _excl = tool_summary.get("over_budget_excluded") or 0
+                bot_message = " ".join(_lines) if _lines else "Here are the flight options."
+                if _excl:
+                    bot_message += " (%d fare(s) above your budget were excluded.)" % _excl
         elif intent == "flight_detail":
             offers = slot_state.get("flight_offers") if isinstance(slot_state.get("flight_offers"), list) else []
             picked_offer_id = str(slot_state.get("picked_flight_offer_id") or "")

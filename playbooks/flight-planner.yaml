@@ -1219,27 +1219,32 @@ workflow:
             bot_message = "I found a destination anchor. Next I need dates and travellers."
         elif intent == "show_flights":
             offers = tool_summary.get("offers") if isinstance(tool_summary.get("offers"), list) else []
-            widgets.append(_env("flight_list", "default", {
-                "title": "Flight options",
-                "items": offers[:10] or [{
-                    "offer_id": "synthetic-offer-1",
-                    "price": {"total": "220.00", "currency": "USD"},
-                    "itineraries": [{"duration": "PT5H30M", "segments": [{
-                        "departure": {"iata": "SFO", "at": f"{slot_state.get('check_in_date', default_from)}T08:00:00"},
-                        "arrival": {"iata": slot_state.get("region", {}).get("city_code", "MIA"), "at": f"{slot_state.get('check_in_date', default_from)}T16:00:00"},
-                        "carrier": "DU", "flight_number": "100", "duration": "PT5H30M", "stops": 0,
-                    }]}],
-                    "carriers": ["DU"],
-                    "duration": "PT5H30M",
-                    "stops": 0,
-                    "validating_airline": "DU",
-                    "ctas": ["view_details", "book_this"],
-                }],
-                "emphasis_offer_id": "synthetic-offer-1",
-                "total_count": 1,
-                "currency": "USD",
-            }))
-            bot_message = "Here is the first flight batch. Book one to create a Duffel test order."
+            flight_items = offers[:10]
+            # Flights spec rule 7 / F10 — never fabricate inventory.  This
+            # branch previously fell back to a synthetic offer with a hardcoded
+            # $220 price, so an empty provider response showed a flight that
+            # does not exist.  Same defect as the itinerary planner carried.
+            if not flight_items:
+                widgets.append(_env("error_card", "default", {
+                    "title": "No matching flights",
+                    "message": "The airline search returned no flights for this route "
+                               "and date. Your route, dates and travellers are unchanged — "
+                               "try flexible dates, nearby airports, or allowing a stop.",
+                    "reason_code": "no_flight_results",
+                    "alternatives": ["flexible_dates", "nearby_airports", "allow_one_stop"],
+                    "ctas": ["flexible_dates", "nearby_airports", "allow_one_stop"],
+                }))
+                bot_message = ("No flights came back for that route and date. "
+                               "Nothing was changed automatically.")
+            else:
+                widgets.append(_env("flight_list", "default", {
+                    "title": "Flight options",
+                    "items": flight_items,
+                    "emphasis_offer_id": str(flight_items[0].get("offer_id") or ""),
+                    "total_count": len(offers),
+                    "currency": ((flight_items[0].get("price") or {}).get("currency")) or "USD",
+                }))
+                bot_message = "Here is the first flight batch. Book one to create a Duffel test order."
         elif intent == "flight_detail":
             offers = slot_state.get("flight_offers") if isinstance(slot_state.get("flight_offers"), list) else []
             picked_offer_id = str(slot_state.get("picked_flight_offer_id") or "")
