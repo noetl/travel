@@ -500,6 +500,20 @@ workflow:
                 return start, end
             return None, None
 
+        # Did the user actually state a RANGE, or did _date_hint derive the
+        # end date?  A derived checkout is right for a hotel stay (a stay
+        # needs one) but must never become a flight `return_date` -- that
+        # turns a one-way ask into a round-trip search the user never
+        # requested, which is the same fabricated-input defect as guessing a
+        # route.  Rule 4 / F4.
+        def _dates_are_explicit_range(text):
+            lowered = text.lower()
+            if re.search(r"20\d\d-\d\d-\d\d\s*(?:to|-|through)\s*20\d\d-\d\d-\d\d", text):
+                return True
+            return any(w in lowered for w in (
+                "return", "returning", "round trip", "round-trip", "roundtrip",
+                "coming back", "come back", "back on", "and back"))
+
         def _party_hint(text):
             lowered = text.lower()
             adults = 2 if "couple" in lowered else None
@@ -579,6 +593,7 @@ workflow:
             "_PLACE_CODES": _PLACE_CODES,
             "_resolve_place": _resolve_place,
             "_flight_route": _flight_route,
+            "_dates_are_explicit_range": _dates_are_explicit_range,
         })
 
         slot_state = _normalise_region_fields(_slot_from_loaded(loaded_slot_state))
@@ -591,6 +606,9 @@ workflow:
         if start:
             updates["check_in_date"] = start
             updates["check_out_date"] = end
+            # Provenance, not a date: only an explicitly stated range (or an
+            # explicit return) may drive a flight return_date.
+            updates["dates_explicit_range"] = _dates_are_explicit_range(text)
             try:
                 updates["nights"] = max(1, (date.fromisoformat(end) - date.fromisoformat(start)).days)
             except Exception:
@@ -621,6 +639,7 @@ workflow:
             if "date" in action_id or ("from" in submitted and "to" in submitted):
                 updates["check_in_date"] = submitted.get("from")
                 updates["check_out_date"] = submitted.get("to")
+                updates["dates_explicit_range"] = True
                 updates["nights"] = submitted.get("nights")
             if "party" in action_id or "adults" in submitted:
                 updates["party"] = {
@@ -780,12 +799,17 @@ workflow:
                 "passengers": pax,
                 "cabin_class": f.get("cabin_class") or "economy",
             }
-            # Trip type: only send a return leg when the trip is actually a
-            # round trip.  F3 forbids defaulting to round-trip when one-way is
-            # explicit; the inverse (silently dropping the return) is equally
-            # wrong, so the return date is sent whenever we have one and the
-            # user has not said one-way.
-            if f.get("trip_type") != "one_way" and state.get("check_out_date"):
+            # Trip type.  A return leg is sent only when the user actually
+            # asked for one -- an explicit round trip, or a stated date RANGE.
+            # `check_out_date` alone is not evidence of that: a single date
+            # ("on 2026-10-10") derives a checkout at +4 days for the hotel
+            # side, and sending it as `return_date` silently turned a one-way
+            # ask into a round-trip search priced accordingly.  Same class of
+            # defect as guessing a route (rule 4 / F4).
+            _round_trip = (f.get("trip_type") == "round_trip"
+                           or bool(state.get("dates_explicit_range")))
+            if (f.get("trip_type") != "one_way" and _round_trip
+                    and state.get("check_out_date")):
                 args["return_date"] = state.get("check_out_date")
             if f.get("max_connections") is not None:
                 args["max_connections"] = int(f["max_connections"])
@@ -808,6 +832,27 @@ workflow:
         # HotelBeds, so flight words are checked independently; the elif chain
         # below gives hotels/transfers/activities priority when both appear.
         wants_flight = any(word in lowered_text for word in ("flight", "flights", "fly", "flying", "airfare", "airline", "plane", "air ticket"))
+
+        # F9 -- CORRECTIONS AND PREFERENCE CHANGES.  "actually make it
+        # business class" carries no flight keyword, so keyword matching alone
+        # dropped the turn into the guided itinerary flow and asked for
+        # travellers -- losing an established flight context and the search
+        # the user was correcting.  A thread that already has a flight route
+        # stays a flight thread when the turn only adjusts a flight-relevant
+        # slot, and does NOT when the user genuinely switches subject (hotels,
+        # activities, transfers, booking) -- those branches sit above this one
+        # and match on their own keywords.
+        _flight_context = bool(
+            (slot_state.get("flight_origin") or slot_state.get("flight_destination"))
+            and slot_state.get("check_in_date"))
+        _flight_adjustment = any(word in lowered_text for word in (
+            "business class", "first class", "premium economy", "economy",
+            "nonstop", "non-stop", "direct", "layover", "stopover", "connection",
+            "cheaper", "earlier", "later", "morning", "evening", "red-eye",
+            "one way", "one-way", "round trip", "round-trip", "carry-on",
+            "checked bag", "baggage", "refundable", "aisle", "window"))
+        if _flight_context and _flight_adjustment and not wants_flight:
+            wants_flight = True
 
         # Resolve a flight route ("from NYC to Paris") so a direct flight
         # request fills origin + destination + region in one turn. The parsed
