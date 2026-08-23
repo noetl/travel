@@ -1481,75 +1481,131 @@ workflow:
         # "hotel" here is only the destination of the ride.
         elif wants_hotel and not wants_transfers and region_ready:
             # HotelBeds availability search (the slot Amadeus hotels vacated).
-            # Geolocation is resolved provider-side from the city/coords; stay
-            # dates default forward when the user hasn't pinned them yet.
+            # Geolocation is resolved provider-side from the city/coords.
+            #
+            # noetl/ai-meta#290 — REQUIRED-INPUT GATING.  Stay dates used to
+            # default to `today+30` for four nights, so "hotels in Paris"
+            # searched — and priced — a stay the user never asked for, then
+            # presented those rates as theirs.  A hotel rate is meaningless
+            # without the dates it applies to, so this is the same fabricated-
+            # input defect as the flight branch's `today+30` (#289): the answer
+            # is confident, plausible and about the wrong trip.
             hotel_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
-            hotel_check_in = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
-            try:
-                hotel_check_out = next_state.get("check_out_date") or (date.fromisoformat(hotel_check_in) + timedelta(days=4)).isoformat()
-            except Exception:
-                hotel_check_out = (date.today() + timedelta(days=34)).isoformat()
-            hotel_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
-            tool_requests.append({
-                "tool": "mcp/hotelbeds.search_hotels",
-                "arguments": {
-                    "city": hotel_region.get("label", ""),
-                    "city_code": hotel_region.get("city_code", ""),
-                    "check_in": hotel_check_in,
-                    "check_out": hotel_check_out,
-                    "adults": int(hotel_party.get("adults") or 1),
-                    "rooms": int(hotel_party.get("rooms") or 1),
-                    "children": len(hotel_party.get("children") or []),
-                    "radius": 20,
-                },
-            })
-            render_intent = {"kind": "show_hotels"}
+            hotel_check_in = next_state.get("check_in_date")
+            hotel_check_out = next_state.get("check_out_date")
+            if not (hotel_check_in and hotel_check_out):
+                render_intent = {"kind": "collect_missing", "missing": ["dates"],
+                                 "blocking": "hotel_search"}
+                tool_requests = []
+            else:
+                hotel_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+                tool_requests.append({
+                    "tool": "mcp/hotelbeds.search_hotels",
+                    "arguments": {
+                        "city": hotel_region.get("label", ""),
+                        "city_code": hotel_region.get("city_code", ""),
+                        "check_in": hotel_check_in,
+                        "check_out": hotel_check_out,
+                        "adults": int(hotel_party.get("adults") or 1),
+                        "rooms": int(hotel_party.get("rooms") or 1),
+                        "children": len(hotel_party.get("children") or []),
+                        "radius": 20,
+                    },
+                })
+                render_intent = {"kind": "show_hotels"}
         elif wants_transfers and region_ready:
-            # HotelBeds Transfers availability. Airport (IATA) -> city centre
-            # (GPS to_code in latitude,longitude order, per the verified API
-            # behaviour in noetl/ai-meta#138). Coords + airport come from the
-            # known-city geo map; outbound defaults forward when undated.
+            # HotelBeds Transfers availability. Airport (IATA) -> a GPS
+            # to_code in latitude,longitude order (verified API behaviour,
+            # noetl/ai-meta#138).
+            #
+            # noetl/ai-meta#290 — this branch fabricated THREE inputs:
+            #
+            #  1. the outbound date defaulted to `today+30`, so a ride was
+            #     quoted for a day the user never mentioned;
+            #  2. the drop-off silently became the city-centre coordinates from
+            #     a five-city hard-coded map, even when the user said "to my
+            #     hotel" -- the results were real rides to a place the user
+            #     never named;
+            #  3. outside those five cities `_city_geo` returns {}, so the
+            #     pickup fell back to the *city* code used as an IATA *airport*
+            #     code and the drop-off was an empty string.
+            #
+            # A picked hotel currently stores only its id, so its true
+            # coordinates are not available; the drop-off therefore remains the
+            # city centre, but it is now DISCLOSED rather than implied, and the
+            # turn gates when nothing resolves.  Using a real geocoded
+            # `region_center` when Places has already supplied one is strictly
+            # better than the hard-coded table.
             xf_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
             xf_geo = _city_geo(xf_region)
             xf_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
-            xf_out_date = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
-            xf_to_code = f"{xf_geo.get('lat')},{xf_geo.get('lng')}" if xf_geo.get("lat") is not None else ""
-            tool_requests.append({
-                "tool": "mcp/hotelbeds-transfers.search_transfers",
-                "arguments": {
-                    "from_type": "IATA",
-                    "from_code": xf_geo.get("airport") or (xf_region.get("city_code") or "").upper(),
-                    "to_type": "GPS",
-                    "to_code": xf_to_code,
-                    "outbound": f"{xf_out_date}T10:00:00",
-                    "adults": int(xf_party.get("adults") or 1),
-                    "children": len(xf_party.get("children") or []),
-                    "language": "en",
-                },
-            })
-            render_intent = {"kind": "show_transfers"}
+            xf_out_date = next_state.get("check_in_date")
+            _ctr = next_state.get("region_center") if isinstance(next_state.get("region_center"), dict) else {}
+            if isinstance(_ctr.get("lat"), (int, float)) and isinstance(_ctr.get("lng"), (int, float)):
+                xf_to_code = "%s,%s" % (_ctr.get("lat"), _ctr.get("lng"))
+            elif xf_geo.get("lat") is not None:
+                xf_to_code = "%s,%s" % (xf_geo.get("lat"), xf_geo.get("lng"))
+            else:
+                xf_to_code = ""
+            xf_from_code = xf_geo.get("airport") or ""
+            _xf_missing = []
+            if not xf_out_date:
+                _xf_missing.append("dates")
+            if not xf_to_code or not xf_from_code:
+                # No known airport for this city, or no coordinates to drop off
+                # at.  Guessing either one produces a real quote for the wrong
+                # journey, so ask instead.
+                _xf_missing.append("pickup_and_dropoff")
+            if _xf_missing:
+                render_intent = {"kind": "collect_missing", "missing": _xf_missing,
+                                 "blocking": "transfer_search"}
+                tool_requests = []
+            else:
+                next_state["transfer_dropoff_is_city_centre"] = True
+                tool_requests.append({
+                    "tool": "mcp/hotelbeds-transfers.search_transfers",
+                    "arguments": {
+                        "from_type": "IATA",
+                        "from_code": xf_from_code,
+                        "to_type": "GPS",
+                        "to_code": xf_to_code,
+                        "outbound": "%sT10:00:00" % xf_out_date,
+                        "adults": int(xf_party.get("adults") or 1),
+                        "children": len(xf_party.get("children") or []),
+                        "language": "en",
+                    },
+                })
+                render_intent = {"kind": "show_transfers"}
         elif wants_activities and region_ready:
             # HotelBeds Activities availability. Destination filter reuses the
-            # city_code the planner already extracts; from/to default forward
-            # when the user hasn't pinned travel dates yet.
+            # city_code the planner already extracts.
+            #
+            # noetl/ai-meta#290 — REQUIRED-INPUT GATING.  from/to used to
+            # default to `today+30` for four nights.  Activity availability is
+            # date-bound (a tour runs on specific days), so searching invented
+            # dates returned real activities that are real on the WRONG dates —
+            # a subtler lie than an invented tour, and harder to spot because
+            # every field is genuine.
             act_region = next_state.get("region") if isinstance(next_state.get("region"), dict) else {}
-            act_from = next_state.get("check_in_date") or (date.today() + timedelta(days=30)).isoformat()
-            try:
-                act_to = next_state.get("check_out_date") or (date.fromisoformat(act_from) + timedelta(days=4)).isoformat()
-            except Exception:
-                act_to = (date.today() + timedelta(days=34)).isoformat()
-            act_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
-            tool_requests.append({
-                "tool": "mcp/hotelbeds-activities.search_activities",
-                "arguments": {
-                    "destination": (act_region.get("city_code") or "").upper(),
-                    "from": act_from,
-                    "to": act_to,
-                    "adults": int(act_party.get("adults") or 1),
-                    "language": "en",
-                },
-            })
-            render_intent = {"kind": "show_activities"}
+            act_from = next_state.get("check_in_date")
+            act_to = next_state.get("check_out_date")
+            if not (act_from and act_to):
+                render_intent = {"kind": "collect_missing", "missing": ["dates"],
+                                 "blocking": "activity_search"}
+                tool_requests = []
+            else:
+                act_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+                tool_requests.append({
+                    "tool": "mcp/hotelbeds-activities.search_activities",
+                    "arguments": {
+                        "destination": (act_region.get("city_code") or "").upper(),
+                        "from": act_from,
+                        "to": act_to,
+                        "adults": int(act_party.get("adults") or 1),
+                        "language": "en",
+                    },
+                })
+                render_intent = {"kind": "show_activities"}
         elif wants_flight and region_ready:
             # Duffel flight search on explicit intent ("flights from NYC to
             # Paris"). Origin / destination come from the parsed route; dates
@@ -5092,69 +5148,137 @@ workflow:
             bot_message = "That provider hiccuped, but the itinerary thread is still intact."
         elif intent == "show_places":
             places = tool_summary.get("places") if isinstance(tool_summary.get("places"), list) else []
-            widgets.append(_env("place_list", "default", {
-                "title": "Places to start from",
-                "items": places[:5] or [{
-                    "place_id": "synthetic-miami",
-                    "name": slot_state.get("region", {}).get("label", "Miami"),
-                    "types": ["city", "destination"],
-                    "photos": [],
-                    "rating": 4.6,
-                    "rating_count": 1200,
-                    "address": "Suggested destination",
-                    "ctas": ["add_to_itinerary"],
-                }],
-            }))
-            bot_message = "I found a destination anchor. Next I need dates and travellers."
+            # noetl/ai-meta#290 — NEVER fabricate inventory.  This branch used
+            # to fall back to a hardcoded `synthetic-miami` card carrying an
+            # invented 4.6 rating and 1,200 reviews, labelled with whatever
+            # city the user named.  A provider outage or an unrecognised place
+            # therefore rendered a confident, entirely fictional destination
+            # and the execution reported COMPLETED.  Same defect as the
+            # synthetic flight offer removed in v87 (noetl/ai-meta#289).
+            if not places:
+                _label = (slot_state.get("region") or {}).get("label") or "that destination"
+                widgets.append(_env("error_card", "default", {
+                    "title": "No destination results",
+                    "message": "I could not find %s with the places provider. "
+                               "Nothing was changed — pick one of these and I "
+                               "will search again." % _label,
+                    "reason_code": "no_place_results",
+                    "blocking_constraints": ["destination %s" % _label],
+                    "alternatives": ["try_another_city", "check_spelling",
+                                     "search_by_region"],
+                    "ctas": ["try_another_city", "check_spelling",
+                             "search_by_region"],
+                    "retry_action_id": "retry:mcp/google-places.search_text",
+                    "contact_support": False,
+                }))
+                bot_message = ("I could not find %s with the places provider, so I "
+                               "have not added a destination anchor." % _label)
+            else:
+                widgets.append(_env("place_list", "default", {
+                    "title": "Places to start from",
+                    "items": places[:5],
+                }))
+                bot_message = "I found a destination anchor. Next I need dates and travellers."
         elif intent == "show_hotels":
             hotels = tool_summary.get("hotels") if isinstance(tool_summary.get("hotels"), list) else []
-            widgets.append(_env("hotel_list", "default", {
-                "title": "Hotel options",
-                "items": hotels[:10] or [{
-                    "hotel_id": "synthetic-hotel-1",
-                    "name": f"Stay in {slot_state.get('region', {}).get('label', 'the city')}",
-                    "score": 8.4,
-                    "score_count": 1200,
-                    "star_rating": 4,
-                    "photos": [],
-                    "amenities": ["wifi", "breakfast"],
-                    "price_per_night": 180,
-                    "currency": "EUR",
-                    "address": "Suggested property",
-                    "ctas": ["watch_in_detail", "show_numbers"],
-                }],
-                "total_count": len(hotels),
-            }))
-            bot_message = "Here are hotel options from HotelBeds. Pick one to add it to the itinerary."
+            # noetl/ai-meta#290 — NEVER fabricate inventory.  The fallback here
+            # invented a whole property: an 8.4 score from 1,200 reviews, a
+            # 4-star rating, wifi + breakfast and EUR 180 a night, titled
+            # "Stay in <city>".  None of it came from HotelBeds.  A sold-out
+            # city or a provider blip rendered a bookable-looking hotel that
+            # does not exist.
+            if not hotels:
+                _label = (slot_state.get("region") or {}).get("label") or "that city"
+                _ci = slot_state.get("check_in_date") or ""
+                _co = slot_state.get("check_out_date") or ""
+                _blocking = ["%s %s to %s" % (_label, _ci, _co)] if _ci and _co else [_label]
+                widgets.append(_env("error_card", "default", {
+                    "title": "No hotels available",
+                    "message": "HotelBeds returned no availability for %s. "
+                               "I have kept your dates and travellers — pick one "
+                               "of these and I will search again." % _blocking[0],
+                    "reason_code": "no_hotel_results",
+                    "blocking_constraints": _blocking,
+                    "alternatives": ["flexible_dates", "widen_area",
+                                     "fewer_rooms", "another_city"],
+                    "ctas": ["flexible_dates", "widen_area",
+                             "fewer_rooms", "another_city"],
+                    "retry_action_id": "retry:mcp/hotelbeds.search_hotels",
+                    "contact_support": False,
+                }))
+                bot_message = ("No hotels came back for those dates. Nothing was "
+                               "changed automatically.")
+            else:
+                widgets.append(_env("hotel_list", "default", {
+                    "title": "Hotel options",
+                    "items": hotels[:10],
+                    "total_count": len(hotels),
+                }))
+                bot_message = "Here are hotel options from HotelBeds. Pick one to add it to the itinerary."
         elif intent == "show_activities":
             activities = tool_summary.get("activities") if isinstance(tool_summary.get("activities"), list) else []
-            widgets.append(_env("activity_list", "default", {
-                "title": "Things to do",
-                "items": activities[:10] or [{
-                    "activity_code": "synthetic-activity-1",
-                    "name": f"Top experience in {slot_state.get('region', {}).get('label', 'the city')}",
-                    "currency": "EUR",
-                    "amount_from": 45.0,
-                    "ctas": ["view_details", "add_to_itinerary"],
-                }],
-                "total_count": len(activities),
-            }))
-            bot_message = "Here are activities from HotelBeds. Add one to the itinerary."
+            # noetl/ai-meta#290 — NEVER fabricate inventory.  The fallback
+            # invented "Top experience in <city>" at EUR 45, addable to the
+            # itinerary like any real tour.
+            if not activities:
+                _label = (slot_state.get("region") or {}).get("label") or "that city"
+                _ci = slot_state.get("check_in_date") or ""
+                _co = slot_state.get("check_out_date") or ""
+                _blocking = ["%s %s to %s" % (_label, _ci, _co)] if _ci and _co else [_label]
+                widgets.append(_env("error_card", "default", {
+                    "title": "No activities available",
+                    "message": "HotelBeds returned no activities for %s. "
+                               "Your dates and travellers are unchanged." % _blocking[0],
+                    "reason_code": "no_activity_results",
+                    "blocking_constraints": _blocking,
+                    "alternatives": ["flexible_dates", "another_city",
+                                     "skip_activities"],
+                    "ctas": ["flexible_dates", "another_city", "skip_activities"],
+                    "retry_action_id": "retry:mcp/hotelbeds-activities.search_activities",
+                    "contact_support": False,
+                }))
+                bot_message = ("No activities came back for those dates. Nothing was "
+                               "changed automatically.")
+            else:
+                widgets.append(_env("activity_list", "default", {
+                    "title": "Things to do",
+                    "items": activities[:10],
+                    "total_count": len(activities),
+                }))
+                bot_message = "Here are activities from HotelBeds. Add one to the itinerary."
         elif intent == "show_transfers":
             transfers = tool_summary.get("transfers") if isinstance(tool_summary.get("transfers"), list) else []
-            widgets.append(_env("transfer_list", "default", {
-                "title": "Airport transfers",
-                "items": transfers[:10] or [{
-                    "transfer_id": "synthetic-transfer-1",
-                    "currency": "EUR",
-                    "total_amount": 44.40,
-                    "vehicle_name": "Shared shuttle",
-                    "category_name": "Shared",
-                    "ctas": ["view_details", "add_to_itinerary"],
-                }],
-                "total_count": len(transfers),
-            }))
-            bot_message = "Here are transfer options from HotelBeds. Pick one for your trip."
+            # noetl/ai-meta#290 — NEVER fabricate inventory.  The fallback
+            # invented a EUR 44.40 "Shared shuttle" that no provider quoted.
+            _label = (slot_state.get("region") or {}).get("label") or "the city"
+            if not transfers:
+                _out = slot_state.get("check_in_date") or ""
+                _blocking = ["%s on %s" % (_label, _out)] if _out else [_label]
+                widgets.append(_env("error_card", "default", {
+                    "title": "No transfers available",
+                    "message": "HotelBeds returned no transfers for %s. "
+                               "Nothing was changed automatically." % _blocking[0],
+                    "reason_code": "no_transfer_results",
+                    "blocking_constraints": _blocking,
+                    "alternatives": ["flexible_dates", "another_airport",
+                                     "skip_transfers"],
+                    "ctas": ["flexible_dates", "another_airport", "skip_transfers"],
+                    "retry_action_id": "retry:mcp/hotelbeds-transfers.search_transfers",
+                    "contact_support": False,
+                }))
+                bot_message = ("No transfers came back for that date. Nothing was "
+                               "changed automatically.")
+            else:
+                widgets.append(_env("transfer_list", "default", {
+                    "title": "Airport transfers",
+                    "items": transfers[:10],
+                    "total_count": len(transfers),
+                }))
+                # Disclose the drop-off point rather than letting "to my hotel"
+                # stand: the quote is to the city centre, not to a property.
+                bot_message = ("Here are transfer options from HotelBeds, priced to "
+                               "%s city centre. Pick one, or tell me your hotel "
+                               "address and I will re-quote." % _label)
         elif intent == "show_flights":
             offers = tool_summary.get("offers") if isinstance(tool_summary.get("offers"), list) else []
             flight_items = offers[:10]
@@ -5451,6 +5575,29 @@ workflow:
                     "allow_child_ages": True,
                 }))
                 bot_message = "How many travellers and rooms?"
+            elif "pickup_and_dropoff" in missing:
+                # noetl/ai-meta#290 — the transfer branch gates here when it has
+                # no known airport for the city, or no coordinates to drop off
+                # at.  Guessing either produces a real quote for a journey the
+                # user did not ask for, so name what is missing instead of
+                # falling through to the generic "I can help plan the trip".
+                _xl = (slot_state.get("region") or {}).get("label") or "that city"
+                widgets.append(_env("error_card", "default", {
+                    "title": "I need the airport and drop-off",
+                    "message": "I do not have a pickup airport or a drop-off point "
+                               "for %s, and I will not guess one — the quote would "
+                               "be for the wrong journey. Tell me the airport code "
+                               "and your hotel address and I will search." % _xl,
+                    "reason_code": "transfer_endpoints_unknown",
+                    "blocking_constraints": ["pickup airport", "drop-off address"],
+                    "alternatives": ["provide_airport", "provide_hotel_address",
+                                     "skip_transfers"],
+                    "ctas": ["provide_airport", "provide_hotel_address",
+                             "skip_transfers"],
+                    "contact_support": False,
+                }))
+                bot_message = ("I need the pickup airport and a drop-off address for "
+                               "%s before I can quote a transfer." % _xl)
             else:
                 widgets.append(_bot("Tell me the destination, dates, and traveller count, and I will build the itinerary."))
                 bot_message = "I can help plan the trip from here."
