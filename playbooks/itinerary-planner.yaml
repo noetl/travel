@@ -1374,10 +1374,22 @@ workflow:
             _bm = re.search(r"[€$£]\s*(\d{2,5})", lowered_text)
         if _bm:
             _low = lowered_text
-            _cur = ("EUR" if ("€" in text or "eur" in _low)
-                    else "GBP" if ("£" in text or "gbp" in _low)
-                    else "USD")
+            # noetl/ai-meta#292 — record whether the currency was STATED.  A
+            # bare "under 300" means "in whatever the fares are quoted in";
+            # "under 300 EUR" is a different claim.  Without this provenance
+            # the USD default is indistinguishable from a user who typed USD,
+            # and the mismatch check below would fire on bare numbers.
+            _cur_explicit = True
+            if "€" in text or "eur" in _low:
+                _cur = "EUR"
+            elif "£" in text or "gbp" in _low:
+                _cur = "GBP"
+            elif "$" in text or "usd" in _low:
+                _cur = "USD"
+            else:
+                _cur, _cur_explicit = "USD", False
             budget = {"cap": int(_bm.group(1)), "currency": _cur,
+                      "currency_explicit": _cur_explicit,
                       "basis": "total" if "for everyone" in lowered_text or "total" in lowered_text else "per_person"}
             updates["budget"] = budget
             next_state["budget"] = budget
@@ -4560,6 +4572,37 @@ workflow:
             _budget = slot_state.get("budget") if isinstance(slot_state.get("budget"), dict) else {}
             _cap_val = _budget.get("cap")
             _over_budget = 0
+            # noetl/ai-meta#292 — a cap and a fare are only comparable in the
+            # same currency.  This used to compare the raw NUMBERS: a "50 EUR"
+            # cap was tested against a 38.37 USD fare as if 50 EUR == 50 USD.
+            # It looked correct purely because Duffel happens to quote these
+            # routes in USD.
+            #
+            # There is no FX source in the catalog, and inventing a rate would
+            # be the same defect class as inventing inventory (#289/#290), so
+            # the honest behaviour is to NOT filter and say so.  A bare number
+            # carries no currency claim and is treated as the fare's own
+            # currency.
+            _cap_cur = str(_budget.get("currency") or "").upper()
+            _fare_curs = set()
+            for _c in normalised_offers:
+                _fc = str((_c.get("price") or {}).get("currency") or "").upper()
+                if _fc:
+                    _fare_curs.add(_fc)
+            _mismatch = bool(
+                _cap_val and _budget.get("currency_explicit")
+                and _fare_curs and not (_fare_curs == {_cap_cur})
+            )
+            if _mismatch:
+                next_state["budget_not_applied"] = {
+                    "reason": "currency_mismatch",
+                    "cap": _cap_val,
+                    "cap_currency": _cap_cur,
+                    "fare_currency": sorted(_fare_curs)[0] if len(_fare_curs) == 1 else sorted(_fare_curs),
+                }
+                _cap_val = None
+            else:
+                next_state.pop("budget_not_applied", None)
             if _cap_val:
                 _kept = []
                 for _c in normalised_offers:
@@ -5423,6 +5466,19 @@ workflow:
                 bot_message = " ".join(_lines) if _lines else "Here are the flight options."
                 if _excl:
                     bot_message += " (%d fare(s) above your budget were excluded.)" % _excl
+                # noetl/ai-meta#292 — if the cap could not be applied, SAY SO.
+                # Quietly dropping a stated constraint and showing results as
+                # though it had been honoured is the same class of wrongness as
+                # comparing the two currencies as bare numbers.
+                _na = slot_state.get("budget_not_applied")
+                if isinstance(_na, dict) and _na.get("reason") == "currency_mismatch":
+                    _fc = _na.get("fare_currency")
+                    _fc = ", ".join(_fc) if isinstance(_fc, list) else str(_fc)
+                    bot_message += (" Note: your %s %s budget was NOT applied — these "
+                                    "fares are quoted in %s and I have no exchange rate, "
+                                    "so I did not compare them. Restate the budget in %s "
+                                    "and I will filter." % (
+                                        _na.get("cap"), _na.get("cap_currency"), _fc, _fc))
         elif intent == "flight_detail":
             offers = slot_state.get("flight_offers") if isinstance(slot_state.get("flight_offers"), list) else []
             picked_offer_id = str(slot_state.get("picked_flight_offer_id") or "")
