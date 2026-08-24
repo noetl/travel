@@ -1421,6 +1421,31 @@ workflow:
                     if not picked_hotel_rate_key:
                         picked_hotel_rate_key = str(_card.get("rate_key") or "")
                     break
+        # noetl/ai-meta#293 — carry the picked hotel's REAL coordinates forward.
+        # HotelBeds returns per-hotel latitude/longitude on the availability
+        # response and `_hotel_card` already keeps them as `location.lat/lng`,
+        # so the true drop-off point is available with no extra provider call
+        # and no geocoding.  Before this, only `picked_hotel_id` survived the
+        # pick, so the transfer branch had nothing to quote against and fell
+        # back to the city centre.
+        if picked_hotel_card:
+            _loc = picked_hotel_card.get("location") if isinstance(picked_hotel_card.get("location"), dict) else {}
+            try:
+                _plat, _plng = float(_loc.get("lat")), float(_loc.get("lng"))
+            except (TypeError, ValueError):
+                _plat = _plng = None
+            if _plat is not None and _plng is not None:
+                _prev = next_state.get("picked_hotel_location") if isinstance(next_state.get("picked_hotel_location"), dict) else {}
+                _new = {"lat": float(_plat), "lng": float(_plng),
+                        "name": str(picked_hotel_card.get("name") or ""),
+                        "hotel_id": str(picked_hotel_card.get("hotel_id") or "")}
+                if _prev.get("hotel_id") != _new["hotel_id"]:
+                    # A different hotel invalidates any transfer quote priced to
+                    # the previous drop-off (rule 8 / stale results).
+                    next_state.pop("transfer_search_results", None)
+                    next_state.pop("transfer_offers", None)
+                next_state["picked_hotel_location"] = _new
+                updates["picked_hotel_location"] = _new
         if picked_hotel_rate_key:
             next_state["picked_hotel_rate_key"] = picked_hotel_rate_key
 
@@ -1540,9 +1565,38 @@ workflow:
             xf_geo = _city_geo(xf_region)
             xf_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
             xf_out_date = next_state.get("check_in_date")
+            # noetl/ai-meta#293 — drop-off resolution, best source first:
+            #   1. the PICKED HOTEL's own coordinates (HotelBeds returns them
+            #      per hotel; persisted at pick time).  This is the only option
+            #      that is actually the user's destination.
+            #   2. a real geocoded region centre from Places.
+            #   3. the five-city hard-coded table.
+            # 2 and 3 are city-centre approximations and are DISCLOSED as such;
+            # only 1 may be described as the hotel.
+            # ⚠ Coordinates must be COERCED, not type-checked.  Slot state
+            # round-trips through Firestore and comes back with the numbers as
+            # STRINGS ("48.8738...", not 48.8738...), so an
+            # `isinstance(x, (int, float))` guard silently rejects a perfectly
+            # good hotel location on every turn after the one that stored it —
+            # the drop-off then falls back to the city centre while
+            # `picked_hotel_location` sits right there in state looking correct.
+            # The same coercion already exists for Google Places coordinates.
+            def _coord_pair(src):
+                src = src if isinstance(src, dict) else {}
+                try:
+                    return float(src.get("lat")), float(src.get("lng"))
+                except (TypeError, ValueError):
+                    return None
+
+            _hotel_loc = next_state.get("picked_hotel_location") if isinstance(next_state.get("picked_hotel_location"), dict) else {}
             _ctr = next_state.get("region_center") if isinstance(next_state.get("region_center"), dict) else {}
-            if isinstance(_ctr.get("lat"), (int, float)) and isinstance(_ctr.get("lng"), (int, float)):
-                xf_to_code = "%s,%s" % (_ctr.get("lat"), _ctr.get("lng"))
+            _hp, _cp = _coord_pair(_hotel_loc), _coord_pair(_ctr)
+            xf_dropoff_is_hotel = False
+            if _hp:
+                xf_to_code = "%s,%s" % (_hp[0], _hp[1])
+                xf_dropoff_is_hotel = True
+            elif _cp:
+                xf_to_code = "%s,%s" % (_cp[0], _cp[1])
             elif xf_geo.get("lat") is not None:
                 xf_to_code = "%s,%s" % (xf_geo.get("lat"), xf_geo.get("lng"))
             else:
@@ -1561,7 +1615,9 @@ workflow:
                                  "blocking": "transfer_search"}
                 tool_requests = []
             else:
-                next_state["transfer_dropoff_is_city_centre"] = True
+                next_state["transfer_dropoff_is_city_centre"] = not xf_dropoff_is_hotel
+                next_state["transfer_dropoff_hotel_name"] = (
+                    str(_hotel_loc.get("name") or "") if xf_dropoff_is_hotel else "")
                 tool_requests.append({
                     "tool": "mcp/hotelbeds-transfers.search_transfers",
                     "arguments": {
@@ -5274,11 +5330,19 @@ workflow:
                     "items": transfers[:10],
                     "total_count": len(transfers),
                 }))
-                # Disclose the drop-off point rather than letting "to my hotel"
-                # stand: the quote is to the city centre, not to a property.
-                bot_message = ("Here are transfer options from HotelBeds, priced to "
-                               "%s city centre. Pick one, or tell me your hotel "
-                               "address and I will re-quote." % _label)
+                # noetl/ai-meta#293 — say where the quote actually goes.  When a
+                # hotel was picked the drop-off is that hotel's own coordinates
+                # and the city-centre disclosure would now be FALSE, so it is
+                # dropped on exactly those turns and kept on every other.
+                if slot_state.get("transfer_dropoff_is_city_centre") is False:
+                    _hname = str(slot_state.get("transfer_dropoff_hotel_name") or "").strip()
+                    bot_message = ("Here are transfer options from HotelBeds, priced to "
+                                   + (_hname if _hname else "your selected hotel")
+                                   + ". Pick one to add it to the itinerary.")
+                else:
+                    bot_message = ("Here are transfer options from HotelBeds, priced to "
+                                   "%s city centre. Pick one, or select a hotel first "
+                                   "and I will quote to its address instead." % _label)
         elif intent == "show_flights":
             offers = tool_summary.get("offers") if isinstance(tool_summary.get("offers"), list) else []
             flight_items = offers[:10]
