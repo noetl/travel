@@ -1381,9 +1381,15 @@ workflow:
                 break
         if "checked bag" in lowered_text or "checked baggage" in lowered_text:
             flt["baggage"] = "checked"          # preference only — see below
-        elif "carry-on" in lowered_text or "carry on" in lowered_text:
+        elif "carry-on" in lowered_text or "carry on" in lowered_text or "hand luggage" in lowered_text:
             flt["baggage"] = "carry_on"
-        if "flexible" in lowered_text and "fare" in lowered_text:
+        # noetl/ai-meta#291 Tier A — fare flexibility is now real (the offer
+        # carries `conditions`), so recognise the ordinary phrasings too.
+        if "refundable" in lowered_text and "non-refundable" not in lowered_text:
+            flt["fare_flexibility"] = "refundable"
+        elif "changeable" in lowered_text or "can change" in lowered_text:
+            flt["fare_flexibility"] = "changeable"
+        elif "flexible" in lowered_text:
             flt["fare_flexibility"] = "flexible"
         # F7 departure window.  Duffel returns `segments[].departure.at` on
         # every offer, so unlike baggage and fare flexibility this preference
@@ -2744,6 +2750,40 @@ workflow:
                     "duration": _duration(item.get("duration")),
                     "segments": segments,
                 })
+            # noetl/ai-meta#291 Tier A — retain baggage + fare conditions.
+            # This whitelist dropped both, which is why F7 baggage and fare
+            # flexibility read as "provider-limited".  Duffel DOES return them
+            # — verified on a live get_offer: baggages [{quantity,type}] per
+            # passenger, conditions {change_before_departure,
+            # refund_before_departure} — our normaliser simply discarded them.
+            #
+            # A null condition means the fare does not STATE the term:
+            # unknown, NOT "non-refundable".  It is carried through as None so
+            # the planner can tell unknown from known-false and never claims a
+            # term the provider did not give.
+            _bag = {"checked": 0, "carry_on": 0, "known": False}
+            for _p in _as_list(offer.get("passengers")):
+                if not isinstance(_p, dict):
+                    continue
+                for _b in _as_list(_p.get("baggages")):
+                    if not isinstance(_b, dict):
+                        continue
+                    _t = str(_b.get("type") or "")
+                    try:
+                        _q = int(_b.get("quantity") or 0)
+                    except (TypeError, ValueError):
+                        _q = 0
+                    if _t in _bag:
+                        _bag[_t] = max(_bag[_t], _q)
+                        _bag["known"] = True
+            _cond = offer.get("conditions") if isinstance(offer.get("conditions"), dict) else {}
+
+            def _term(v):
+                # Duffel gives {"allowed": bool, ...} or null.
+                if isinstance(v, dict):
+                    return bool(v.get("allowed"))
+                return None
+
             return {
                 "id": offer.get("id"),
                 "source": "duffel",
@@ -2755,6 +2795,11 @@ workflow:
                 "validatingAirlineCodes": validating,
                 "expires_at": offer.get("expires_at"),
                 "live_mode": offer.get("live_mode"),
+                "baggage": {"checked": _bag["checked"], "carry_on": _bag["carry_on"],
+                            "known": _bag["known"]},
+                "conditions": {"changeable": _term(_cond.get("change_before_departure")),
+                               "refundable": _term(_cond.get("refund_before_departure"))},
+                "fare_brand": offer.get("fare_brand_name"),
             }
 
         def _tools_list():
@@ -3449,6 +3494,40 @@ workflow:
                     "duration": _duration(item.get("duration")),
                     "segments": segments,
                 })
+            # noetl/ai-meta#291 Tier A — retain baggage + fare conditions.
+            # This whitelist dropped both, which is why F7 baggage and fare
+            # flexibility read as "provider-limited".  Duffel DOES return them
+            # — verified on a live get_offer: baggages [{quantity,type}] per
+            # passenger, conditions {change_before_departure,
+            # refund_before_departure} — our normaliser simply discarded them.
+            #
+            # A null condition means the fare does not STATE the term:
+            # unknown, NOT "non-refundable".  It is carried through as None so
+            # the planner can tell unknown from known-false and never claims a
+            # term the provider did not give.
+            _bag = {"checked": 0, "carry_on": 0, "known": False}
+            for _p in _as_list(offer.get("passengers")):
+                if not isinstance(_p, dict):
+                    continue
+                for _b in _as_list(_p.get("baggages")):
+                    if not isinstance(_b, dict):
+                        continue
+                    _t = str(_b.get("type") or "")
+                    try:
+                        _q = int(_b.get("quantity") or 0)
+                    except (TypeError, ValueError):
+                        _q = 0
+                    if _t in _bag:
+                        _bag[_t] = max(_bag[_t], _q)
+                        _bag["known"] = True
+            _cond = offer.get("conditions") if isinstance(offer.get("conditions"), dict) else {}
+
+            def _term(v):
+                # Duffel gives {"allowed": bool, ...} or null.
+                if isinstance(v, dict):
+                    return bool(v.get("allowed"))
+                return None
+
             return {
                 "id": offer.get("id"),
                 "source": "duffel",
@@ -3460,6 +3539,11 @@ workflow:
                 "validatingAirlineCodes": validating,
                 "expires_at": offer.get("expires_at"),
                 "live_mode": offer.get("live_mode"),
+                "baggage": {"checked": _bag["checked"], "carry_on": _bag["carry_on"],
+                            "known": _bag["known"]},
+                "conditions": {"changeable": _term(_cond.get("change_before_departure")),
+                               "refundable": _term(_cond.get("refund_before_departure"))},
+                "fare_brand": offer.get("fare_brand_name"),
             }
 
         def _tools_list():
@@ -6530,6 +6614,31 @@ workflow:
             lo, hi = lo_hi
             return lo <= h <= hi
 
+        # F7 baggage / fare flexibility (noetl/ai-meta#291 Tier A).
+        # Both are PREFERENCES applied as ordering nudges, never filters, and
+        # both treat "unknown" as not-disqualifying: an offer whose provider
+        # did not state the term is never excluded, because absence of a
+        # stated term is not evidence the term is absent.
+        def _has_baggage(card, want):
+            bag = card.get("baggage") if isinstance(card.get("baggage"), dict) else {}
+            if not bag.get("known"):
+                return True                      # unknown -> do not exclude
+            if want == "checked":
+                return int(bag.get("checked") or 0) > 0
+            if want == "carry_on":
+                return int(bag.get("carry_on") or 0) > 0
+            return True
+
+        def _is_flexible(card, want):
+            cond = card.get("conditions") if isinstance(card.get("conditions"), dict) else {}
+            if want == "refundable":
+                v = cond.get("refundable")
+            elif want == "changeable":
+                v = cond.get("changeable")
+            else:
+                v = cond.get("refundable") if cond.get("refundable") is not None else cond.get("changeable")
+            return True if v is None else bool(v)   # unknown -> do not exclude
+
         def _rank_offer_groups(cards, state):
             # Rule 6 — Cheapest / Fastest / Best value on every flight result.
             #
@@ -6590,6 +6699,17 @@ workflow:
                     _inw = [c for c in strong if _in_window(c, _win)]
                     if _inw:
                         strong = _inw
+                _ff = (state.get("flight_filters") or {}) if isinstance(state.get("flight_filters"), dict) else {}
+                _bagwant = _ff.get("baggage")
+                if _bagwant:
+                    _withbag = [c for c in strong if _has_baggage(c, _bagwant)]
+                    if _withbag:
+                        strong = _withbag
+                _flexwant = _ff.get("fare_flexibility")
+                if _flexwant:
+                    _flex = [c for c in strong if _is_flexible(c, _flexwant)]
+                    if _flex:
+                        strong = _flex
                 best = min(strong, key=lambda c: (
                     _offer_price(c) / max(1.0, (_offer_minutes(c) or 60) / 60.0),
                     int(c.get("stops") or 0),
@@ -7084,6 +7204,14 @@ workflow:
                 "total_amount": str(booking.get("totalNet") if booking.get("totalNet") is not None else (inner.get("totalNet") if inner.get("totalNet") is not None else "0.00")),
                 "total_currency": str(booking.get("currency") or inner.get("currency") or picked_card.get("currency") or "EUR"),
                 "destination": str(booking.get("destinationName") or booking.get("zoneName") or (next_state.get("region") or {}).get("label") or ""),
+                # Learned from the live sandbox booking (197-14779631): the MCP
+                # re-prices via checkRate before booking and reports
+                # `price_changed` in _meta.  A booking can SUCCEED with the
+                # amount moved (HotelBeds accepted it within tolerance), and
+                # the confirmation would otherwise show the new total with no
+                # indication it changed.
+                "price_changed": bool(_as_dict(inner.get("_meta")).get("price_changed")
+                                      or _as_dict(data.get("_meta")).get("price_changed")),
                 "ctas": ["new_search"],
             }
             if ok and normalised_booking["booking_reference"]:
@@ -7943,7 +8071,12 @@ workflow:
                     "destination": booking.get("destination") or slot_state.get("region", {}).get("label", ""),
                     "ctas": ["new_search"],
                 }))
-                bot_message = "Your HotelBeds test booking is confirmed."
+                if booking.get("price_changed"):
+                    bot_message = ("Your HotelBeds test booking is confirmed — note the "
+                                   "price changed between selection and booking, so the "
+                                   "total above is the rate you were actually charged.")
+                else:
+                    bot_message = "Your HotelBeds test booking is confirmed."
         elif intent == "order_detail":
             # Back-compat: re-render the cached order without refetching from
             # Duffel. Newer travel UI handles View full order as a client-side
