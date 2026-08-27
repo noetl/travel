@@ -7034,7 +7034,10 @@ workflow:
             normalised_booking = {
                 "booking_reference": str(booking.get("reference") or inner.get("booking_reference") or ""),
                 "hotel_name": str(booking.get("hotel_name") or inner.get("hotel_name") or picked_card.get("name") or "Hotel"),
-                "status": str(booking.get("status") or inner.get("status") or "CONFIRMED"),
+                # noetl/ai-meta#240 follow-up — do NOT default to CONFIRMED.  A
+                # provider that returned no status did not confirm anything;
+                # defaulting turned a FAILED booking into a confirmed one.
+                "status": str(booking.get("status") or inner.get("status") or ""),
                 "check_in": str(booking.get("checkIn") or inner.get("checkIn") or next_state.get("check_in_date") or ""),
                 "check_out": str(booking.get("checkOut") or inner.get("checkOut") or next_state.get("check_out_date") or ""),
                 "total_amount": str(booking.get("totalNet") if booking.get("totalNet") is not None else (inner.get("totalNet") if inner.get("totalNet") is not None else "0.00")),
@@ -7863,18 +7866,43 @@ workflow:
             # freshly normalised booking from this turn, fall back to the cached
             # last_hotel_booking so a re-render after the fact still works.
             booking = _as_dict(tool_summary.get("hotel_booking")) or _as_dict(slot_state.get("last_hotel_booking"))
-            widgets.append(_env("hotel_confirmation", "default", {
-                "booking_reference": booking.get("booking_reference") or slot_state.get("hotel_booking_ref") or "pending",
-                "hotel_name": booking.get("hotel_name") or "Hotel",
-                "status": booking.get("status") or "CONFIRMED",
-                "check_in": booking.get("check_in") or default_from,
-                "check_out": booking.get("check_out") or default_to,
-                "total_amount": booking.get("total_amount") or "0.00",
-                "total_currency": booking.get("total_currency") or "EUR",
-                "destination": booking.get("destination") or slot_state.get("region", {}).get("label", ""),
-                "ctas": ["new_search"],
-            }))
-            bot_message = "Your HotelBeds test booking is confirmed."
+            _ref = booking.get("booking_reference") or slot_state.get("hotel_booking_ref") or ""
+            _bstatus = str(booking.get("status") or "").upper()
+            # A booking exists only if the PROVIDER returned a reference.  This
+            # branch used to render `booking_reference: "pending"`, `status:
+            # "CONFIRMED"` and `total: "0.00"` on a FAILED booking and tell the
+            # user "Your HotelBeds test booking is confirmed." -- a fabricated
+            # outcome on the highest-stakes claim in the product, and the same
+            # defect class as the synthetic inventory removed in #289/#290.
+            if not _ref or _bstatus in ("FAILED", "ERROR", "CANCELLED"):
+                widgets.append(_env("error_card", "default", {
+                    "title": "The booking did not go through",
+                    "message": "HotelBeds did not return a confirmation, so nothing "
+                               "was booked. Your dates, travellers and the selected "
+                               "hotel are unchanged — you can retry or pick another "
+                               "property.",
+                    "reason_code": "hotel_booking_not_confirmed",
+                    "blocking_constraints": ["no booking reference returned"],
+                    "alternatives": ["retry_booking", "another_hotel", "flexible_dates"],
+                    "ctas": ["retry_booking", "another_hotel", "flexible_dates"],
+                    "retry_action_id": "retry:mcp/hotelbeds.book_hotel",
+                    "contact_support": False,
+                }))
+                bot_message = ("The booking did not go through — HotelBeds returned no "
+                               "confirmation, so nothing was booked.")
+            else:
+                widgets.append(_env("hotel_confirmation", "default", {
+                    "booking_reference": _ref,
+                    "hotel_name": booking.get("hotel_name") or "Hotel",
+                    "status": booking.get("status") or "CONFIRMED",
+                    "check_in": booking.get("check_in") or default_from,
+                    "check_out": booking.get("check_out") or default_to,
+                    "total_amount": booking.get("total_amount") or "0.00",
+                    "total_currency": booking.get("total_currency") or "EUR",
+                    "destination": booking.get("destination") or slot_state.get("region", {}).get("label", ""),
+                    "ctas": ["new_search"],
+                }))
+                bot_message = "Your HotelBeds test booking is confirmed."
         elif intent == "order_detail":
             # Back-compat: re-render the cached order without refetching from
             # Duffel. Newer travel UI handles View full order as a client-side
