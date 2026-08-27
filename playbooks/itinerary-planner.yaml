@@ -676,15 +676,45 @@ workflow:
                         break
                 if _sub_ll:
                     updates["region_center"] = {"lat": _sub_ll[0], "lng": _sub_ll[1]}
-            if action_id.startswith(("book_offer:", "pick_offer:")) or submitted.get("offer_id"):
-                offer_id_from_action = action_id.split(":", 1)[1] if ":" in action_id else action_id
-                updates["picked_flight_offer_id"] = submitted.get("offer_id") or offer_id_from_action
-                # Back-compat: earlier flight cards labelled the CTA "Book This"
-                # but emitted pick_offer:<id>. Treat those clicks as booking.
-                book_flight_now = True
-            elif action_id.startswith("view_offer:"):
-                updates["picked_flight_offer_id"] = action_id.split(":", 1)[1] if ":" in action_id else action_id
+            # SELECTING an offer is a READ.  Only an explicit book action may
+            # dispatch mcp/duffel.create_order.
+            #
+            # This block used to read:
+            #     if action_id.startswith(("book_offer:", "pick_offer:")) \
+            #             or submitted.get("offer_id"):
+            #         ... book_flight_now = True
+            # so ANY submit carrying an `offer_id` booked, whatever the action
+            # said — the `view_offer:` branch below was unreachable whenever the
+            # payload happened to include the id.  A "View details" click that
+            # carried its offer_id therefore created a real Duffel order.
+            #
+            # The shipped SPA does not hit it (FlightCard sends `view_offer:<id>`
+            # with NO value payload, and `book_offer:<id>` with
+            # {offer_id, action: "book_offer"}), so this was latent rather than
+            # live — but any other caller that includes the id books by
+            # accident, which is how it was found.
+            #
+            # Booking now requires the action to SAY book.  This mirrors the
+            # hotel branch below, which has always been correct: it records
+            # `picked_hotel_id` for any hotel action and sets `book_hotel_now`
+            # only on `book_hotel:`.
+            _offer_from_action = action_id.split(":", 1)[1] if ":" in action_id else action_id
+            _offer_id = submitted.get("offer_id") or _offer_from_action
+            _is_book_offer = (action_id.startswith("book_offer:")
+                              or submitted.get("action") == "book_offer")
+            if action_id.startswith("view_offer:"):
+                updates["picked_flight_offer_id"] = _offer_from_action
                 view_flight_now = True
+            elif _is_book_offer:
+                updates["picked_flight_offer_id"] = _offer_id
+                book_flight_now = True
+            elif action_id.startswith("pick_offer:") or submitted.get("offer_id"):
+                # `pick_offer:` once meant "Book This" on an older card, and was
+                # treated as booking.  No surface emits it today (zero hits in
+                # the SPA), and an ambiguous action must not spend money, so it
+                # now SELECTS.  Booking from here needs the Book CTA or an
+                # explicit "book it" in the message, both of which still work.
+                updates["picked_flight_offer_id"] = _offer_id
             elif action_id.startswith("order:"):
                 # OrderConfirmation "View full order" CTA emits order:<order_id>;
                 # render the saved last_order without retriggering downstream
