@@ -1385,9 +1385,16 @@ workflow:
             flt["baggage"] = "carry_on"
         if "flexible" in lowered_text and "fare" in lowered_text:
             flt["fare_flexibility"] = "flexible"
-        if "morning" in lowered_text:
+        # F7 departure window.  Duffel returns `segments[].departure.at` on
+        # every offer, so unlike baggage and fare flexibility this preference
+        # has real data behind it and can actually be applied.
+        if "red-eye" in lowered_text or "red eye" in lowered_text or "overnight flight" in lowered_text:
+            flt["depart_window"] = "red_eye"
+        elif "morning" in lowered_text or "early flight" in lowered_text:
             flt["depart_window"] = "morning"
-        elif "evening" in lowered_text:
+        elif "afternoon" in lowered_text:
+            flt["depart_window"] = "afternoon"
+        elif "evening" in lowered_text or "late flight" in lowered_text:
             flt["depart_window"] = "evening"
         if "one-way" in lowered_text or "one way" in lowered_text or "not back" in lowered_text:
             flt["trip_type"] = "one_way"
@@ -6499,6 +6506,30 @@ workflow:
                 return _iso_minutes(card.get("duration"))
             return total
 
+        # F7 — departure-time window.  Returns the first segment's local
+        # departure hour, or None when the offer carries no timestamp.
+        _WINDOWS = {"morning": (5, 11), "afternoon": (12, 17),
+                    "evening": (18, 23), "red_eye": (0, 4)}
+
+        def _depart_hour(card):
+            for it in (card.get("itineraries") or []):
+                for seg in (it.get("segments") or []):
+                    at = ((seg.get("departure") or {}).get("at") or "")
+                    m = re.search(r"T(\d{2}):", str(at))
+                    if m:
+                        return int(m.group(1))
+            return None
+
+        def _in_window(card, window):
+            lo_hi = _WINDOWS.get(str(window or ""))
+            if not lo_hi:
+                return True
+            h = _depart_hour(card)
+            if h is None:
+                return True          # no timestamp -> do not exclude
+            lo, hi = lo_hi
+            return lo <= h <= hi
+
         def _rank_offer_groups(cards, state):
             # Rule 6 — Cheapest / Fastest / Best value on every flight result.
             #
@@ -6549,6 +6580,16 @@ workflow:
                     nonstop = [c for c in strong if int(c.get("stops") or 0) == 0]
                     if nonstop:
                         strong = nonstop
+                # F7: prefer offers inside the requested departure window when
+                # any candidate satisfies it.  A nudge, not a filter -- the
+                # window is a preference and Cheapest/Fastest still report the
+                # genuinely cheapest and fastest offers.
+                _win = (state.get("flight_filters") or {}).get("depart_window") \
+                    if isinstance(state.get("flight_filters"), dict) else None
+                if _win:
+                    _inw = [c for c in strong if _in_window(c, _win)]
+                    if _inw:
+                        strong = _inw
                 best = min(strong, key=lambda c: (
                     _offer_price(c) / max(1.0, (_offer_minutes(c) or 60) / 60.0),
                     int(c.get("stops") or 0),
