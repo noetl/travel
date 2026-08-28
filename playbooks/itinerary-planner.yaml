@@ -2762,6 +2762,17 @@ workflow:
             # the planner can tell unknown from known-false and never claims a
             # term the provider did not give.
             _bag = {"checked": 0, "carry_on": 0, "known": False}
+            for _b0 in _as_list(offer.get("_baggages")):
+                if not isinstance(_b0, dict):
+                    continue
+                _t0 = str(_b0.get("type") or "")
+                try:
+                    _q0 = int(_b0.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    _q0 = 0
+                if _t0 in _bag:
+                    _bag[_t0] = max(_bag[_t0], _q0)
+                    _bag["known"] = True
             for _p in _as_list(offer.get("passengers")):
                 if not isinstance(_p, dict):
                     continue
@@ -2954,7 +2965,78 @@ workflow:
             data = body.get("data") if isinstance(body, dict) else {}
             offers = _as_list(data.get("offers") if isinstance(data, dict) else [])
             cap = _cap(args.get("max_offers"), default=10, maximum=10)
-            normalised = [_normalise_offer(offer) for offer in offers[:cap] if isinstance(offer, dict)]
+            _shown = [offer for offer in offers[:cap] if isinstance(offer, dict)]
+            # noetl/ai-meta#291 Tier A — ENRICH each shown offer with one
+            # GET /air/offers/{id}.
+            #
+            # The offer_requests LIST response carries neither
+            # `passengers[].baggages` nor `conditions`; only the single-offer GET
+            # does.  Without this the baggage / fare-flexibility preferences can
+            # never fire, because every offer reads as "unknown".  Owner authorised
+            # one extra call per offer.
+            #
+            # Bounded by `cap` (max 10) and strictly BEST-EFFORT: a failed or slow
+            # enrichment leaves that offer's fields absent, which the planner
+            # already treats as "unknown -> never exclude".  A search therefore
+            # never fails because enrichment failed.
+            _enrich_ok = 0
+            _enrich_err = 0
+            _enrich_last = ""
+            if _text(args.get("enrich_offers") or "1") not in ("0", "false", "no"):
+                for _o in _shown:
+                    _oid = _o.get("id")
+                    if not _oid:
+                        continue
+                    # ⚠ `_request` here is (http_method, path, payload=None,
+                    # params=None) -- it has NO `retryable` kwarg.  Passing one
+                    # raised TypeError into the broad except below, which skipped
+                    # EVERY offer silently and made the feature look like "the
+                    # provider does not supply baggage".  Enrichment failures are
+                    # now COUNTED and surfaced in meta so a silent skip cannot
+                    # masquerade as missing provider data again.
+                    try:
+                        _eok, _esc, _ebody = _request(
+                            "GET",
+                            "/air/offers/" + urllib.parse.quote(str(_oid), safe=""),
+                        )
+                    except Exception as _exc:
+                        _enrich_err = _enrich_err + 1
+                        _enrich_last = "%s: %s" % (type(_exc).__name__, _exc)
+                        continue
+                    if not _eok or not isinstance(_ebody, dict):
+                        continue
+                    _full = _ebody.get("data")
+                    if isinstance(_full, dict):
+                        # Only the fields we need; pricing and itineraries stay as the
+                        # list response gave them, so enrichment cannot alter them.
+                        # ⚠ `baggages` lives at slices[].segments[].passengers[],
+                        # NOT on the offer's top-level `passengers`.  Reading the
+                        # top level returns nothing and every offer reads as
+                        # "unknown baggage", which looks exactly like a provider
+                        # that does not supply it.
+                        _bags = []
+                        for _sl in _as_list(_full.get("slices")):
+                            if not isinstance(_sl, dict):
+                                continue
+                            for _sg in _as_list(_sl.get("segments")):
+                                if not isinstance(_sg, dict):
+                                    continue
+                                for _pp in _as_list(_sg.get("passengers")):
+                                    if isinstance(_pp, dict):
+                                        _bags.extend(
+                                            b for b in _as_list(_pp.get("baggages"))
+                                            if isinstance(b, dict)
+                                        )
+                        if _bags:
+                            _o["_baggages"] = _bags
+                        if _full.get("passengers") is not None:
+                            _o["passengers"] = _full.get("passengers")
+                        if _full.get("conditions") is not None:
+                            _o["conditions"] = _full.get("conditions")
+                        if _full.get("fare_brand_name") is not None:
+                            _o["fare_brand_name"] = _full.get("fare_brand_name")
+                        _enrich_ok = _enrich_ok + 1
+            normalised = [_normalise_offer(offer) for offer in _shown]
             if not ok:
                 return _error("search_offers", "Duffel search_offers failed", body, status_code)
             currency = None
@@ -2973,6 +3055,9 @@ workflow:
                     "offers": normalised,
                     "offers_total": len(normalised),
                     "raw_offers_total": len(offers),
+            "enrich_ok": _enrich_ok,
+            "enrich_err": _enrich_err,
+            "enrich_last_error": _enrich_last,
                     "meta": {"count": len(normalised), "source": "duffel", "currency": currency},
                 },
                 f"{len(normalised)} Duffel flight offer(s)",
@@ -3506,6 +3591,17 @@ workflow:
             # the planner can tell unknown from known-false and never claims a
             # term the provider did not give.
             _bag = {"checked": 0, "carry_on": 0, "known": False}
+            for _b0 in _as_list(offer.get("_baggages")):
+                if not isinstance(_b0, dict):
+                    continue
+                _t0 = str(_b0.get("type") or "")
+                try:
+                    _q0 = int(_b0.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    _q0 = 0
+                if _t0 in _bag:
+                    _bag[_t0] = max(_bag[_t0], _q0)
+                    _bag["known"] = True
             for _p in _as_list(offer.get("passengers")):
                 if not isinstance(_p, dict):
                     continue
@@ -3698,7 +3794,78 @@ workflow:
             data = body.get("data") if isinstance(body, dict) else {}
             offers = _as_list(data.get("offers") if isinstance(data, dict) else [])
             cap = _cap(args.get("max_offers"), default=10, maximum=10)
-            normalised = [_normalise_offer(offer) for offer in offers[:cap] if isinstance(offer, dict)]
+            _shown = [offer for offer in offers[:cap] if isinstance(offer, dict)]
+            # noetl/ai-meta#291 Tier A — ENRICH each shown offer with one
+            # GET /air/offers/{id}.
+            #
+            # The offer_requests LIST response carries neither
+            # `passengers[].baggages` nor `conditions`; only the single-offer GET
+            # does.  Without this the baggage / fare-flexibility preferences can
+            # never fire, because every offer reads as "unknown".  Owner authorised
+            # one extra call per offer.
+            #
+            # Bounded by `cap` (max 10) and strictly BEST-EFFORT: a failed or slow
+            # enrichment leaves that offer's fields absent, which the planner
+            # already treats as "unknown -> never exclude".  A search therefore
+            # never fails because enrichment failed.
+            _enrich_ok = 0
+            _enrich_err = 0
+            _enrich_last = ""
+            if _text(args.get("enrich_offers") or "1") not in ("0", "false", "no"):
+                for _o in _shown:
+                    _oid = _o.get("id")
+                    if not _oid:
+                        continue
+                    # ⚠ `_request` here is (http_method, path, payload=None,
+                    # params=None) -- it has NO `retryable` kwarg.  Passing one
+                    # raised TypeError into the broad except below, which skipped
+                    # EVERY offer silently and made the feature look like "the
+                    # provider does not supply baggage".  Enrichment failures are
+                    # now COUNTED and surfaced in meta so a silent skip cannot
+                    # masquerade as missing provider data again.
+                    try:
+                        _eok, _esc, _ebody = _request(
+                            "GET",
+                            "/air/offers/" + urllib.parse.quote(str(_oid), safe=""),
+                        )
+                    except Exception as _exc:
+                        _enrich_err = _enrich_err + 1
+                        _enrich_last = "%s: %s" % (type(_exc).__name__, _exc)
+                        continue
+                    if not _eok or not isinstance(_ebody, dict):
+                        continue
+                    _full = _ebody.get("data")
+                    if isinstance(_full, dict):
+                        # Only the fields we need; pricing and itineraries stay as the
+                        # list response gave them, so enrichment cannot alter them.
+                        # ⚠ `baggages` lives at slices[].segments[].passengers[],
+                        # NOT on the offer's top-level `passengers`.  Reading the
+                        # top level returns nothing and every offer reads as
+                        # "unknown baggage", which looks exactly like a provider
+                        # that does not supply it.
+                        _bags = []
+                        for _sl in _as_list(_full.get("slices")):
+                            if not isinstance(_sl, dict):
+                                continue
+                            for _sg in _as_list(_sl.get("segments")):
+                                if not isinstance(_sg, dict):
+                                    continue
+                                for _pp in _as_list(_sg.get("passengers")):
+                                    if isinstance(_pp, dict):
+                                        _bags.extend(
+                                            b for b in _as_list(_pp.get("baggages"))
+                                            if isinstance(b, dict)
+                                        )
+                        if _bags:
+                            _o["_baggages"] = _bags
+                        if _full.get("passengers") is not None:
+                            _o["passengers"] = _full.get("passengers")
+                        if _full.get("conditions") is not None:
+                            _o["conditions"] = _full.get("conditions")
+                        if _full.get("fare_brand_name") is not None:
+                            _o["fare_brand_name"] = _full.get("fare_brand_name")
+                        _enrich_ok = _enrich_ok + 1
+            normalised = [_normalise_offer(offer) for offer in _shown]
             if not ok:
                 return _error("search_offers", "Duffel search_offers failed", body, status_code)
             currency = None
@@ -3717,6 +3884,9 @@ workflow:
                     "offers": normalised,
                     "offers_total": len(normalised),
                     "raw_offers_total": len(offers),
+            "enrich_ok": _enrich_ok,
+            "enrich_err": _enrich_err,
+            "enrich_last_error": _enrich_last,
                     "meta": {"count": len(normalised), "source": "duffel", "currency": currency},
                 },
                 f"{len(normalised)} Duffel flight offer(s)",
@@ -6639,6 +6809,15 @@ workflow:
                 v = cond.get("refundable") if cond.get("refundable") is not None else cond.get("changeable")
             return True if v is None else bool(v)   # unknown -> do not exclude
 
+        def _is_flexible_known(card, want):
+            # True only when the provider STATED the term and it is allowed.
+            cond = card.get("conditions") if isinstance(card.get("conditions"), dict) else {}
+            if want == "refundable":
+                return cond.get("refundable") is True
+            if want == "changeable":
+                return cond.get("changeable") is True
+            return cond.get("refundable") is True or cond.get("changeable") is True
+
         def _rank_offer_groups(cards, state):
             # Rule 6 — Cheapest / Fastest / Best value on every flight result.
             #
@@ -6668,6 +6847,38 @@ workflow:
 
             best = None
             pool = [c for c in timed if _offer_price(c) is not None]
+            # noetl/ai-meta#291 Tier A — baggage / fare flexibility are applied
+            # to the FULL pool BEFORE the faster-half cut, unlike the duration
+            # and layover hints which are speed nudges within it.
+            #
+            # "with a checked bag" is a concrete requirement, not a vague
+            # leaning: bagged fares are usually slower, so applying it after
+            # the speed cut left nothing to act on and the preference silently
+            # did nothing.  Still never a hard filter -- if NO offer satisfies
+            # it the pool is left intact -- and "unknown" never excludes.
+            # Cheapest and Fastest are computed off the full set above, so they
+            # still report the genuinely cheapest and fastest offers.
+            _ff = (state.get("flight_filters") or {}) if isinstance(state.get("flight_filters"), dict) else {}
+            _bagwant = _ff.get("baggage")
+            if _bagwant:
+                _withbag = [c for c in pool if _has_baggage(c, _bagwant)]
+                if _withbag:
+                    pool = _withbag
+            _flexwant = _ff.get("fare_flexibility")
+            if _flexwant:
+                # When the user explicitly asks for a term, prefer offers the
+                # provider states DO have it.  "Unknown never excludes" still
+                # holds -- an unknown offer is never called non-refundable, and
+                # if NOTHING is known to qualify the pool is left untouched --
+                # but a known-refundable fare should outrank an unknown one
+                # when refundability is exactly what was asked for.
+                _flex_known = [c for c in pool if _is_flexible_known(c, _flexwant)]
+                if _flex_known:
+                    pool = _flex_known
+                else:
+                    _flex = [c for c in pool if _is_flexible(c, _flexwant)]
+                    if _flex:
+                        pool = _flex
             if pool:
                 pool.sort(key=lambda c: (_offer_minutes(c), int(c.get("stops") or 0)))
                 keep = max(3, (len(pool) + 1) // 2)
@@ -6699,17 +6910,6 @@ workflow:
                     _inw = [c for c in strong if _in_window(c, _win)]
                     if _inw:
                         strong = _inw
-                _ff = (state.get("flight_filters") or {}) if isinstance(state.get("flight_filters"), dict) else {}
-                _bagwant = _ff.get("baggage")
-                if _bagwant:
-                    _withbag = [c for c in strong if _has_baggage(c, _bagwant)]
-                    if _withbag:
-                        strong = _withbag
-                _flexwant = _ff.get("fare_flexibility")
-                if _flexwant:
-                    _flex = [c for c in strong if _is_flexible(c, _flexwant)]
-                    if _flex:
-                        strong = _flex
                 best = min(strong, key=lambda c: (
                     _offer_price(c) / max(1.0, (_offer_minutes(c) or 60) / 60.0),
                     int(c.get("stops") or 0),
@@ -6753,6 +6953,17 @@ workflow:
                 "duration": str(offer.get("duration") or (itineraries[0].get("duration") if itineraries else "PT0H")),
                 "stops": int(offer.get("stops") if offer.get("stops") is not None else stops),
                 "validating_airline": str(offer.get("validating_airline") or (carriers[0] if carriers else "DU")),
+                # noetl/ai-meta#291 Tier A — carry baggage / conditions through.
+                # ⚠ This is the SECOND whitelist in the chain: the duffel
+                # dispatch normalises the provider offer, then _offer_card
+                # re-shapes it for the widget.  Adding the fields upstream was
+                # not enough -- they were retained by the dispatch and then
+                # dropped here, so the ranker saw `baggage: None`, read it as
+                # "unknown", and excluded nothing.  The preference looked
+                # implemented and did nothing.
+                "baggage": offer.get("baggage") if isinstance(offer.get("baggage"), dict) else None,
+                "conditions": offer.get("conditions") if isinstance(offer.get("conditions"), dict) else None,
+                "fare_brand": offer.get("fare_brand"),
                 "ctas": ["view_details", "book_this"],
             }
 
