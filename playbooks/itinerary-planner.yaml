@@ -2982,7 +2982,23 @@ workflow:
             _enrich_ok = 0
             _enrich_err = 0
             _enrich_last = ""
-            if _text(args.get("enrich_offers") or "1") not in ("0", "false", "no"):
+            # ⚠ DISABLED BY DEFAULT — owner decision, latency.  Enrichment costs one
+            # GET /air/offers/{id} per shown offer and measured +6-7s on the flight
+            # search (2.6s -> 8.5-9.9s for 10 offers).  That was judged too slow.
+            #
+            # CONSEQUENCE: `baggages` and `conditions` are absent from the
+            # offer_requests LIST response, so with enrichment off every offer
+            # reads as "unknown" and the baggage / fare-flexibility preferences
+            # cannot steer.  That is the accepted trade-off: speed over that
+            # filter.  Nothing is fabricated -- unknown never excludes, and no
+            # offer is labelled as having or lacking a bag.
+            #
+            # The plumbing is deliberately KEPT and is inert: pass `enrich_offers:
+            # "1"` in the tool arguments to turn it back on, per-call, with no
+            # other change.  The F7 departure-time window is unaffected -- it
+            # reads segments[].departure.at from the list response and costs
+            # nothing.
+            if _text(args.get("enrich_offers") or "0") not in ("0", "false", "no"):
                 for _o in _shown:
                     _oid = _o.get("id")
                     if not _oid:
@@ -3811,7 +3827,23 @@ workflow:
             _enrich_ok = 0
             _enrich_err = 0
             _enrich_last = ""
-            if _text(args.get("enrich_offers") or "1") not in ("0", "false", "no"):
+            # ⚠ DISABLED BY DEFAULT — owner decision, latency.  Enrichment costs one
+            # GET /air/offers/{id} per shown offer and measured +6-7s on the flight
+            # search (2.6s -> 8.5-9.9s for 10 offers).  That was judged too slow.
+            #
+            # CONSEQUENCE: `baggages` and `conditions` are absent from the
+            # offer_requests LIST response, so with enrichment off every offer
+            # reads as "unknown" and the baggage / fare-flexibility preferences
+            # cannot steer.  That is the accepted trade-off: speed over that
+            # filter.  Nothing is fabricated -- unknown never excludes, and no
+            # offer is labelled as having or lacking a bag.
+            #
+            # The plumbing is deliberately KEPT and is inert: pass `enrich_offers:
+            # "1"` in the tool arguments to turn it back on, per-call, with no
+            # other change.  The F7 departure-time window is unaffected -- it
+            # reads segments[].departure.at from the list response and costs
+            # nothing.
+            if _text(args.get("enrich_offers") or "0") not in ("0", "false", "no"):
                 for _o in _shown:
                     _oid = _o.get("id")
                     if not _oid:
