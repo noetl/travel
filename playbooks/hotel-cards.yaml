@@ -88,6 +88,12 @@ workload:
   adults: 2
   rooms: 1
   children: 0
+  # REQUIRED when children >= 1: one age per child, e.g. [8, 11].  HotelBeds
+  # prices a child by age and refuses an availability request that omits a
+  # paxes element per child (noetl/ai-meta#341).  No age is invented when this
+  # is short or absent -- the provider reports the shortfall instead, because a
+  # guessed age would change the price quoted back.
+  children_ages: []
   limit: 10
 
 workflow:
@@ -196,6 +202,7 @@ workflow:
           adults: "{{ workload.adults }}"
           rooms: "{{ workload.rooms }}"
           children: "{{ workload.children }}"
+          children_ages: "{{ workload.children_ages | default([]) }}"
     next:
       spec: { mode: exclusive }
       arcs:
