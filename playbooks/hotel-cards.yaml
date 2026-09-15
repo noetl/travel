@@ -10,9 +10,10 @@ metadata:
     (automation/agents/mcp/hotelbeds, tool `search_hotels`) and maps its
     availability summary onto the card contract the SPA renders:
 
-      id, name, stars, bedType, price, breakfastIncluded, image,
+      id, name, stars, bedType, price, breakfastIncluded, image, images[],
       __renderDetailCard, location, rating, ratingLabel, pricePerNight,
-      totalPrice, nights, amenities, description, category, rooms[]
+      totalPrice, nights, amenities, description, category, rooms[],
+      roomsTotal, priceBands[]
 
     Credentials are by reference only: the provider reads the HotelBeds
     apikey/secret from GCP Secret Manager (`hotelbeds-hotels-test`) using the
@@ -39,21 +40,49 @@ metadata:
 
     Nothing on the card is invented.  Where the provider cannot supply a
     field, the card carries the empty value rather than a plausible-looking
-    guess: HotelBeds availability returns only the cheapest bookable rate per
-    hotel, so `rooms[]` has one real entry, and `amenities` carries only what
-    the board code actually attests.  A fuller `rooms[]` / facilities list
-    needs an additive passthrough in the shared provider (see
-    "Known limits" below) — deliberately not done here, because the live
-    itinerary planner resolves that provider at latest version.
+    guess, and `amenities` carries only what the board code actually attests.
+
+    adiona/frontend#22 — three things the card used to drop are now carried, all
+    ADDITIVE (every previously emitted field keeps its name and meaning):
+
+    - ~20 hotels, not 10.  The provider caps on `max_hotels`, which this
+      playbook never sent; every search therefore fell back to the provider
+      workload default of 10 regardless of `limit`.  `limit` is now threaded
+      through as `max_hotels` and defaults to 20 (provider ceiling: 25).
+    - `rooms[]` carries up to `max_rooms` (10) REAL bookable rates spread
+      across `price_bands` (4) equal-width slices of that hotel's own price
+      range, instead of the single cheapest.  HotelBeds availability returns
+      the whole `rooms[].rates[]` list and the provider now passes it through;
+      previously everything but the cheapest rate was discarded.  Each room
+      carries `priceBand` + `priceBandRange`, which are FACTUAL buckets of the
+      observed prices, not product tiers, and have no names.  Nothing is
+      padded: a hotel with three bookable rates returns three rooms, and
+      `roomsTotal` says how many existed so "10 of 20" is distinguishable from
+      "10 was all there was".
+    - `images[]` carries EVERY Content API photo (the provider truncated at 6),
+      with `image` still the single hero the card contract names.  Rooms carry
+      `images[]` too, populated only from Content API photos that name that
+      room's `roomCode`; a room with no attributed photo falls back to the
+      hotel hero and says so via `hasRoomPhotos: false` rather than borrowing
+      another room's picture.
 
     Known limits (each is a provider gap, not a mapping bug):
-    - rooms[]    : one real bookable rate per hotel, not the full room list.
     - amenities  : derived from boardName only; the facilities list lives in
                    the HotelBeds Content API, which the provider does not
                    expose today.
     - description: composed from real fields (category, zone, board); the
                    provider does not surface the Content API description.
-  version: "1.0"
+    - room photos: only as good as HotelBeds' own roomCode attribution, which
+                   is sparse on the TEST key. An empty room `images[]` means
+                   unattributed, not "this room has no photos".
+
+    PENDING, NOT ADDRESSED HERE — adiona/frontend#22 also reports that hotel
+    search "stopped working".  Nothing in this change targets that: the three
+    items above are additive detail, and none of them is a fix for a search
+    that fails outright.  Diagnosing it needs a failing execution ID from the
+    owner, which has not been supplied.  If search is still failing after this
+    change, that report is still open and this playbook is not the reason.
+  version: "1.1"
   agent: false
   tags: [muno, hotels, hotelbeds, widgets, cards]
   capabilities: [mcp:hotelbeds]
@@ -94,7 +123,13 @@ workload:
   # is short or absent -- the provider reports the shortfall instead, because a
   # guessed age would change the price quoted back.
   children_ages: []
-  limit: 10
+  # adiona/frontend#22 — 10 -> 20, and it is actually THREADED to the provider
+  # now (see search_hotels below). 25 is the provider ceiling.
+  limit: 20
+  # Rates to emit per hotel, spread across price bands. Real provider rows
+  # only — a hotel with fewer bookable rates returns fewer.
+  max_rooms: 10
+  price_bands: 4
 
 workflow:
   - step: start
@@ -203,6 +238,11 @@ workflow:
           rooms: "{{ workload.rooms }}"
           children: "{{ workload.children }}"
           children_ages: "{{ workload.children_ages | default([]) }}"
+          # adiona/frontend#22 — this line is the whole "only 10 hotels" bug.
+          # The provider takes its cap from `max_hotels`, which this playbook
+          # never sent, so every search silently fell back to the provider
+          # workload default of 10 no matter what `limit` said.
+          max_hotels: "{{ workload.limit }}"
     next:
       spec: { mode: exclusive }
       arcs:
@@ -218,6 +258,8 @@ workflow:
         check_out: "{{ resolve_dates.check_out }}"
         adults: "{{ workload.adults }}"
         children: "{{ workload.children }}"
+        max_rooms: "{{ workload.max_rooms | default(10) }}"
+        price_bands: "{{ workload.price_bands | default(4) }}"
       code: |
         import json
         import re
@@ -326,36 +368,273 @@ workflow:
                 bits.append(f"— {str(board).title()} rate")
             return " ".join(bits).strip()
 
-        def _rooms(hotel, currency, image, nights):
-            # HotelBeds availability surfaces ONE bookable rate per hotel
-            # through this provider (the cheapest). Emit exactly that — a
-            # padded room list would be invented inventory.
-            rate_key = hotel.get("rateKey")
-            if not rate_key:
-                return []
-            # minRate is the net for the WHOLE stay. The card contract's room
-            # prices sit alongside pricePerNight on the same scale (sample:
-            # pricePerNight 220, rooms 180/280/240), so divide — showing the
-            # stay total here reads as a nightly rate and overstates it by
-            # the night count.
-            net = _num(hotel.get("minRate"))
-            per_night = round(net / nights, 2) if net is not None else None
+        def _price_bands(values, band_count):
+            # Split the observed price RANGE into equal-width bands and return
+            # the band index for each value.  Bands describe the rates that
+            # exist; they are not product tiers and carry no name.  Fewer
+            # distinct prices than bands means fewer bands — a hotel with two
+            # rate prices is not padded out to four.
+            usable = sorted({v for v in values if v is not None})
+            if not usable:
+                return {}, []
+            bands = max(1, min(int(band_count or 1), len(usable)))
+            low, high = usable[0], usable[-1]
+            width = (high - low) / bands if high > low else 0.0
+            edges = []
+            for b in range(bands):
+                b_low = low + width * b
+                b_high = high if b == bands - 1 else low + width * (b + 1)
+                edges.append({"band": b + 1, "min": round(b_low, 2), "max": round(b_high, 2)})
+            index = {}
+            for v in usable:
+                if width <= 0:
+                    index[v] = 0
+                else:
+                    index[v] = min(bands - 1, int((v - low) / width))
+            return index, edges
+
+        def _rooms(hotel, currency, image, nights, hotel_images):
+            # adiona/frontend#22 — emit up to `max_rooms` REAL bookable rates,
+            # spread across price bands, instead of the single cheapest.
+            #
+            # The provider now returns `rates[]` — every row HotelBeds had in
+            # `rooms[].rates[]`, cheapest first.  Before this, `_first_bookable_rate`
+            # picked one and the rest were discarded, so a hotel with 20
+            # bookable rates rendered as a one-room hotel.
+            #
+            # Nothing here invents inventory: a hotel with three rates returns
+            # three rooms.  The spread only decides WHICH of the real rates to
+            # show when there are more than `max_rooms` of them, so the list is
+            # not twenty variations of the cheapest room.
             try:
-                sleeps = int(adults) + int(children)
+                want = max(1, int(max_rooms))
             except (TypeError, ValueError):
-                sleeps = 2
-            return [{
-                "id": f"h{hotel.get('code')}-r1",
-                "type": hotel.get("roomName") or "Standard Room",
-                "price": _money(per_night, currency),
-                "totalPrice": net,
-                "sleeps": sleeps,
-                # HotelBeds rateClass "NRF" == non-refundable.
-                "refundable": str(hotel.get("rateClass") or "").upper() != "NRF",
-                "image": image,
-                # carried so a downstream book step can re-price this rate
-                "rate_key": rate_key,
-            }]
+                want = 10
+            rates = _as_list(hotel.get("rates"))
+            if not rates:
+                # Older provider version, or a hotel with no rate rows: fall
+                # back to the single bookable token the summary still carries.
+                rate_key = hotel.get("rateKey")
+                if not rate_key:
+                    return [], []
+                rates = [{
+                    "rateKey": rate_key,
+                    "net": hotel.get("minRate"),
+                    "net_value": _num(hotel.get("minRate")),
+                    "rateClass": hotel.get("rateClass"),
+                    "boardName": hotel.get("boardName"),
+                    "roomName": hotel.get("roomName"),
+                }]
+
+            nets = [_num(rate.get("net")) if rate.get("net_value") is None else rate.get("net_value")
+                    for rate in rates]
+            band_of, band_edges = _price_bands(nets, price_bands)
+
+            buckets = {}
+            for rate, net in zip(rates, nets):
+                buckets.setdefault(band_of.get(net, 0), []).append((net, rate))
+            for bucket in buckets.values():
+                bucket.sort(key=lambda pair: (pair[0] is None, pair[0] if pair[0] is not None else 0.0))
+
+            # Round-robin across the bands so the returned rates span the price
+            # range rather than all landing in the cheapest band.
+            picked = []
+            order = sorted(buckets.keys())
+            cursor = {band: 0 for band in order}
+            while len(picked) < want:
+                progressed = False
+                for band in order:
+                    if len(picked) >= want:
+                        break
+                    idx = cursor[band]
+                    if idx < len(buckets[band]):
+                        net, rate = buckets[band][idx]
+                        cursor[band] = idx + 1
+                        picked.append((band, net, rate))
+                        progressed = True
+                if not progressed:
+                    break
+
+            room_images = _as_dict(hotel.get("room_images"))
+            try:
+                default_sleeps = int(adults) + int(children)
+            except (TypeError, ValueError):
+                default_sleeps = 2
+
+            cards = []
+            for position, (band, net, rate) in enumerate(picked):
+                # minRate/net is the net for the WHOLE stay. The card contract's
+                # room prices sit alongside pricePerNight on the same scale
+                # (sample: pricePerNight 220, rooms 180/280/240), so divide —
+                # showing the stay total here reads as a nightly rate and
+                # overstates it by the night count.
+                per_night = round(net / nights, 2) if net is not None else None
+                room_code = str(rate.get("roomCode") or "")
+                imgs = [url for url in _as_list(room_images.get(room_code)) if url]
+                try:
+                    sleeps = int(rate.get("adults") or 0) + int(rate.get("children") or 0)
+                except (TypeError, ValueError):
+                    sleeps = 0
+                edge = band_edges[band] if band < len(band_edges) else None
+                cards.append({
+                    "id": f"h{hotel.get('code')}-r{position + 1}",
+                    "type": rate.get("roomName") or hotel.get("roomName") or "Standard Room",
+                    "roomCode": room_code,
+                    "board": rate.get("boardName") or "",
+                    "breakfastIncluded": _breakfast(rate.get("boardName")),
+                    "price": _money(per_night, currency),
+                    "pricePerNight": per_night,
+                    "totalPrice": net,
+                    "sleeps": sleeps or default_sleeps,
+                    # HotelBeds rateClass "NRF" == non-refundable.
+                    "refundable": str(rate.get("rateClass") or "").upper() != "NRF",
+                    "cancellationPolicies": _as_list(rate.get("cancellationPolicies")),
+                    # Room photos when the Content API attributed any to this
+                    # roomCode; otherwise the hotel photo, never a room photo
+                    # borrowed from a different room.
+                    "image": imgs[0] if imgs else image,
+                    "images": imgs,
+                    "hasRoomPhotos": bool(imgs),
+                    # Which slice of this hotel's own price range the rate sits
+                    # in. A factual bucket, not a product tier — it has no name.
+                    "priceBand": band + 1,
+                    "priceBandRange": edge,
+                    # carried so a downstream book step can re-price this rate
+                    "rate_key": rate.get("rateKey"),
+                })
+            return cards, band_edges
+
+        # ── externalised-result deref (noetl/ai-meta#343 follow-on) ────────
+        # A step result over the runtime's byte budget is stored OUT OF LINE and
+        # the consuming step receives
+        #   {"_ref": "noetl://execution/<eid>/result/<step>/<event_id>"}
+        # instead of the payload (docs/rfc/decoupled-context-event-chain.md §1).
+        #
+        # Hydration is normally a READ-side concern: `hydrate_result_references`
+        # runs when an execution is read back through the API. A step that
+        # consumes the value MID-WORKFLOW therefore gets the raw reference and
+        # sees no data — silently, with `status: success` and zero hotels.
+        #
+        # Reading the referenced child execution back through the API is the
+        # sanctioned deref, not a workaround: it is the same hydration path.
+        #
+        # ⚠ This playbook is exactly the shape that trips the budget — #22 made
+        # the payload much larger (all Content-API images instead of 6, up to 20
+        # rates per hotel, 20 hotels instead of 10). Flights stay under the floor
+        # and never externalise; hotels now routinely exceed it.
+        #
+        # Strictly best-effort: any failure leaves the envelope untouched, which
+        # degrades to the previous behaviour rather than breaking the search.
+        def _server_base():
+            import os
+            for key in ("NOETL_SERVER_URL", "NOETL_SERVER_RUST_SERVICE_HOST"):
+                v = str(os.environ.get(key) or "").strip()
+                if v.startswith("http"):
+                    return v.rstrip("/")
+                if v:
+                    return "http://%s:8082" % v
+            return "http://noetl-server-rust.noetl.svc.cluster.local:8082"
+
+        def _find_ref(node, depth=0):
+            if depth > 8:
+                return None
+            if isinstance(node, dict):
+                r = node.get("_ref")
+                if isinstance(r, str) and r.startswith("noetl://"):
+                    return r
+                for v in node.values():
+                    got = _find_ref(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for v in node:
+                    got = _find_ref(v, depth + 1)
+                    if got:
+                        return got
+            return None
+
+        def _hotels_in(node, depth=0):
+            if depth > 10:
+                return None
+            if isinstance(node, dict):
+                if isinstance(node.get("hotels"), list):
+                    return node
+                for v in node.values():
+                    got = _hotels_in(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for v in node:
+                    got = _hotels_in(v, depth + 1)
+                    if got:
+                        return got
+            return None
+
+        def _is_truncated(node, depth=0):
+            if depth > 10:
+                return False
+            if isinstance(node, dict):
+                if node.get("_truncated"):
+                    return True
+                for v in node.values():
+                    if _is_truncated(v, depth + 1):
+                        return True
+            elif isinstance(node, list):
+                for v in node:
+                    if _is_truncated(v, depth + 1):
+                        return True
+            return False
+
+        def _ref_bytes(node, depth=0):
+            if depth > 10:
+                return None
+            if isinstance(node, dict):
+                meta = node.get("meta")
+                if isinstance(meta, dict) and meta.get("bytes"):
+                    return meta.get("bytes")
+                for v in node.values():
+                    got = _ref_bytes(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for v in node:
+                    got = _ref_bytes(v, depth + 1)
+                    if got:
+                        return got
+            return None
+
+        def _materialise(env):
+            ref = _find_ref(env)
+            if not ref:
+                return env, None
+            import re as _re
+            import urllib.request as _ur
+            m = _re.match(r"noetl://execution/(\d+)/result/", ref)
+            if not m:
+                return env, "unparsable ref: %s" % ref[:120]
+            child = m.group(1)
+            url = "%s/api/executions/%s" % (_server_base(), child)
+            try:
+                with _ur.urlopen(url, timeout=45) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+            except Exception as exc:  # noqa: BLE001 — deref never breaks search
+                return env, "%s: %s" % (type(exc).__name__, exc)
+            # The API returns the reference plus `extracted` metadata, and
+            # `extracted` is explicitly flagged `_truncated` -- it is a SAMPLE,
+            # not the payload. Returning it would report a handful of hotels as
+            # though they were the whole answer: silently wrong, which is worse
+            # than empty. Refuse it and say why.
+            if _is_truncated(body):
+                return env, ("child %s result was externalised (%s bytes) and this read "
+                             "path returned only a _truncated sample; the payload lives in "
+                             "the result tier and is not hydrated here"
+                             ) % (child, _ref_bytes(body) or "?")
+            got = _hotels_in(body)
+            if got is None:
+                return env, "child %s read back without a hotels payload" % child
+            return got, None
+
+        search_result, _deref_error = _materialise(search_result)
 
         envelope = _as_dict(search_result)
         data = _as_dict(envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope)
@@ -372,9 +651,13 @@ workflow:
             rating = _rating(hotel)
             total = _num(hotel.get("minRate"))
             per_night = round(total / nights, 2) if total is not None else None
-            images = _as_list(hotel.get("images"))
+            # adiona/frontend#22 — ALL hotel photos, not just the first. `image`
+            # stays the single hero the card contract names; `images` is the
+            # full list the provider now returns uncapped.
+            images = [str(url) for url in _as_list(hotel.get("images")) if str(url or "").startswith("http")]
             image = images[0] if images else ""
             label, category = _product_placeholder(rating, stars, total)
+            rooms, band_edges = _rooms(hotel, currency, image, nights, images)
             cards.append({
                 "id": f"h{hotel.get('code')}",
                 "name": hotel.get("name") or "",
@@ -383,6 +666,7 @@ workflow:
                 "price": _money(per_night, currency),
                 "breakfastIncluded": _breakfast(hotel.get("boardName")),
                 "image": image,
+                "images": images,
                 "__renderDetailCard": True,
                 "location": hotel.get("destinationName") or hotel.get("zoneName") or "",
                 "rating": rating,
@@ -393,7 +677,12 @@ workflow:
                 "amenities": _amenities(hotel),
                 "description": _description(hotel, stars),
                 "category": category,
-                "rooms": _rooms(hotel, currency, image, nights),
+                "rooms": rooms,
+                # How many bookable rates the provider had, so a caller can
+                # tell "10 shown of 20" from "10 is all there was". Falls back
+                # to what was emitted when the provider predates `rates[]`.
+                "roomsTotal": len(_as_list(hotel.get("rates"))) or len(rooms),
+                "priceBands": band_edges,
             })
 
         result = {
@@ -406,6 +695,10 @@ workflow:
             "source": "hotelbeds",
             "hotelbeds_env": inner.get("hotelbeds_env"),
             "provider_error": provider_error or None,
+            # Non-null means the child result was externalised and could not be
+            # dereferenced — the card list is then empty for a PLUMBING reason,
+            # not because HotelBeds returned nothing. Those must not look alike.
+            "deref_error": _deref_error,
             # Machine-readable marker so a reader (or a test) can tell which
             # card fields are NOT product-decided yet.
             "placeholder_fields": ["ratingLabel", "category"] if PLACEHOLDER else [],

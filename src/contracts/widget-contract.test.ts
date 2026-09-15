@@ -11,8 +11,26 @@ describe('widget contract fixtures', () => {
   it('keeps one sample envelope for every widget type', () => {
     const sampleTypes = new Set(sampleEnvelopes.map((item) => item.widget_type));
 
-    expect(sampleEnvelopes).toHaveLength(27);
+    // Every widget type still has at least one sample. The count is derived
+    // rather than hardcoded so adding a version-N sample for an existing type
+    // does not read as a missing widget (adiona/frontend#21 added a schema_version
+    // 2 flight_card alongside the version 1 one).
     expect(sampleTypes).toEqual(new Set(WIDGET_TYPES));
+    expect(sampleEnvelopes.length).toBeGreaterThanOrEqual(WIDGET_TYPES.length);
+  });
+
+  it('keeps the version-2 flight_card sample alongside the version-1 one', () => {
+    // schema_version 2 is ADDITIVE: version 1 payloads stay valid, so both
+    // versions must keep validating for the whole migration window.
+    const flightCards = sampleEnvelopes.filter((item) => item.widget_type === 'flight_card');
+    expect(new Set(flightCards.map((item) => item.schema_version))).toEqual(new Set([1, 2]));
+
+    const ajv = new Ajv({ allErrors: true, strict: false });
+    addFormats(ajv);
+    const validate = ajv.compile(flightCardSchema);
+    for (const card of flightCards) {
+      expect(validate(card.payload), ajv.errorsText(validate.errors)).toBe(true);
+    }
   });
 
   it('requires numeric hotel fields inside itinerary summaries', () => {

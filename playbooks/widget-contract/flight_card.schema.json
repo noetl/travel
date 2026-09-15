@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://noetl.github.io/muno/widget-contract/flight_card.schema.json",
   "title": "FlightCardPayload",
-  "description": "Single Duffel or Amadeus flight offer card.",
+  "description": "Single Duffel or Amadeus flight offer card. schema_version 2 is ADDITIVE over 1: every v1 payload is still valid. v2 adds the detail the itinerary planner and muno/playbooks/flights-details already emit \u2014 airline logos, expanded segment detail, baggage/conditions (collapsed dicts AND option arrays), fare_brand, and per-offer direction (adiona/frontend#21, #22).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -30,6 +30,18 @@
         },
         "currency": {
           "type": "string"
+        },
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tax": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
@@ -68,7 +80,31 @@
                     "iata": {
                       "type": "string"
                     },
+                    "iataCode": {
+                      "type": "string"
+                    },
                     "at": {
+                      "type": "string"
+                    },
+                    "city": {
+                      "type": "string"
+                    },
+                    "city_iata": {
+                      "type": "string"
+                    },
+                    "airport_name": {
+                      "type": "string"
+                    },
+                    "country_code": {
+                      "type": "string"
+                    },
+                    "time_zone": {
+                      "type": "string"
+                    },
+                    "terminal": {
+                      "type": "string"
+                    },
+                    "type": {
                       "type": "string"
                     }
                   }
@@ -84,7 +120,31 @@
                     "iata": {
                       "type": "string"
                     },
+                    "iataCode": {
+                      "type": "string"
+                    },
                     "at": {
+                      "type": "string"
+                    },
+                    "city": {
+                      "type": "string"
+                    },
+                    "city_iata": {
+                      "type": "string"
+                    },
+                    "airport_name": {
+                      "type": "string"
+                    },
+                    "country_code": {
+                      "type": "string"
+                    },
+                    "time_zone": {
+                      "type": "string"
+                    },
+                    "terminal": {
+                      "type": "string"
+                    },
+                    "type": {
                       "type": "string"
                     }
                   }
@@ -101,9 +161,289 @@
                 "stops": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "id": {
+                  "type": "string"
+                },
+                "carrierCode": {
+                  "type": "string"
+                },
+                "carrier_name": {
+                  "type": "string"
+                },
+                "airline": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "Duffel airline reference. An empty logo URL means the provider has no logo \u2014 it is not an error, and no placeholder may be substituted.",
+                      "properties": {
+                        "iata_code": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "logo_symbol_url": {
+                          "type": "string"
+                        },
+                        "logo_lockup_url": {
+                          "type": "string"
+                        },
+                        "conditions_of_carriage_url": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "marketing_carrier": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "Duffel airline reference. An empty logo URL means the provider has no logo \u2014 it is not an error, and no placeholder may be substituted.",
+                      "properties": {
+                        "iata_code": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "logo_symbol_url": {
+                          "type": "string"
+                        },
+                        "logo_lockup_url": {
+                          "type": "string"
+                        },
+                        "conditions_of_carriage_url": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "operating_carrier": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "Duffel airline reference. An empty logo URL means the provider has no logo \u2014 it is not an error, and no placeholder may be substituted.",
+                      "properties": {
+                        "iata_code": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "logo_symbol_url": {
+                          "type": "string"
+                        },
+                        "logo_lockup_url": {
+                          "type": "string"
+                        },
+                        "conditions_of_carriage_url": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "operating_carrier_name": {
+                  "type": "string"
+                },
+                "operating_airline": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "Duffel airline reference. An empty logo URL means the provider has no logo \u2014 it is not an error, and no placeholder may be substituted.",
+                      "properties": {
+                        "iata_code": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "logo_symbol_url": {
+                          "type": "string"
+                        },
+                        "logo_lockup_url": {
+                          "type": "string"
+                        },
+                        "conditions_of_carriage_url": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "operating_flight_number": {
+                  "type": "string"
+                },
+                "number": {
+                  "type": "string"
+                },
+                "aircraft": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "iata_code": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cabin_class": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "distance": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "numberOfStops": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "technical_stops": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "description": "Aircraft lands mid-segment, passenger stays aboard. A connection is a separate segment, not a technical stop."
                 }
               }
             }
+          },
+          "id": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "one-way",
+              "outbound",
+              "inbound",
+              "round-trip",
+              ""
+            ]
+          },
+          "origin": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "iata": {
+                "type": "string"
+              },
+              "iataCode": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "city": {
+                "type": "string"
+              },
+              "city_iata": {
+                "type": "string"
+              },
+              "airport_name": {
+                "type": "string"
+              },
+              "country_code": {
+                "type": "string"
+              },
+              "time_zone": {
+                "type": "string"
+              },
+              "terminal": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              }
+            }
+          },
+          "destination": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "iata": {
+                "type": "string"
+              },
+              "iataCode": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "city": {
+                "type": "string"
+              },
+              "city_iata": {
+                "type": "string"
+              },
+              "airport_name": {
+                "type": "string"
+              },
+              "country_code": {
+                "type": "string"
+              },
+              "time_zone": {
+                "type": "string"
+              },
+              "terminal": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              }
+            }
+          },
+          "stops": {
+            "type": "integer",
+            "minimum": 0
           }
         }
       }
@@ -171,6 +511,297 @@
           }
         }
       }
+    },
+    "direction": {
+      "type": "string",
+      "enum": [
+        "one-way",
+        "outbound",
+        "inbound",
+        "round-trip",
+        ""
+      ],
+      "description": "Which half of a round trip this offer flies. Round trips searched in 'split' mode return two independently priced direction sets."
+    },
+    "airline": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Duffel airline reference. An empty logo URL means the provider has no logo \u2014 it is not an error, and no placeholder may be substituted.",
+          "properties": {
+            "iata_code": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "logo_symbol_url": {
+              "type": "string"
+            },
+            "logo_lockup_url": {
+              "type": "string"
+            },
+            "conditions_of_carriage_url": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The carrier to headline on the card."
+    },
+    "airlines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Duffel airline reference. An empty logo URL means the provider has no logo \u2014 it is not an error, and no placeholder may be substituted.",
+        "properties": {
+          "iata_code": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "logo_symbol_url": {
+            "type": "string"
+          },
+          "logo_lockup_url": {
+            "type": "string"
+          },
+          "conditions_of_carriage_url": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "Every airline flying any leg, deduplicated."
+    },
+    "baggage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "checked": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "carry_on": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "known": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Collapsed allowance the ranker reads. `known: false` means the provider did not state it."
+    },
+    "conditions": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "changeable": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "refundable": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "null on a term means unknown, NOT 'not allowed'."
+    },
+    "baggage_options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope",
+          "type",
+          "quantity"
+        ],
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "included",
+              "available"
+            ],
+            "description": "'included' is what the fare grants; 'available' is a priced add-on and only exists when the search ran with enrich_offers on."
+          },
+          "type": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "service_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_weight_kg": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "max_height_cm": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "max_length_cm": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "max_depth_cm": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "segment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "passenger_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "EMPTY means UNKNOWN. It must never render as 'no bag included'."
+    },
+    "baggage_known": {
+      "type": "boolean"
+    },
+    "conditions_options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope",
+          "type",
+          "allowed"
+        ],
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "offer",
+              "slice"
+            ]
+          },
+          "type": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "allowed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "null means the fare does not STATE the term: unknown, NOT 'not allowed'."
+          },
+          "penalty_amount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "penalty_currency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slice_id": {
+            "type": "string"
+          },
+          "slice_direction": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "EMPTY means UNKNOWN. It must never render as 'non-refundable'."
+    },
+    "conditions_known": {
+      "type": "boolean"
+    },
+    "fare_brand": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "passenger_count": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "live_mode": {
+      "type": [
+        "boolean",
+        "null"
+      ]
     }
   }
 }
