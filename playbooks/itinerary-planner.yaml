@@ -2964,7 +2964,12 @@ workflow:
             ok, status_code, body = _request("POST", "/air/offer_requests", payload=payload, params={"return_offers": "true"})
             data = body.get("data") if isinstance(body, dict) else {}
             offers = _as_list(data.get("offers") if isinstance(data, dict) else [])
-            cap = _cap(args.get("max_offers"), default=10, maximum=10)
+            # adiona/frontend#21 — offer cap raised 10 -> 50. Still bounded:
+            # 50, not unlimited. ⚠ `enrich_offers` costs one
+            # GET /air/offers/{id} per SHOWN offer, so with enrichment on
+            # this is now up to 50 extra calls, not 10. It stays off by
+            # default precisely so that cost is opt-in.
+            cap = _cap(args.get("max_offers"), default=50, maximum=50)
             _shown = [offer for offer in offers[:cap] if isinstance(offer, dict)]
             # noetl/ai-meta#291 Tier A — ENRICH each shown offer with one
             # GET /air/offers/{id}.
@@ -3809,7 +3814,12 @@ workflow:
             ok, status_code, body = _request("POST", "/air/offer_requests", payload=payload, params={"return_offers": "true"})
             data = body.get("data") if isinstance(body, dict) else {}
             offers = _as_list(data.get("offers") if isinstance(data, dict) else [])
-            cap = _cap(args.get("max_offers"), default=10, maximum=10)
+            # adiona/frontend#21 — offer cap raised 10 -> 50. Still bounded:
+            # 50, not unlimited. ⚠ `enrich_offers` costs one
+            # GET /air/offers/{id} per SHOWN offer, so with enrichment on
+            # this is now up to 50 extra calls, not 10. It stays off by
+            # default precisely so that cost is opt-in.
+            cap = _cap(args.get("max_offers"), default=50, maximum=50)
             _shown = [offer for offer in offers[:cap] if isinstance(offer, dict)]
             # noetl/ai-meta#291 Tier A — ENRICH each shown offer with one
             # GET /air/offers/{id}.
@@ -7308,9 +7318,13 @@ workflow:
             _set_center(next_state, _centroid(places[:5]), overwrite=True)
         elif first_tool == "mcp/duffel.search_offers":
             offers = _as_list(inner.get("offers") or inner.get("items") or inner.get("data"))
-            normalised_offers = [_offer_card(offer) for offer in offers[:10] if isinstance(offer, dict)]
+            # adiona/frontend#21 — 10 -> 50, matching the provider cap. Slicing to
+            # 10 here silently threw away 40 of the offers the provider had
+            # already paid for and returned.
+            _OFFER_LIMIT = 50
+            normalised_offers = [_offer_card(offer) for offer in offers[:_OFFER_LIMIT] if isinstance(offer, dict)]
             offer_ids = []
-            for offer in offers[:10]:
+            for offer in offers[:_OFFER_LIMIT]:
                 if isinstance(offer, dict):
                     offer_ids.append(offer.get("id") or offer.get("offer_id"))
             # F5 — budget cap is a POST-filter: Duffel has no price parameter,
@@ -8148,7 +8162,8 @@ workflow:
                                    "and I will quote to its address instead." % _label)
         elif intent == "show_flights":
             offers = tool_summary.get("offers") if isinstance(tool_summary.get("offers"), list) else []
-            flight_items = offers[:10]
+            # adiona/frontend#21 — 10 -> 50, matching the provider and normalise caps.
+            flight_items = offers[:50]
 
             # Rule 7 / F10 — NEVER fabricate inventory.  This branch used to
             # fall back to a synthetic offer with a hardcoded $220 price when
