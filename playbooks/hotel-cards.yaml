@@ -21,6 +21,14 @@ metadata:
     and the provider is pinned to the TEST/SANDBOX host
     (api.test.hotelbeds.com) — no live booking is reachable from here.
 
+    DATES ARE RELATIVE, never literal.  The default stay is `today +
+    check_in_offset_days` for `nights` nights, resolved by the
+    `resolve_dates` step at execution time; a caller-supplied check_in /
+    check_out is forwarded verbatim.  An absolute default here expires
+    silently — HotelBeds refuses a past check-in with `INVALID_DATA` and the
+    provider maps that to an empty card list, so the playbook returns zero
+    hotels while still completing green (noetl/ai-meta#338).
+
     TWO FIELDS ARE PRODUCT PLACEHOLDERS, not derived facts.  `ratingLabel`
     (8.7 -> "Excellent") and `category` ("Premium") are ranking/presentation
     decisions product owns and has not yet made — see
@@ -90,8 +98,22 @@ workload:
   latitude: 36.6002
   longitude: -121.8947
   radius: 20
-  check_in: "2026-09-10"
-  check_out: "2026-09-14"
+  # NO ABSOLUTE DATE BELONGS HERE.  A literal check-in is correct only until
+  # it is not: the previous `check_in: "2026-09-10"` made HotelBeds reject
+  # every availability call with `INVALID_DATA: The check-in must be in the
+  # future.` from 2026-09-11 onward, and because a provider error is mapped to
+  # an empty card list the playbook returned zero hotels while still
+  # completing green (noetl/ai-meta#338).
+  #
+  # Dates are RELATIVE by default and resolved at execution time by the
+  # `resolve_dates` step.  A caller that passes explicit check_in / check_out
+  # (YYYY-MM-DD) wins and is forwarded verbatim — the step never rewrites a
+  # date the caller chose, so a bad explicit date fails loudly in the provider
+  # rather than being silently replaced with a plausible one.
+  check_in: ""
+  check_out: ""
+  check_in_offset_days: 7
+  nights: 4
   adults: 2
   rooms: 1
   children: 0
@@ -108,6 +130,78 @@ workflow:
     desc: Entry point — the Rust runtime requires a step named `start`
     tool:
       kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: resolve_dates
+
+  - step: resolve_dates
+    desc: |
+      Resolve the effective stay dates at execution time.
+
+      Two cases, and the distinction is the point:
+
+      - the caller supplied a date  -> forward it VERBATIM.  This playbook is
+        not entitled to second-guess a date the caller chose; a past or
+        malformed one is rejected by the provider's own guard with the real
+        reason, which is strictly better than quietly substituting a date the
+        caller never asked for.
+      - the caller supplied nothing -> derive it from `date.today()`, so the
+        default cannot expire the way a YAML literal does.
+
+      `dates_source` records which branch ran, so a reader of the result can
+      tell a caller-chosen stay from a defaulted one.
+    tool:
+      kind: python
+      input:
+        check_in: "{{ workload.check_in | default('') }}"
+        check_out: "{{ workload.check_out | default('') }}"
+        offset_days: "{{ workload.check_in_offset_days | default(7) }}"
+        nights: "{{ workload.nights | default(4) }}"
+      code: |
+        from datetime import date, timedelta
+
+        def _text(value):
+            return "" if value is None else str(value).strip()
+
+        def _int(value, fallback):
+            try:
+                return int(str(value).strip())
+            except (TypeError, ValueError):
+                return fallback
+
+        _offset = max(0, _int(offset_days, 7))
+        _nights = max(1, _int(nights, 4))
+        _in = _text(check_in)
+        _out = _text(check_out)
+        _today = date.today()
+
+        # Only the ABSENT case is defaulted.  An explicit value — even an
+        # unparseable or past one — is passed through untouched.
+        if _in:
+            eff_in, in_source = _in, "caller"
+        else:
+            eff_in, in_source = (_today + timedelta(days=_offset)).isoformat(), "relative_default"
+
+        if _out:
+            eff_out, out_source = _out, "caller"
+        else:
+            # Anchor the stay length on the effective check-in when it parses;
+            # otherwise leave check_out absent rather than inventing a span
+            # from a date we could not read.
+            try:
+                eff_out = (date.fromisoformat(eff_in) + timedelta(days=_nights)).isoformat()
+                out_source = "relative_default"
+            except ValueError:
+                eff_out, out_source = "", "unresolved"
+
+        result = {
+            "check_in": eff_in,
+            "check_out": eff_out,
+            "dates_source": {"check_in": in_source, "check_out": out_source},
+            "resolved_on": _today.isoformat(),
+        }
+        globals().update({"result": result})
     next:
       spec: { mode: exclusive }
       arcs:
@@ -132,8 +226,8 @@ workflow:
           latitude: "{{ workload.latitude }}"
           longitude: "{{ workload.longitude }}"
           radius: "{{ workload.radius }}"
-          check_in: "{{ workload.check_in }}"
-          check_out: "{{ workload.check_out }}"
+          check_in: "{{ resolve_dates.check_in }}"
+          check_out: "{{ resolve_dates.check_out }}"
           adults: "{{ workload.adults }}"
           rooms: "{{ workload.rooms }}"
           children: "{{ workload.children }}"
@@ -153,8 +247,8 @@ workflow:
       kind: python
       input:
         search_result: "{{ search_hotels | default({}) }}"
-        check_in: "{{ workload.check_in }}"
-        check_out: "{{ workload.check_out }}"
+        check_in: "{{ resolve_dates.check_in }}"
+        check_out: "{{ resolve_dates.check_out }}"
         adults: "{{ workload.adults }}"
         children: "{{ workload.children }}"
         max_rooms: "{{ workload.max_rooms | default(10) }}"
