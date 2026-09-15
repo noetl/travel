@@ -34,7 +34,13 @@ metadata:
         travelers: { adults: 2, children: [{ age: 9 }] } }
 
     NO FILTERS are applied.  Every offer Duffel returns for the criteria comes
-    back, up to `max_offers` (50) PER DIRECTION SET.  Ranking, budget caps and
+    back, up to `max_offers` (50) PER DIRECTION SET.
+
+    ⚠ THE 50 CAP IS UNTESTED.  On the Duffel TEST key every live search returned
+    far fewer offers than the cap (4 one-way JFK-MCO; 7 across both directions
+    of a JFK-MCO round trip), so the cap has never actually been the limiter and
+    its behaviour at the boundary is unverified.  It needs a route/key that
+    returns 50+ offers before it can be called proven.  Ranking, budget caps and
     stop filters are the caller's business, not this playbook's.
 
     DIRECTION.  Every offer carries `direction`: "one-way", or "outbound" /
@@ -54,7 +60,17 @@ metadata:
 
     BAGGAGE AND CONDITIONS are OPT-IN beyond what the search response carries.
     `enrich_offers` defaults to FALSE and the default latency is therefore
-    unchanged:
+    unchanged.
+
+    ⭐ MEASURED ON LIVE DUFFEL (2026-09-15, execution 358155140093452288):
+    the offer_requests SEARCH response already carries baggage AND conditions.
+    With `enrich_offers` OFF every offer came back `baggage_known: true`
+    (checked + carry_on quantities) and `conditions_known: true` (change and
+    refund terms).  The long-standing note in the itinerary planner — that only
+    the single-offer GET supplies these — did NOT hold on this key.  So do NOT
+    assume the per-offer enrichment is required for baggage: it costs one GET
+    per offer and, on this evidence, buys only the PRICED `available` add-ons.
+    Re-measure before turning it on for a filter that the free data can serve.
 
       OFF (default) — `baggage_options[]` and `conditions_options[]` carry only
                       what the offer_requests search response itself attests.  Duffel's
@@ -194,6 +210,8 @@ workflow:
         children: "{{ workload.criteria.travelers.children if workload.criteria and workload.criteria.travelers and workload.criteria.travelers.children else workload.children }}"
         enrich_offers: "{{ workload.enrich_offers }}"
       code: |
+        import json
+
         def _as_dict(value):
             return value if isinstance(value, dict) else {}
 
@@ -399,6 +417,127 @@ workflow:
                 "ctas": ["view_details", "book_this"],
             }
 
+        # ── externalised-result deref guard (noetl/ai-meta#343 follow-on) ──
+        # Same mechanism as hotel-cards: a result over the runtime byte budget
+        # arrives as {"_ref": "noetl://execution/<eid>/result/<step>/<id>"} and
+        # hydration is a READ-side concern, so a mid-workflow consumer sees no
+        # data (docs/rfc/decoupled-context-event-chain.md §1).
+        #
+        # Flight payloads have stayed UNDER the floor in every live run measured
+        # so far, so this has not fired here — it is a guard, not a fix for an
+        # observed failure. A larger search (50 offers on a busy route, or
+        # `enrich_offers` on) could cross it, and the failure mode is silent:
+        # zero offers, `status: success`, no error.
+        def _server_base():
+            import os
+            for key in ("NOETL_SERVER_URL", "NOETL_SERVER_RUST_SERVICE_HOST"):
+                v = str(os.environ.get(key) or "").strip()
+                if v.startswith("http"):
+                    return v.rstrip("/")
+                if v:
+                    return "http://%s:8082" % v
+            return "http://noetl-server-rust.noetl.svc.cluster.local:8082"
+
+        def _find_ref(node, depth=0):
+            if depth > 8:
+                return None
+            if isinstance(node, dict):
+                r = node.get("_ref")
+                if isinstance(r, str) and r.startswith("noetl://"):
+                    return r
+                for v in node.values():
+                    got = _find_ref(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for v in node:
+                    got = _find_ref(v, depth + 1)
+                    if got:
+                        return got
+            return None
+
+        def _offers_in(node, depth=0):
+            if depth > 10:
+                return None
+            if isinstance(node, dict):
+                if isinstance(node.get("offers"), list):
+                    return node
+                for v in node.values():
+                    got = _offers_in(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for v in node:
+                    got = _offers_in(v, depth + 1)
+                    if got:
+                        return got
+            return None
+
+        def _is_truncated(node, depth=0):
+            if depth > 10:
+                return False
+            if isinstance(node, dict):
+                if node.get("_truncated"):
+                    return True
+                for v in node.values():
+                    if _is_truncated(v, depth + 1):
+                        return True
+            elif isinstance(node, list):
+                for v in node:
+                    if _is_truncated(v, depth + 1):
+                        return True
+            return False
+
+        def _ref_bytes(node, depth=0):
+            if depth > 10:
+                return None
+            if isinstance(node, dict):
+                meta = node.get("meta")
+                if isinstance(meta, dict) and meta.get("bytes"):
+                    return meta.get("bytes")
+                for v in node.values():
+                    got = _ref_bytes(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for v in node:
+                    got = _ref_bytes(v, depth + 1)
+                    if got:
+                        return got
+            return None
+
+        def _materialise(env):
+            ref = _find_ref(env)
+            if not ref:
+                return env, None
+            import re as _re
+            import urllib.request as _ur
+            m = _re.match(r"noetl://execution/(\d+)/result/", ref)
+            if not m:
+                return env, "unparsable ref: %s" % ref[:120]
+            url = "%s/api/executions/%s" % (_server_base(), m.group(1))
+            try:
+                with _ur.urlopen(url, timeout=45) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+            except Exception as exc:  # noqa: BLE001 — deref never breaks search
+                return env, "%s: %s" % (type(exc).__name__, exc)
+            # The API returns the reference plus `extracted` metadata, and
+            # `extracted` is explicitly flagged `_truncated` -- it is a SAMPLE,
+            # not the payload. Returning it would report a handful of offers as
+            # though they were the whole answer: silently wrong, which is worse
+            # than empty. Refuse it and say why.
+            if _is_truncated(body):
+                return env, ("child %s result was externalised (%s bytes) and this read "
+                             "path returned only a _truncated sample; the payload lives in "
+                             "the result tier and is not hydrated here"
+                             ) % (m.group(1), _ref_bytes(body) or "?")
+            got = _offers_in(body)
+            if got is None:
+                return env, "child %s read back without an offers payload" % m.group(1)
+            return got, None
+
+        search_result, _deref_error = _materialise(search_result)
+
         envelope = _as_dict(search_result)
         inner = _unwrap(envelope, "offers", "error")
         raw_offers = _as_list(inner.get("offers"))
@@ -458,6 +597,10 @@ workflow:
             },
             "source": "duffel",
             "provider_error": provider_error or None,
+            # Non-null means the child result was externalised and the deref
+            # failed — an empty offers[] is then a PLUMBING failure, not Duffel
+            # returning nothing. Those two must never look alike.
+            "deref_error": _deref_error,
             # Diagnostics, not card data.
             "offers_by_direction": by_direction,
             "directions": _as_list(inner.get("directions")),

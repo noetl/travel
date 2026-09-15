@@ -403,6 +403,138 @@ workflow:
                 })
             return cards, band_edges
 
+        # ── externalised-result deref (noetl/ai-meta#343 follow-on) ────────
+        # A step result over the runtime's byte budget is stored OUT OF LINE and
+        # the consuming step receives
+        #   {"_ref": "noetl://execution/<eid>/result/<step>/<event_id>"}
+        # instead of the payload (docs/rfc/decoupled-context-event-chain.md §1).
+        #
+        # Hydration is normally a READ-side concern: `hydrate_result_references`
+        # runs when an execution is read back through the API. A step that
+        # consumes the value MID-WORKFLOW therefore gets the raw reference and
+        # sees no data — silently, with `status: success` and zero hotels.
+        #
+        # Reading the referenced child execution back through the API is the
+        # sanctioned deref, not a workaround: it is the same hydration path.
+        #
+        # ⚠ This playbook is exactly the shape that trips the budget — #22 made
+        # the payload much larger (all Content-API images instead of 6, up to 20
+        # rates per hotel, 20 hotels instead of 10). Flights stay under the floor
+        # and never externalise; hotels now routinely exceed it.
+        #
+        # Strictly best-effort: any failure leaves the envelope untouched, which
+        # degrades to the previous behaviour rather than breaking the search.
+        def _server_base():
+            import os
+            for key in ("NOETL_SERVER_URL", "NOETL_SERVER_RUST_SERVICE_HOST"):
+                v = str(os.environ.get(key) or "").strip()
+                if v.startswith("http"):
+                    return v.rstrip("/")
+                if v:
+                    return "http://%s:8082" % v
+            return "http://noetl-server-rust.noetl.svc.cluster.local:8082"
+
+        def _find_ref(node, depth=0):
+            if depth > 8:
+                return None
+            if isinstance(node, dict):
+                r = node.get("_ref")
+                if isinstance(r, str) and r.startswith("noetl://"):
+                    return r
+                for v in node.values():
+                    got = _find_ref(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for v in node:
+                    got = _find_ref(v, depth + 1)
+                    if got:
+                        return got
+            return None
+
+        def _hotels_in(node, depth=0):
+            if depth > 10:
+                return None
+            if isinstance(node, dict):
+                if isinstance(node.get("hotels"), list):
+                    return node
+                for v in node.values():
+                    got = _hotels_in(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for v in node:
+                    got = _hotels_in(v, depth + 1)
+                    if got:
+                        return got
+            return None
+
+        def _is_truncated(node, depth=0):
+            if depth > 10:
+                return False
+            if isinstance(node, dict):
+                if node.get("_truncated"):
+                    return True
+                for v in node.values():
+                    if _is_truncated(v, depth + 1):
+                        return True
+            elif isinstance(node, list):
+                for v in node:
+                    if _is_truncated(v, depth + 1):
+                        return True
+            return False
+
+        def _ref_bytes(node, depth=0):
+            if depth > 10:
+                return None
+            if isinstance(node, dict):
+                meta = node.get("meta")
+                if isinstance(meta, dict) and meta.get("bytes"):
+                    return meta.get("bytes")
+                for v in node.values():
+                    got = _ref_bytes(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for v in node:
+                    got = _ref_bytes(v, depth + 1)
+                    if got:
+                        return got
+            return None
+
+        def _materialise(env):
+            ref = _find_ref(env)
+            if not ref:
+                return env, None
+            import re as _re
+            import urllib.request as _ur
+            m = _re.match(r"noetl://execution/(\d+)/result/", ref)
+            if not m:
+                return env, "unparsable ref: %s" % ref[:120]
+            child = m.group(1)
+            url = "%s/api/executions/%s" % (_server_base(), child)
+            try:
+                with _ur.urlopen(url, timeout=45) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+            except Exception as exc:  # noqa: BLE001 — deref never breaks search
+                return env, "%s: %s" % (type(exc).__name__, exc)
+            # The API returns the reference plus `extracted` metadata, and
+            # `extracted` is explicitly flagged `_truncated` -- it is a SAMPLE,
+            # not the payload. Returning it would report a handful of hotels as
+            # though they were the whole answer: silently wrong, which is worse
+            # than empty. Refuse it and say why.
+            if _is_truncated(body):
+                return env, ("child %s result was externalised (%s bytes) and this read "
+                             "path returned only a _truncated sample; the payload lives in "
+                             "the result tier and is not hydrated here"
+                             ) % (child, _ref_bytes(body) or "?")
+            got = _hotels_in(body)
+            if got is None:
+                return env, "child %s read back without a hotels payload" % child
+            return got, None
+
+        search_result, _deref_error = _materialise(search_result)
+
         envelope = _as_dict(search_result)
         data = _as_dict(envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope)
         inner = _as_dict(data.get("data") if isinstance(data.get("data"), dict) else data)
@@ -462,6 +594,10 @@ workflow:
             "source": "hotelbeds",
             "hotelbeds_env": inner.get("hotelbeds_env"),
             "provider_error": provider_error or None,
+            # Non-null means the child result was externalised and could not be
+            # dereferenced — the card list is then empty for a PLUMBING reason,
+            # not because HotelBeds returned nothing. Those must not look alike.
+            "deref_error": _deref_error,
             # Machine-readable marker so a reader (or a test) can tell which
             # card fields are NOT product-decided yet.
             "placeholder_fields": ["ratingLabel", "category"] if PLACEHOLDER else [],
