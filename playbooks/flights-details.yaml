@@ -1,0 +1,499 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: flights_details
+  path: muno/playbooks/flights-details
+  description: |
+    Duffel flight search returning EVERY available offer in the Muno
+    flight-details JSON shape (adiona/frontend#21).
+
+    Calls the registered Duffel provider (automation/agents/mcp/duffel, tool
+    `search_offers`) and maps its normalised offers onto the offer card the SPA
+    renders.  The card is the shape `_offer_card()` produces in the itinerary
+    planner, plus the three deltas issue #21 asks for:
+
+      (a) airline LOGOS       — `airline.logo_symbol_url` / `logo_lockup_url`
+                                on the offer and on every segment carrier.
+      (b) full segment detail — each leg of a connection separately, with
+                                departure/arrival {iata, at, city,
+                                airport_name}, carrier + carrier_name,
+                                operating_carrier + operating_carrier_name
+                                where Duffel gives one, flight_number,
+                                duration, stops.
+      (c) `baggage_options[]` + `conditions_options[]` — ARRAYS of options,
+          each tagged `scope`.  The collapsed `baggage` / `conditions` DICTS
+          the itinerary planner's ranker reads are emitted alongside them,
+          unchanged, so this payload is ALSO a valid `flight_card` widget
+          payload (schema_version 2).
+
+    INPUT is the SPA's FlightSearchCriteria verbatim:
+
+      { tripType: "one_way" | "round_trip",
+        origin: "JFK", destination: "MCO",
+        departDate: "YYYY-MM-DD", returnDate: "YYYY-MM-DD" (round_trip only),
+        travelers: { adults: 2, children: [{ age: 9 }] } }
+
+    NO FILTERS are applied.  Every offer Duffel returns for the criteria comes
+    back, up to `max_offers` (50) PER DIRECTION SET.  Ranking, budget caps and
+    stop filters are the caller's business, not this playbook's.
+
+    DIRECTION.  Every offer carries `direction`: "one-way", or "outbound" /
+    "inbound" for a round trip.  A round trip runs as TWO searches by default
+    (`round_trip_mode: split`), so each offer is independently priced and
+    independently bookable and its `direction` is a fact about that offer
+    rather than a label on half of one.  A Duffel round-trip offer prices both
+    slices TOGETHER and that total cannot be split per leg without inventing
+    the split.  Set `round_trip_mode: combined` to get one round-trip search
+    instead: whole-trip offers tagged `direction: "round-trip"` carrying both
+    itineraries.  Combined fares are often cheaper than two one-ways — that is
+    the trade-off of the default, and it is one workload key to change.
+
+    CHILDREN are real aged passengers (`{age: N}`), which is what Duffel prices
+    a child fare from.  A bare child COUNT is rejected by the provider rather
+    than silently priced as an adult — there is no safe default age.
+
+    BAGGAGE AND CONDITIONS are OPT-IN beyond what the search response carries.
+    `enrich_offers` defaults to FALSE and the default latency is therefore
+    unchanged:
+
+      OFF (default) — `baggage_options[]` and `conditions_options[]` carry only
+                      what the offer_requests search response itself attests.  Duffel's
+                      list response usually carries neither, so both arrays are
+                      usually EMPTY and `baggage_known` / `conditions_known`
+                      are false.  Empty means UNKNOWN.  It never means "no bag
+                      included" and must not be rendered as one.
+      ON            — one GET /air/offers/{id} per offer adds the fare's
+                      included allowance AND the PRICED `available_services`
+                      add-ons (scope "available", with amount + currency).
+                      Costs roughly +6-7s per 10 offers.  Best-effort: a failed
+                      enrichment leaves that offer's arrays as they were, and
+                      the search never fails because enrichment failed.
+
+    Credentials are by reference only: the provider reads the Duffel bearer
+    from GCP Secret Manager (`duffel-api-test`) using the worker pod's Workload
+    Identity.  This playbook never sees or carries it, and the provider is
+    pinned to the Duffel TEST environment — no live booking is reachable here.
+
+    Nothing on the card is invented.  Where Duffel cannot supply a field the
+    card carries the empty value rather than a plausible-looking guess: a
+    missing logo URL is "", an unstated fare condition is `allowed: null`
+    (unknown, NOT "not allowed"), and an offer with no baggage data gets an
+    empty array, never a fabricated allowance.
+  version: "1.0"
+  agent: false
+  tags: [muno, flights, duffel, widgets, cards]
+  capabilities: [mcp:duffel]
+
+workload:
+  # FlightSearchCriteria, flattened to workload keys. `criteria` may also be
+  # supplied whole as a nested object and takes precedence when present.
+  trip_type: "one_way"
+  origin: "JFK"
+  destination: "MCO"
+  depart_date: "2026-11-02"
+  return_date: ""
+  adults: 1
+  # Real aged passengers: [{"age": 9}, {"age": 3}]. A bare count is rejected.
+  children: []
+  cabin_class: "economy"
+  # Cap PER DIRECTION SET. 50 is the provider maximum.
+  max_offers: 50
+  # ⚠ OFF by default — see "BAGGAGE AND CONDITIONS" above. Turning this on
+  # costs one GET /air/offers/{id} per offer (~+6-7s per 10).
+  enrich_offers: false
+  # "split" (default) = two one-way searches for a round trip; "combined" = one
+  # round-trip search returning whole-trip offers.
+  round_trip_mode: "split"
+  criteria: {}
+
+workflow:
+  - step: start
+    desc: Entry point — the Rust runtime requires a step named `start`
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: search_offers
+
+  - step: search_offers
+    desc: Duffel offer search through the registered MCP provider (TEST env)
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/duffel
+      # noetl/ai-meta#136 — block for the child's real result so `search_offers`
+      # carries the offers payload rather than the async-start envelope.
+      return_result: true
+      result_step: duffel_dispatch
+      timeout: 180
+      payload:
+        method: tools/call
+        tool: search_offers
+        arguments:
+          origin: "{{ (workload.criteria.origin if workload.criteria and workload.criteria.origin else workload.origin) | upper }}"
+          destination: "{{ (workload.criteria.destination if workload.criteria and workload.criteria.destination else workload.destination) | upper }}"
+          departure_date: "{{ workload.criteria.departDate if workload.criteria and workload.criteria.departDate else workload.depart_date }}"
+          # Empty for a one-way. The provider treats a blank return_date as
+          # one-way, so `tripType` need not be forwarded separately.
+          return_date: "{{ (workload.criteria.returnDate if workload.criteria and workload.criteria.returnDate else workload.return_date) if (workload.criteria.tripType if workload.criteria and workload.criteria.tripType else workload.trip_type) == 'round_trip' else '' }}"
+          adults: "{{ workload.criteria.travelers.adults if workload.criteria and workload.criteria.travelers and workload.criteria.travelers.adults else workload.adults }}"
+          children: "{{ workload.criteria.travelers.children if workload.criteria and workload.criteria.travelers and workload.criteria.travelers.children else workload.children }}"
+          cabin_class: "{{ workload.cabin_class }}"
+          max_offers: "{{ workload.max_offers }}"
+          round_trip_mode: "{{ workload.round_trip_mode }}"
+          enrich_offers: "{{ '1' if workload.enrich_offers else '0' }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: enrich_airlines
+
+  - step: enrich_airlines
+    desc: |
+      Fill any airline the offer response left without a name or logo from
+      Duffel reference data (tool `get_airlines`).
+
+      Duffel normally embeds the full airline object — name and both logo URLs
+      — on each segment, so this is a FALLBACK that usually changes nothing.
+      It is consulted ONLY for an airline that arrived without a name or a
+      logo, and it never overrides what the offer itself carried.
+
+      It costs one unconditional GET /air/airlines (reference data, ~200ms)
+      per search.  That is the price of never shipping a card with a blank
+      airline; it is NOT the per-offer enrichment, which stays off by default.
+      A failed call is non-fatal: the reference map is then empty and the cards
+      carry whatever the offers already had.
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/duffel
+      return_result: true
+      result_step: duffel_dispatch
+      timeout: 120
+      payload:
+        method: tools/call
+        tool: get_airlines
+        arguments:
+          limit: 200
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: map_offers
+
+  - step: map_offers
+    desc: Map Duffel offers onto the Muno flight offer-card contract
+    tool:
+      kind: python
+      input:
+        search_result: "{{ search_offers | default({}) }}"
+        airlines_result: "{{ enrich_airlines | default({}) }}"
+        trip_type: "{{ workload.criteria.tripType if workload.criteria and workload.criteria.tripType else workload.trip_type }}"
+        origin: "{{ (workload.criteria.origin if workload.criteria and workload.criteria.origin else workload.origin) | upper }}"
+        destination: "{{ (workload.criteria.destination if workload.criteria and workload.criteria.destination else workload.destination) | upper }}"
+        depart_date: "{{ workload.criteria.departDate if workload.criteria and workload.criteria.departDate else workload.depart_date }}"
+        return_date_in: "{{ workload.criteria.returnDate if workload.criteria and workload.criteria.returnDate else workload.return_date }}"
+        adults: "{{ workload.criteria.travelers.adults if workload.criteria and workload.criteria.travelers and workload.criteria.travelers.adults else workload.adults }}"
+        children: "{{ workload.criteria.travelers.children if workload.criteria and workload.criteria.travelers and workload.criteria.travelers.children else workload.children }}"
+        enrich_offers: "{{ workload.enrich_offers }}"
+      code: |
+        def _as_dict(value):
+            return value if isinstance(value, dict) else {}
+
+        def _as_list(value):
+            return value if isinstance(value, list) else []
+
+        def _text(value, default=""):
+            if value is None:
+                return default
+            text = str(value).strip()
+            return text or default
+
+        def _unwrap(envelope, *keys):
+            # The MCP child returns {content, structuredContent:{data:{…}}} and
+            # the runtime may wrap that again in {data:{…}} or {result:{…}}.
+            # Walk down until a level actually carries one of `keys`.
+            seen = []
+            node = envelope
+            for _ in range(6):
+                node = _as_dict(node)
+                if any(key in node for key in keys):
+                    return node
+                nxt = None
+                for wrapper in ("structuredContent", "data", "result", "output_result"):
+                    if isinstance(node.get(wrapper), dict):
+                        nxt = node.get(wrapper)
+                        break
+                if nxt is None or nxt in seen:
+                    break
+                seen.append(nxt)
+                node = nxt
+            return _as_dict(node)
+
+        # ── airline reference-data fallback ───────────────────────────────
+        # Duffel embeds the whole airline object on each segment, so this map
+        # is only consulted for an airline that arrived WITHOUT a name or a
+        # logo.  It never overrides what the offer itself carried.
+        airline_ref = {}
+        for _a in _as_list(_unwrap(airlines_result, "airlines").get("airlines")):
+            _a = _as_dict(_a)
+            _code = _text(_a.get("iata_code"))
+            if _code:
+                airline_ref[_code] = _a
+
+        def _airline(card):
+            card = _as_dict(card)
+            code = _text(card.get("iata_code"))
+            name = _text(card.get("name"))
+            symbol = _text(card.get("logo_symbol_url"))
+            lockup = _text(card.get("logo_lockup_url"))
+            if code and (not name or not symbol or not lockup):
+                ref = _as_dict(airline_ref.get(code))
+                name = name or _text(ref.get("name"))
+                symbol = symbol or _text(ref.get("logo_symbol_url"))
+                lockup = lockup or _text(ref.get("logo_lockup_url"))
+            if not code and not name:
+                return None
+            return {
+                "iata_code": code,
+                "name": name,
+                "logo_symbol_url": symbol,
+                "logo_lockup_url": lockup,
+            }
+
+        def _place(place):
+            place = _as_dict(place)
+            iata = _text(place.get("iata") or place.get("iataCode"))
+            return {
+                "iata": iata,
+                "at": _text(place.get("at")),
+                "city": _text(place.get("city") or place.get("city_name")),
+                "airport_name": _text(place.get("airport_name") or place.get("name")),
+                "terminal": _text(place.get("terminal")),
+            }
+
+        def _segment_card(segment):
+            # (b) FULL per-segment detail. A connection is several segments and
+            # each one is emitted separately, so a 2-stop itinerary yields 3
+            # segment cards rather than one summarised leg.
+            segment = _as_dict(segment)
+            marketing = _airline(segment.get("marketing_carrier"))
+            operating = _airline(segment.get("operating_carrier"))
+            carrier = _text(segment.get("carrier") or segment.get("carrierCode"))
+            carrier_name = _text(segment.get("carrier_name")) or _text((marketing or {}).get("name"))
+            if not carrier and marketing:
+                carrier = _text(marketing.get("iata_code"))
+            card = {
+                "departure": _place(segment.get("departure")),
+                "arrival": _place(segment.get("arrival")),
+                "carrier": carrier,
+                "carrier_name": carrier_name,
+                "airline": marketing,
+                "flight_number": _text(segment.get("number") or segment.get("flight_number")),
+                "duration": _text(segment.get("duration"), "PT0H"),
+                "aircraft": segment.get("aircraft") if isinstance(segment.get("aircraft"), dict) else None,
+                "cabin_class": _text(segment.get("cabin_class")) or None,
+                # A TECHNICAL stop: the aircraft lands mid-segment and the
+                # passenger stays aboard. Distinct from a connection, which is
+                # an extra segment. Nearly always 0.
+                "stops": int(segment.get("numberOfStops") or 0),
+                "technical_stops": _as_list(segment.get("technical_stops")),
+            }
+            # Operating carrier only where Duffel actually states one that
+            # differs from the marketing carrier — a codeshare. Repeating the
+            # marketing airline here would read as a codeshare that is not one.
+            if operating and operating.get("iata_code") and operating.get("iata_code") != carrier:
+                card["operating_carrier"] = operating.get("iata_code")
+                card["operating_carrier_name"] = operating.get("name")
+                card["operating_airline"] = operating
+                card["operating_flight_number"] = _text(segment.get("operating_flight_number"))
+            return card
+
+        def _itinerary_card(itinerary, direction):
+            itinerary = _as_dict(itinerary)
+            segments = [_segment_card(seg) for seg in _as_list(itinerary.get("segments"))]
+            return {
+                "direction": _text(itinerary.get("direction")) or direction,
+                "origin": _place(itinerary.get("origin")),
+                "destination": _place(itinerary.get("destination")),
+                "duration": _text(itinerary.get("duration"), "PT0H"),
+                "stops": int(itinerary.get("stops") if itinerary.get("stops") is not None else max(0, len(segments) - 1)),
+                "segments": segments,
+            }
+
+        def _offer_card(offer):
+            offer = _as_dict(offer)
+            direction = _text(offer.get("direction")) or "one-way"
+            itineraries = [_itinerary_card(item, direction) for item in _as_list(offer.get("itineraries"))]
+            # (a) LOGOS: every airline on the offer, deduplicated, each with its
+            # logo URLs. `airline` is the marketing/validating carrier the card
+            # headlines; `airlines` is everyone flying any leg.
+            airlines = []
+            seen_codes = []
+            for candidate in [offer.get("owner")] + _as_list(offer.get("airlines")):
+                card = _airline(candidate)
+                if not card:
+                    continue
+                code = card.get("iata_code")
+                if code and code in seen_codes:
+                    continue
+                seen_codes.append(code)
+                airlines.append(card)
+            for itinerary in itineraries:
+                for segment in itinerary.get("segments", []):
+                    for card in (segment.get("airline"), segment.get("operating_airline")):
+                        card = _as_dict(card)
+                        code = card.get("iata_code")
+                        if card and code and code not in seen_codes:
+                            seen_codes.append(code)
+                            airlines.append(card)
+            carriers = [code for code in _as_list(offer.get("validatingAirlineCodes")) if _text(code)]
+            if not carriers:
+                carriers = [code for code in seen_codes if code]
+            stops = max(0, sum(len(it.get("segments", [])) for it in itineraries) - len(itineraries)) if itineraries else 0
+            price = _as_dict(offer.get("price"))
+            validating = carriers[0] if carriers else ""
+            headline = None
+            for card in airlines:
+                if card.get("iata_code") == validating:
+                    headline = card
+                    break
+            return {
+                "offer_id": _text(offer.get("offer_id") or offer.get("id")),
+                # (direction) "one-way", or "outbound"/"inbound" on a round trip.
+                "direction": direction,
+                "price": {
+                    "total": _text(price.get("total"), "0"),
+                    "currency": _text(price.get("currency"), "USD"),
+                    "base": price.get("base"),
+                    "tax": price.get("tax"),
+                },
+                "itineraries": itineraries or [{"direction": direction, "duration": "PT0H", "stops": 0, "segments": []}],
+                "carriers": carriers,
+                "airline": headline or (airlines[0] if airlines else None),
+                "airlines": airlines,
+                "duration": _text(offer.get("duration")) or (itineraries[0].get("duration") if itineraries else "PT0H"),
+                "stops": int(offer.get("stops") if offer.get("stops") is not None else stops),
+                "validating_airline": validating,
+                # (c) ARRAYS of options, not a single collapsed verdict.
+                # EMPTY means UNKNOWN — with `enrich_offers` off Duffel's search
+                # response states neither, and an empty array must never be
+                # rendered as "no bag included" or "non-refundable".
+                #
+                # ⚠ The arrays are `baggage_options` / `conditions_options`, NOT
+                # `baggage` / `conditions`.  Those two names already mean the
+                # planner's collapsed DICT everywhere else in this codebase, and
+                # one field name carrying a dict from one producer and a list
+                # from another is a validation and a rendering trap. Both shapes
+                # are emitted here under their own names, so this payload is
+                # also a valid `flight_card` widget payload.
+                "baggage_options": _as_list(offer.get("baggage_options")),
+                "baggage_known": bool(offer.get("baggage_known")),
+                "conditions_options": _as_list(offer.get("conditions_options")),
+                "conditions_known": bool(offer.get("conditions_known")),
+                # Collapsed dicts, byte-compatible with the planner's ranker
+                # (reads baggage.checked / conditions.refundable).
+                "baggage": offer.get("baggage") if isinstance(offer.get("baggage"), dict) else None,
+                "conditions": offer.get("conditions") if isinstance(offer.get("conditions"), dict) else None,
+                "fare_brand": offer.get("fare_brand"),
+                "passenger_count": offer.get("passenger_count"),
+                "expires_at": offer.get("expires_at"),
+                "live_mode": offer.get("live_mode"),
+                "ctas": ["view_details", "book_this"],
+            }
+
+        envelope = _as_dict(search_result)
+        inner = _unwrap(envelope, "offers", "error")
+        raw_offers = _as_list(inner.get("offers"))
+        # Prefer the provider's MESSAGE over the bare isError boolean: a caller
+        # that only ever sees `true` has to guess whether the search was
+        # rejected, the credential was missing, or Duffel was down.
+        #
+        # ⚠ The message hunt runs ONLY when something actually failed. The
+        # provider's SUCCESS envelope also carries `summary` ("6 Duffel flight
+        # offer(s)"), so reading these fields unconditionally reported a
+        # provider_error on every healthy search.
+        _failed = bool(envelope.get("isError")) or bool(inner.get("error"))
+        provider_error = None
+        if _failed:
+            provider_error = (
+                _text(inner.get("user_message"))
+                or _text(inner.get("error"))
+                or _text(envelope.get("summary"))
+                or True
+            )
+
+        cards = [_offer_card(offer) for offer in raw_offers if isinstance(offer, dict)]
+        by_direction = {}
+        for card in cards:
+            key = card.get("direction") or "one-way"
+            by_direction[key] = by_direction.get(key, 0) + 1
+
+        currency = ""
+        for card in cards:
+            currency = _text(_as_dict(card.get("price")).get("currency"))
+            if currency:
+                break
+        if not currency:
+            currency = _text(_as_dict(inner.get("meta")).get("currency"))
+
+        _trip = _text(trip_type, "one_way")
+        _children = _as_list(children)
+        try:
+            _adults = int(adults)
+        except (TypeError, ValueError):
+            _adults = 1
+
+        result = {
+            "offers": cards,
+            "count": len(cards),
+            "currency": currency or None,
+            "trip_type": _trip,
+            # Echoed back verbatim so the caller can prove which criteria
+            # produced these offers without re-deriving them from the cards.
+            "criteria": {
+                "tripType": _trip,
+                "origin": _text(origin),
+                "destination": _text(destination),
+                "departDate": _text(depart_date),
+                "returnDate": _text(return_date_in) if _trip == "round_trip" else None,
+                "travelers": {"adults": _adults, "children": _children},
+            },
+            "source": "duffel",
+            "provider_error": provider_error or None,
+            # Diagnostics, not card data.
+            "offers_by_direction": by_direction,
+            "directions": _as_list(inner.get("directions")),
+            "round_trip_mode": inner.get("round_trip_mode"),
+            "raw_offers_total": inner.get("raw_offers_total"),
+            "duffel_env": inner.get("duffel_env"),
+            # False means baggage/conditions arrays carry only what the search
+            # response attested — usually nothing. Empty is UNKNOWN.
+            "enriched": bool(inner.get("enriched")),
+            "enrich_ok": inner.get("enrich_ok"),
+            "enrich_err": inner.get("enrich_err"),
+            "enrich_last_error": inner.get("enrich_last_error") or None,
+            "airlines_reference_count": len(airline_ref),
+        }
+        globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: final_result
+
+  - step: final_result
+    desc: Return the mapped flight offers to the caller
+    tool:
+      kind: python
+      input:
+        mapped: "{{ map_offers | default({}) }}"
+      code: |
+        result = mapped if isinstance(mapped, dict) else {}
+        globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: end
+    desc: Terminal step — matches the `start`/`end` convention the MCP provider
+      playbooks use, so the execution reaches a completed terminal node.
+    tool:
+      kind: noop

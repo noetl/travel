@@ -26,5 +26,5 @@ for (const sample of samples) {
   const validatePayload = validators.get(sample.widget_type);
   if (!validatePayload(sample.payload)) throw new Error(`Payload failed for ${sample.widget_type}: ${ajv.errorsText(validatePayload.errors)}`);
 }
-if (samples.length !== 27) throw new Error(`Expected 27 samples, got ${samples.length}`);
+if (samples.length !== 28) throw new Error(`Expected 28 samples, got ${samples.length}`);
 console.log(`Widget dispatch smoke passed for ${samples.length} widget envelopes`);

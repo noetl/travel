@@ -48,7 +48,10 @@ export interface WidgetEnvelope {
       [k: string]: string | number | boolean | null;
     };
   };
-  schema_version: 1;
+  /**
+   * Catalogue schema version. 2 adds the flight_card detail in adiona/frontend#21 (airline logos, expanded segments, baggage/conditions option arrays, offer direction). Every addition is OPTIONAL, so every version-1 payload is still valid and 1 stays accepted: this is the N/N-1 migration window the widget contract describes, not a breaking change. Producers that emit none of the version-2 fields may keep stamping 1.
+   */
+  schema_version: 1 | 2;
 }
 
 
@@ -197,30 +200,129 @@ export interface FilterPanelPayload {
 
 
 /**
- * Single Duffel or Amadeus flight offer card.
+ * Single Duffel or Amadeus flight offer card. schema_version 2 is ADDITIVE over 1: every v1 payload is still valid. v2 adds the detail the itinerary planner and muno/playbooks/flights-details already emit — airline logos, expanded segment detail, baggage/conditions (collapsed dicts AND option arrays), fare_brand, and per-offer direction (adiona/frontend#21, #22).
  */
 export interface FlightCardPayload {
   offer_id: string;
   price: {
     total: string;
     currency: string;
+    base?: string | null;
+    tax?: string | null;
   };
   itineraries: {
     duration?: string;
     segments: {
       departure: {
         iata: string;
+        iataCode?: string;
         at: string;
+        city?: string;
+        city_iata?: string;
+        airport_name?: string;
+        country_code?: string;
+        time_zone?: string;
+        terminal?: string;
+        type?: string;
       };
       arrival: {
         iata: string;
+        iataCode?: string;
         at: string;
+        city?: string;
+        city_iata?: string;
+        airport_name?: string;
+        country_code?: string;
+        time_zone?: string;
+        terminal?: string;
+        type?: string;
       };
       carrier: string;
       flight_number?: string;
       duration: string;
       stops?: number;
+      id?: string;
+      carrierCode?: string;
+      carrier_name?: string;
+      airline?: {
+        iata_code?: string;
+        name?: string;
+        logo_symbol_url?: string;
+        logo_lockup_url?: string;
+        conditions_of_carriage_url?: string;
+        id?: string;
+      } | null;
+      marketing_carrier?: {
+        iata_code?: string;
+        name?: string;
+        logo_symbol_url?: string;
+        logo_lockup_url?: string;
+        conditions_of_carriage_url?: string;
+        id?: string;
+      } | null;
+      operating_carrier?:
+        | {
+            iata_code?: string;
+            name?: string;
+            logo_symbol_url?: string;
+            logo_lockup_url?: string;
+            conditions_of_carriage_url?: string;
+            id?: string;
+          }
+        | string
+        | null;
+      operating_carrier_name?: string;
+      operating_airline?: {
+        iata_code?: string;
+        name?: string;
+        logo_symbol_url?: string;
+        logo_lockup_url?: string;
+        conditions_of_carriage_url?: string;
+        id?: string;
+      } | null;
+      operating_flight_number?: string;
+      number?: string;
+      aircraft?: {
+        iata_code?: string;
+        name?: string;
+      } | null;
+      cabin_class?: string | null;
+      distance?: string | null;
+      numberOfStops?: number;
+      /**
+       * Aircraft lands mid-segment, passenger stays aboard. A connection is a separate segment, not a technical stop.
+       */
+      technical_stops?: {
+        [k: string]: unknown;
+      }[];
     }[];
+    id?: string;
+    direction?: 'one-way' | 'outbound' | 'inbound' | 'round-trip' | '';
+    origin?: {
+      iata?: string;
+      iataCode?: string;
+      at?: string;
+      city?: string;
+      city_iata?: string;
+      airport_name?: string;
+      country_code?: string;
+      time_zone?: string;
+      terminal?: string;
+      type?: string;
+    };
+    destination?: {
+      iata?: string;
+      iataCode?: string;
+      at?: string;
+      city?: string;
+      city_iata?: string;
+      airport_name?: string;
+      country_code?: string;
+      time_zone?: string;
+      terminal?: string;
+      type?: string;
+    };
+    stops?: number;
   }[];
   carriers: string[];
   duration: string;
@@ -235,6 +337,89 @@ export interface FlightCardPayload {
       kind?: 'info' | 'warning' | 'success' | 'error';
     }[];
   };
+  /**
+   * Which half of a round trip this offer flies. Round trips searched in 'split' mode return two independently priced direction sets.
+   */
+  direction?: 'one-way' | 'outbound' | 'inbound' | 'round-trip' | '';
+  /**
+   * The carrier to headline on the card.
+   */
+  airline?: {
+    iata_code?: string;
+    name?: string;
+    logo_symbol_url?: string;
+    logo_lockup_url?: string;
+    conditions_of_carriage_url?: string;
+    id?: string;
+  } | null;
+  /**
+   * Every airline flying any leg, deduplicated.
+   */
+  airlines?: {
+    iata_code?: string;
+    name?: string;
+    logo_symbol_url?: string;
+    logo_lockup_url?: string;
+    conditions_of_carriage_url?: string;
+    id?: string;
+  }[];
+  /**
+   * Collapsed allowance the ranker reads. `known: false` means the provider did not state it.
+   */
+  baggage?: {
+    checked?: number;
+    carry_on?: number;
+    known?: boolean;
+  } | null;
+  /**
+   * null on a term means unknown, NOT 'not allowed'.
+   */
+  conditions?: {
+    changeable?: boolean | null;
+    refundable?: boolean | null;
+  } | null;
+  /**
+   * EMPTY means UNKNOWN. It must never render as 'no bag included'.
+   */
+  baggage_options?: {
+    /**
+     * 'included' is what the fare grants; 'available' is a priced add-on and only exists when the search ran with enrich_offers on.
+     */
+    scope: 'included' | 'available';
+    type: string;
+    quantity: number;
+    amount?: string | null;
+    currency?: string | null;
+    service_id?: string | null;
+    max_weight_kg?: number | null;
+    max_height_cm?: number | null;
+    max_length_cm?: number | null;
+    max_depth_cm?: number | null;
+    segment_ids?: string[];
+    passenger_ids?: string[];
+  }[];
+  baggage_known?: boolean;
+  /**
+   * EMPTY means UNKNOWN. It must never render as 'non-refundable'.
+   */
+  conditions_options?: {
+    scope: 'offer' | 'slice';
+    type: string;
+    key?: string;
+    /**
+     * null means the fare does not STATE the term: unknown, NOT 'not allowed'.
+     */
+    allowed: boolean | null;
+    penalty_amount?: string | null;
+    penalty_currency?: string | null;
+    slice_id?: string;
+    slice_direction?: string;
+  }[];
+  conditions_known?: boolean;
+  fare_brand?: string | null;
+  passenger_count?: number | null;
+  expires_at?: string | null;
+  live_mode?: boolean | null;
 }
 
 
@@ -249,30 +434,129 @@ export interface FlightListPayload {
   currency: string;
 }
 /**
- * Single Duffel or Amadeus flight offer card.
+ * Single Duffel or Amadeus flight offer card. schema_version 2 is ADDITIVE over 1: every v1 payload is still valid. v2 adds the detail the itinerary planner and muno/playbooks/flights-details already emit — airline logos, expanded segment detail, baggage/conditions (collapsed dicts AND option arrays), fare_brand, and per-offer direction (adiona/frontend#21, #22).
  */
 export interface FlightCardPayload {
   offer_id: string;
   price: {
     total: string;
     currency: string;
+    base?: string | null;
+    tax?: string | null;
   };
   itineraries: {
     duration?: string;
     segments: {
       departure: {
         iata: string;
+        iataCode?: string;
         at: string;
+        city?: string;
+        city_iata?: string;
+        airport_name?: string;
+        country_code?: string;
+        time_zone?: string;
+        terminal?: string;
+        type?: string;
       };
       arrival: {
         iata: string;
+        iataCode?: string;
         at: string;
+        city?: string;
+        city_iata?: string;
+        airport_name?: string;
+        country_code?: string;
+        time_zone?: string;
+        terminal?: string;
+        type?: string;
       };
       carrier: string;
       flight_number?: string;
       duration: string;
       stops?: number;
+      id?: string;
+      carrierCode?: string;
+      carrier_name?: string;
+      airline?: {
+        iata_code?: string;
+        name?: string;
+        logo_symbol_url?: string;
+        logo_lockup_url?: string;
+        conditions_of_carriage_url?: string;
+        id?: string;
+      } | null;
+      marketing_carrier?: {
+        iata_code?: string;
+        name?: string;
+        logo_symbol_url?: string;
+        logo_lockup_url?: string;
+        conditions_of_carriage_url?: string;
+        id?: string;
+      } | null;
+      operating_carrier?:
+        | {
+            iata_code?: string;
+            name?: string;
+            logo_symbol_url?: string;
+            logo_lockup_url?: string;
+            conditions_of_carriage_url?: string;
+            id?: string;
+          }
+        | string
+        | null;
+      operating_carrier_name?: string;
+      operating_airline?: {
+        iata_code?: string;
+        name?: string;
+        logo_symbol_url?: string;
+        logo_lockup_url?: string;
+        conditions_of_carriage_url?: string;
+        id?: string;
+      } | null;
+      operating_flight_number?: string;
+      number?: string;
+      aircraft?: {
+        iata_code?: string;
+        name?: string;
+      } | null;
+      cabin_class?: string | null;
+      distance?: string | null;
+      numberOfStops?: number;
+      /**
+       * Aircraft lands mid-segment, passenger stays aboard. A connection is a separate segment, not a technical stop.
+       */
+      technical_stops?: {
+        [k: string]: unknown;
+      }[];
     }[];
+    id?: string;
+    direction?: 'one-way' | 'outbound' | 'inbound' | 'round-trip' | '';
+    origin?: {
+      iata?: string;
+      iataCode?: string;
+      at?: string;
+      city?: string;
+      city_iata?: string;
+      airport_name?: string;
+      country_code?: string;
+      time_zone?: string;
+      terminal?: string;
+      type?: string;
+    };
+    destination?: {
+      iata?: string;
+      iataCode?: string;
+      at?: string;
+      city?: string;
+      city_iata?: string;
+      airport_name?: string;
+      country_code?: string;
+      time_zone?: string;
+      terminal?: string;
+      type?: string;
+    };
+    stops?: number;
   }[];
   carriers: string[];
   duration: string;
@@ -287,6 +571,89 @@ export interface FlightCardPayload {
       kind?: 'info' | 'warning' | 'success' | 'error';
     }[];
   };
+  /**
+   * Which half of a round trip this offer flies. Round trips searched in 'split' mode return two independently priced direction sets.
+   */
+  direction?: 'one-way' | 'outbound' | 'inbound' | 'round-trip' | '';
+  /**
+   * The carrier to headline on the card.
+   */
+  airline?: {
+    iata_code?: string;
+    name?: string;
+    logo_symbol_url?: string;
+    logo_lockup_url?: string;
+    conditions_of_carriage_url?: string;
+    id?: string;
+  } | null;
+  /**
+   * Every airline flying any leg, deduplicated.
+   */
+  airlines?: {
+    iata_code?: string;
+    name?: string;
+    logo_symbol_url?: string;
+    logo_lockup_url?: string;
+    conditions_of_carriage_url?: string;
+    id?: string;
+  }[];
+  /**
+   * Collapsed allowance the ranker reads. `known: false` means the provider did not state it.
+   */
+  baggage?: {
+    checked?: number;
+    carry_on?: number;
+    known?: boolean;
+  } | null;
+  /**
+   * null on a term means unknown, NOT 'not allowed'.
+   */
+  conditions?: {
+    changeable?: boolean | null;
+    refundable?: boolean | null;
+  } | null;
+  /**
+   * EMPTY means UNKNOWN. It must never render as 'no bag included'.
+   */
+  baggage_options?: {
+    /**
+     * 'included' is what the fare grants; 'available' is a priced add-on and only exists when the search ran with enrich_offers on.
+     */
+    scope: 'included' | 'available';
+    type: string;
+    quantity: number;
+    amount?: string | null;
+    currency?: string | null;
+    service_id?: string | null;
+    max_weight_kg?: number | null;
+    max_height_cm?: number | null;
+    max_length_cm?: number | null;
+    max_depth_cm?: number | null;
+    segment_ids?: string[];
+    passenger_ids?: string[];
+  }[];
+  baggage_known?: boolean;
+  /**
+   * EMPTY means UNKNOWN. It must never render as 'non-refundable'.
+   */
+  conditions_options?: {
+    scope: 'offer' | 'slice';
+    type: string;
+    key?: string;
+    /**
+     * null means the fare does not STATE the term: unknown, NOT 'not allowed'.
+     */
+    allowed: boolean | null;
+    penalty_amount?: string | null;
+    penalty_currency?: string | null;
+    slice_id?: string;
+    slice_direction?: string;
+  }[];
+  conditions_known?: boolean;
+  fare_brand?: string | null;
+  passenger_count?: number | null;
+  expires_at?: string | null;
+  live_mode?: boolean | null;
 }
 
 
@@ -488,30 +855,129 @@ export interface ItinerarySummaryPayload {
   ctas?: ('confirm' | 'edit')[];
 }
 /**
- * Single Duffel or Amadeus flight offer card.
+ * Single Duffel or Amadeus flight offer card. schema_version 2 is ADDITIVE over 1: every v1 payload is still valid. v2 adds the detail the itinerary planner and muno/playbooks/flights-details already emit — airline logos, expanded segment detail, baggage/conditions (collapsed dicts AND option arrays), fare_brand, and per-offer direction (adiona/frontend#21, #22).
  */
 export interface FlightCardPayload {
   offer_id: string;
   price: {
     total: string;
     currency: string;
+    base?: string | null;
+    tax?: string | null;
   };
   itineraries: {
     duration?: string;
     segments: {
       departure: {
         iata: string;
+        iataCode?: string;
         at: string;
+        city?: string;
+        city_iata?: string;
+        airport_name?: string;
+        country_code?: string;
+        time_zone?: string;
+        terminal?: string;
+        type?: string;
       };
       arrival: {
         iata: string;
+        iataCode?: string;
         at: string;
+        city?: string;
+        city_iata?: string;
+        airport_name?: string;
+        country_code?: string;
+        time_zone?: string;
+        terminal?: string;
+        type?: string;
       };
       carrier: string;
       flight_number?: string;
       duration: string;
       stops?: number;
+      id?: string;
+      carrierCode?: string;
+      carrier_name?: string;
+      airline?: {
+        iata_code?: string;
+        name?: string;
+        logo_symbol_url?: string;
+        logo_lockup_url?: string;
+        conditions_of_carriage_url?: string;
+        id?: string;
+      } | null;
+      marketing_carrier?: {
+        iata_code?: string;
+        name?: string;
+        logo_symbol_url?: string;
+        logo_lockup_url?: string;
+        conditions_of_carriage_url?: string;
+        id?: string;
+      } | null;
+      operating_carrier?:
+        | {
+            iata_code?: string;
+            name?: string;
+            logo_symbol_url?: string;
+            logo_lockup_url?: string;
+            conditions_of_carriage_url?: string;
+            id?: string;
+          }
+        | string
+        | null;
+      operating_carrier_name?: string;
+      operating_airline?: {
+        iata_code?: string;
+        name?: string;
+        logo_symbol_url?: string;
+        logo_lockup_url?: string;
+        conditions_of_carriage_url?: string;
+        id?: string;
+      } | null;
+      operating_flight_number?: string;
+      number?: string;
+      aircraft?: {
+        iata_code?: string;
+        name?: string;
+      } | null;
+      cabin_class?: string | null;
+      distance?: string | null;
+      numberOfStops?: number;
+      /**
+       * Aircraft lands mid-segment, passenger stays aboard. A connection is a separate segment, not a technical stop.
+       */
+      technical_stops?: {
+        [k: string]: unknown;
+      }[];
     }[];
+    id?: string;
+    direction?: 'one-way' | 'outbound' | 'inbound' | 'round-trip' | '';
+    origin?: {
+      iata?: string;
+      iataCode?: string;
+      at?: string;
+      city?: string;
+      city_iata?: string;
+      airport_name?: string;
+      country_code?: string;
+      time_zone?: string;
+      terminal?: string;
+      type?: string;
+    };
+    destination?: {
+      iata?: string;
+      iataCode?: string;
+      at?: string;
+      city?: string;
+      city_iata?: string;
+      airport_name?: string;
+      country_code?: string;
+      time_zone?: string;
+      terminal?: string;
+      type?: string;
+    };
+    stops?: number;
   }[];
   carriers: string[];
   duration: string;
@@ -526,6 +992,89 @@ export interface FlightCardPayload {
       kind?: 'info' | 'warning' | 'success' | 'error';
     }[];
   };
+  /**
+   * Which half of a round trip this offer flies. Round trips searched in 'split' mode return two independently priced direction sets.
+   */
+  direction?: 'one-way' | 'outbound' | 'inbound' | 'round-trip' | '';
+  /**
+   * The carrier to headline on the card.
+   */
+  airline?: {
+    iata_code?: string;
+    name?: string;
+    logo_symbol_url?: string;
+    logo_lockup_url?: string;
+    conditions_of_carriage_url?: string;
+    id?: string;
+  } | null;
+  /**
+   * Every airline flying any leg, deduplicated.
+   */
+  airlines?: {
+    iata_code?: string;
+    name?: string;
+    logo_symbol_url?: string;
+    logo_lockup_url?: string;
+    conditions_of_carriage_url?: string;
+    id?: string;
+  }[];
+  /**
+   * Collapsed allowance the ranker reads. `known: false` means the provider did not state it.
+   */
+  baggage?: {
+    checked?: number;
+    carry_on?: number;
+    known?: boolean;
+  } | null;
+  /**
+   * null on a term means unknown, NOT 'not allowed'.
+   */
+  conditions?: {
+    changeable?: boolean | null;
+    refundable?: boolean | null;
+  } | null;
+  /**
+   * EMPTY means UNKNOWN. It must never render as 'no bag included'.
+   */
+  baggage_options?: {
+    /**
+     * 'included' is what the fare grants; 'available' is a priced add-on and only exists when the search ran with enrich_offers on.
+     */
+    scope: 'included' | 'available';
+    type: string;
+    quantity: number;
+    amount?: string | null;
+    currency?: string | null;
+    service_id?: string | null;
+    max_weight_kg?: number | null;
+    max_height_cm?: number | null;
+    max_length_cm?: number | null;
+    max_depth_cm?: number | null;
+    segment_ids?: string[];
+    passenger_ids?: string[];
+  }[];
+  baggage_known?: boolean;
+  /**
+   * EMPTY means UNKNOWN. It must never render as 'non-refundable'.
+   */
+  conditions_options?: {
+    scope: 'offer' | 'slice';
+    type: string;
+    key?: string;
+    /**
+     * null means the fare does not STATE the term: unknown, NOT 'not allowed'.
+     */
+    allowed: boolean | null;
+    penalty_amount?: string | null;
+    penalty_currency?: string | null;
+    slice_id?: string;
+    slice_direction?: string;
+  }[];
+  conditions_known?: boolean;
+  fare_brand?: string | null;
+  passenger_count?: number | null;
+  expires_at?: string | null;
+  live_mode?: boolean | null;
 }
 /**
  * Single hotel property card.

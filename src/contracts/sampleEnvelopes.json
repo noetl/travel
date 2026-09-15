@@ -265,6 +265,243 @@
     }
   },
   {
+    "widget_type": "flight_card",
+    "variant": "full",
+    "payload": {
+      "offer_id": "off_JFK_0",
+      "direction": "outbound",
+      "price": {
+        "total": "220.00",
+        "currency": "USD",
+        "base": "180.00",
+        "tax": "40.00"
+      },
+      "itineraries": [
+        {
+          "direction": "outbound",
+          "origin": {
+            "iata": "JFK",
+            "at": "",
+            "city": "New York",
+            "airport_name": "John F. Kennedy International Airport",
+            "terminal": ""
+          },
+          "destination": {
+            "iata": "MCO",
+            "at": "",
+            "city": "Orlando",
+            "airport_name": "Orlando International Airport",
+            "terminal": ""
+          },
+          "duration": "PT6H",
+          "stops": 1,
+          "segments": [
+            {
+              "departure": {
+                "iata": "JFK",
+                "at": "2026-11-02T08:15:00",
+                "city": "New York",
+                "airport_name": "John F. Kennedy International Airport",
+                "terminal": "4"
+              },
+              "arrival": {
+                "iata": "MIA",
+                "at": "2026-11-02T11:40:00",
+                "city": "Miami",
+                "airport_name": "Miami International Airport",
+                "terminal": "N"
+              },
+              "carrier": "AA",
+              "carrier_name": "American Airlines",
+              "airline": {
+                "iata_code": "AA",
+                "name": "American Airlines",
+                "logo_symbol_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-icon/AA.svg",
+                "logo_lockup_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-logo/AA.svg"
+              },
+              "flight_number": "1423",
+              "duration": "PT3H25M",
+              "aircraft": {
+                "iata_code": "738",
+                "name": "Boeing 737-800"
+              },
+              "cabin_class": "economy",
+              "stops": 0,
+              "technical_stops": [],
+              "operating_carrier": "MQ",
+              "operating_carrier_name": "Envoy Air",
+              "operating_airline": {
+                "iata_code": "MQ",
+                "name": "Envoy Air",
+                "logo_symbol_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-icon/MQ.svg",
+                "logo_lockup_url": ""
+              },
+              "operating_flight_number": "3521"
+            },
+            {
+              "departure": {
+                "iata": "MIA",
+                "at": "2026-11-02T12:40:00",
+                "city": "Miami",
+                "airport_name": "Miami International Airport",
+                "terminal": "4"
+              },
+              "arrival": {
+                "iata": "MCO",
+                "at": "2026-11-02T14:05:00",
+                "city": "Orlando",
+                "airport_name": "Orlando International Airport",
+                "terminal": "N"
+              },
+              "carrier": "AA",
+              "carrier_name": "American Airlines",
+              "airline": {
+                "iata_code": "AA",
+                "name": "American Airlines",
+                "logo_symbol_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-icon/AA.svg",
+                "logo_lockup_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-logo/AA.svg"
+              },
+              "flight_number": "2201",
+              "duration": "PT3H25M",
+              "aircraft": {
+                "iata_code": "738",
+                "name": "Boeing 737-800"
+              },
+              "cabin_class": "economy",
+              "stops": 1,
+              "technical_stops": [
+                {
+                  "airport": {
+                    "iataCode": "FLL",
+                    "iata": "FLL",
+                    "airport_name": "Fort Lauderdale",
+                    "city": "",
+                    "city_iata": "",
+                    "country_code": "",
+                    "time_zone": "",
+                    "type": ""
+                  },
+                  "arriving_at": "x",
+                  "departing_at": "y",
+                  "duration": "PT1H"
+                }
+              ],
+              "operating_carrier": "MQ",
+              "operating_carrier_name": "Envoy Air",
+              "operating_airline": {
+                "iata_code": "MQ",
+                "name": "Envoy Air",
+                "logo_symbol_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-icon/MQ.svg",
+                "logo_lockup_url": ""
+              },
+              "operating_flight_number": "3521"
+            }
+          ]
+        }
+      ],
+      "carriers": [
+        "AA"
+      ],
+      "airline": {
+        "iata_code": "AA",
+        "name": "American Airlines",
+        "logo_symbol_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-icon/AA.svg",
+        "logo_lockup_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-logo/AA.svg"
+      },
+      "airlines": [
+        {
+          "iata_code": "AA",
+          "name": "American Airlines",
+          "logo_symbol_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-icon/AA.svg",
+          "logo_lockup_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-logo/AA.svg"
+        },
+        {
+          "iata_code": "MQ",
+          "name": "Envoy Air",
+          "logo_symbol_url": "https://assets.duffel.com/img/airlines/for-light-background/full-color-icon/MQ.svg",
+          "logo_lockup_url": ""
+        }
+      ],
+      "duration": "PT6H",
+      "stops": 1,
+      "validating_airline": "AA",
+      "baggage_options": [
+        {
+          "scope": "included",
+          "type": "checked",
+          "quantity": 1,
+          "amount": null,
+          "currency": null,
+          "service_id": null
+        },
+        {
+          "scope": "included",
+          "type": "carry_on",
+          "quantity": 1,
+          "amount": null,
+          "currency": null,
+          "service_id": null
+        },
+        {
+          "scope": "available",
+          "type": "checked",
+          "quantity": 2,
+          "amount": "35.00",
+          "currency": "USD",
+          "service_id": "ase_1",
+          "max_weight_kg": 23,
+          "max_height_cm": 56,
+          "max_length_cm": 90,
+          "max_depth_cm": 35,
+          "segment_ids": [
+            "seg_1"
+          ],
+          "passenger_ids": [
+            "pas_1"
+          ]
+        }
+      ],
+      "baggage_known": true,
+      "conditions_options": [
+        {
+          "scope": "offer",
+          "type": "change",
+          "key": "change_before_departure",
+          "allowed": true,
+          "penalty_amount": "75.00",
+          "penalty_currency": "USD"
+        },
+        {
+          "scope": "offer",
+          "type": "refund",
+          "key": "refund_before_departure",
+          "allowed": null,
+          "penalty_amount": null,
+          "penalty_currency": null
+        }
+      ],
+      "conditions_known": true,
+      "baggage": {
+        "checked": 1,
+        "carry_on": 1,
+        "known": true
+      },
+      "conditions": {
+        "changeable": true,
+        "refundable": null
+      },
+      "fare_brand": "Main Cabin",
+      "passenger_count": 1,
+      "expires_at": "2026-09-14T12:00:00Z",
+      "live_mode": false,
+      "ctas": [
+        "view_details",
+        "book_this"
+      ]
+    },
+    "schema_version": 2
+  },
+  {
     "widget_type": "hotel_list",
     "variant": "default",
     "payload": {

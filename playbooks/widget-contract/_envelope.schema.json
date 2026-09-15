@@ -101,7 +101,11 @@
     },
     "schema_version": {
       "type": "integer",
-      "const": 1
+      "enum": [
+        1,
+        2
+      ],
+      "description": "Catalogue schema version. 2 adds the flight_card detail in adiona/frontend#21 (airline logos, expanded segments, baggage/conditions option arrays, offer direction). Every addition is OPTIONAL, so every version-1 payload is still valid and 1 stays accepted: this is the N/N-1 migration window the widget contract describes, not a breaking change. Producers that emit none of the version-2 fields may keep stamping 1."
     }
   }
 }
