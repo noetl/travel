@@ -374,7 +374,20 @@ workflow:
             # exist; they are not product tiers and carry no name.  Fewer
             # distinct prices than bands means fewer bands — a hotel with two
             # rate prices is not padded out to four.
-            usable = sorted({v for v in values if v is not None})
+            # COERCE, don't trust. HotelBeds returns every money field as a
+            # STRING (`"net": "548.29"`), and the provider's numeric `net_value`
+            # is a convenience that not every rate row carries. A caller that
+            # hands this function one un-coerced string makes `high - low` a
+            # TypeError and takes the whole step down — which is exactly what
+            # happened on prod the first time real rate rows ever reached this
+            # code (adiona/frontend#22; the hydration bug in noetl/ai-meta#343
+            # meant `hotels` was always empty, so this loop body had never once
+            # run against live data).
+            #
+            # Coercing here as well as at the call site is deliberate: a band is
+            # a presentation detail, and losing one rate to a bad value must
+            # never be able to cost the caller the entire card list.
+            usable = sorted({n for n in (_num(v) for v in values) if n is not None})
             if not usable:
                 return {}, []
             bands = max(1, min(int(band_count or 1), len(usable)))
@@ -426,7 +439,19 @@ workflow:
                     "roomName": hotel.get("roomName"),
                 }]
 
-            nets = [_num(rate.get("net")) if rate.get("net_value") is None else rate.get("net_value")
+            # `net_value` is the provider's pre-parsed number and `net` is the
+            # raw HotelBeds string; take the first that is present and put BOTH
+            # through `_num`. The earlier form passed `net_value` straight
+            # through, so a provider that supplied it as a string produced a
+            # list of strings and `_price_bands` raised
+            # `TypeError: unsupported operand type(s) for -: 'str' and 'str'`.
+            #
+            # These values are also the BUCKET KEYS below, so they have to be
+            # coerced here rather than only inside `_price_bands` — otherwise
+            # `band_of.get(net)` looks up a string against float keys, silently
+            # misses, and every rate lands in band 0.
+            nets = [_num(rate.get("net_value") if rate.get("net_value") is not None
+                         else rate.get("net"))
                     for rate in rates]
             band_of, band_edges = _price_bands(nets, price_bands)
 
