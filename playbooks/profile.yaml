@@ -1,0 +1,290 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: profile
+  path: muno/playbooks/profile
+  description: |
+    Save a user profile and return it together with suggested points of
+    interest (adiona/frontend#19).
+
+    Third in the family after `muno/playbooks/flights-details`
+    (adiona/frontend#21) and `muno/playbooks/hotel-cards`
+    (adiona/frontend#22). Same contract shape: the SPA posts its own object
+    verbatim, the playbook persists it and returns a render-ready payload.
+
+    FLOW
+
+      save_profile   -> Firestore `users/{uid}` via mcp/firestore.set_doc
+                        (merge, so a partial update never erases fields the
+                        SPA did not send)
+      load_profile   -> read-after-write via mcp/firestore.get_doc, so the
+                        response carries what the store ACTUALLY holds rather
+                        than an echo of the request
+      suggest_pois   -> mcp/google-places.nearby_search around the profile's
+                        home coordinates, filtered by the profile's interests
+      build_response -> { profile, suggestions[] }
+
+    INPUT is the SPA's profile object verbatim:
+
+      { uid: "auth0|abc123",
+        profile: { display_name, email, home_city, home_lat, home_lng,
+                   interests: ["museum", "restaurant"], ... } }
+
+    `uid` and `profile` are the only required keys. Everything inside
+    `profile` is passed through to Firestore untouched, so the SPA can add
+    fields without a playbook change.
+
+    ⚠ WHY `merge: true` AND NOT A BLIND OVERWRITE. `set_doc` without merge
+    replaces the document. The profile page saves one section at a time
+    (adiona/frontend#7 describes picture / personal info / saved trips /
+    booked trips as separate areas), so a blind write from the "personal
+    info" form would silently drop `saved_trips`. Merge makes a partial save
+    partial.
+
+    ⚠ WHY READ-AFTER-WRITE RATHER THAN ECHOING THE INPUT. Echoing is free and
+    wrong: it reports success for fields Firestore may have coerced or
+    rejected, and it hides a merge that did not apply. The extra `get_doc` is
+    one round trip against a store the write already warmed.
+
+    ⚠ SUGGESTIONS ARE BEST-EFFORT AND NEVER FAIL THE SAVE. A profile save
+    that succeeds must report success even if Places is down or the profile
+    carries no coordinates. `suggest_pois` is guarded on `has_coords` and its
+    failure degrades `suggestions` to `[]` with a `suggestions_error` note —
+    it does not fail the run. The save is the contract; the suggestions are
+    the garnish.
+
+    ⚠ DEVIATION FROM THE INLINE PATTERN, DELIBERATE. The itinerary planner
+    INLINES its Firestore and Places calls because a `kind: playbook` hop
+    costs ~9-15s of orchestration regardless of work done (measured: prod exec
+    347995973844213760, 15.1s of an 88.3s turn for one read). This playbook
+    does NOT inline them, and that is a considered trade:
+
+      * a profile save is a deliberate user action on a settings page, not a
+        per-token chat turn — seconds here are not felt the way they are in a
+        conversation;
+      * inlining means transcribing the provider's token mint and REST
+        encoding into a third copy, which the `drift-audit.sh provider-inline`
+        guard then has to police forever;
+      * two copies have already drifted once (noetl/ai-meta#286 records the
+        hotelbeds inline diverging from the ops-repo original).
+
+    If a profile save later lands on a latency-sensitive path, inline it then
+    and add it to the drift audit — but pay that cost when it buys something.
+
+    ⚠ NOT TESTED AGAINST A LIVE FIRESTORE. Written against the provider
+    contracts (`set_doc(path, data, merge)`, `get_doc(path)`,
+    `nearby_search(lat, lng, type, radius, maxResultCount)`) read from
+    `automation/agents/mcp/{firestore,google-places}.yaml` in noetl/ops. It
+    needs one live run against `users/{uid}` before it is called proven.
+
+  tags: [muno, profile, firestore, places, adiona]
+  terminal:
+    visible: true
+    workspace: muno
+    scopes: [/muno/profile, /mcp/firestore, /mcp/google-places]
+  capabilities: [mcp:firestore, mcp:google-places]
+
+workload:
+  # The SPA supplies both. `uid` addresses the document; `profile` is the
+  # body, passed through untouched.
+  uid: ""
+  profile: {}
+  # Suggestion tuning. `poi_type` maps onto the Places `includedType` filter;
+  # leaving it empty asks Places for everything nearby.
+  poi_radius_m: 5000
+  poi_limit: 12
+  firestore_database: "(default)"
+
+workflow:
+  - step: start
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: validate_input
+
+  - step: validate_input
+    desc: Refuse an unaddressable save rather than writing to `users/`
+    tool:
+      kind: python
+      code: |
+        # A blank uid would make the document path `users/` — which is a
+        # COLLECTION, not a document. Firestore would reject it, but only
+        # after the request left; refusing here keeps the error local and
+        # legible instead of surfacing as a 400 from the provider.
+        uid = (workload.get("uid") or "").strip()
+        profile = workload.get("profile") or {}
+        if not uid:
+            result = {"ok": False, "error": "uid is required to address users/{uid}"}
+        elif not isinstance(profile, dict):
+            result = {"ok": False, "error": f"profile must be an object, got {type(profile).__name__}"}
+        else:
+            # Coordinates decide whether suggestions are even possible. Absent
+            # ones are normal (a profile may have no home city yet), so this is
+            # a branch condition and not an error.
+            lat = profile.get("home_lat")
+            lng = profile.get("home_lng")
+            has_coords = isinstance(lat, (int, float)) and isinstance(lng, (int, float))
+            result = {
+                "ok": True,
+                "uid": uid,
+                "doc_path": f"users/{uid}",
+                "profile": profile,
+                "has_coords": has_coords,
+                "lat": lat if has_coords else None,
+                "lng": lng if has_coords else None,
+                "interests": [i for i in (profile.get("interests") or []) if isinstance(i, str)],
+            }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - when: "{{ validate_input.ok }}"
+          step: save_profile
+        - step: end
+
+  - step: save_profile
+    desc: Persist the profile to Firestore `users/{uid}` (merge)
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/firestore
+      # Block for the child's real result rather than the async-start
+      # envelope — same reason hotel-cards does (noetl/ai-meta#136).
+      return_result: true
+      result_step: firestore_dispatch
+      timeout: 60
+      payload:
+        method: tools/call
+        tool: set_doc
+        arguments:
+          path: "{{ validate_input.doc_path }}"
+          data: "{{ validate_input.profile }}"
+          # See the header: partial saves must stay partial.
+          merge: true
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: load_profile
+
+  - step: load_profile
+    desc: Read back what the store actually holds (read-after-write)
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/firestore
+      return_result: true
+      result_step: firestore_dispatch
+      timeout: 60
+      payload:
+        method: tools/call
+        tool: get_doc
+        arguments:
+          path: "{{ validate_input.doc_path }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - when: "{{ validate_input.has_coords }}"
+          step: suggest_pois
+        - step: build_response
+
+  - step: suggest_pois
+    desc: Points of interest near the profile's home coordinates
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/google-places
+      return_result: true
+      result_step: google_places_dispatch
+      timeout: 60
+      payload:
+        method: tools/call
+        tool: nearby_search
+        arguments:
+          lat: "{{ validate_input.lat }}"
+          lng: "{{ validate_input.lng }}"
+          # First interest becomes the Places `includedType`; the rest are
+          # applied as a post-filter in build_response, because Places takes
+          # one included type per call and a second round trip per interest
+          # is not worth the latency on a settings page.
+          type: "{{ validate_input.interests[0] | default('') }}"
+          radius: "{{ workload.poi_radius_m }}"
+          maxResultCount: "{{ workload.poi_limit }}"
+      spec:
+        policy:
+          rules:
+            # Suggestions are garnish. A Places failure must not fail a save
+            # that already succeeded — continue and let build_response report
+            # the empty list with a reason.
+            - when: "{{ output.status == 'error' }}"
+              then:
+                do: continue
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: build_response
+
+  - step: build_response
+    desc: Assemble { profile, suggestions } for the SPA
+    tool:
+      kind: python
+      code: |
+        def _unwrap(step_out):
+            # The MCP envelope nests the payload under `data`; a failed call
+            # has no `data` at all. Both shapes reach here, so neither is
+            # allowed to raise.
+            if not isinstance(step_out, dict):
+                return {}
+            return step_out.get("data") or step_out.get("structuredContent") or {}
+
+        loaded = _unwrap(load_profile)
+        document = (loaded.get("document") or {}) if isinstance(loaded, dict) else {}
+        # `get_doc` reports found=False for a path that does not exist. After a
+        # successful set_doc that should be impossible, so it is surfaced
+        # rather than smoothed over.
+        found = bool(loaded.get("found")) if isinstance(loaded, dict) else False
+
+        stored = document.get("fields") or document.get("data") or document or {}
+
+        suggestions = []
+        suggestions_error = None
+        if not validate_input.get("has_coords"):
+            suggestions_error = "profile has no home_lat/home_lng; suggestions skipped"
+        else:
+            places = _unwrap(suggest_pois)
+            items = places.get("items") or places.get("places") or []
+            if not isinstance(items, list):
+                items = []
+            wanted = set(validate_input.get("interests") or [])
+            for p in items:
+                if not isinstance(p, dict):
+                    continue
+                types = set(p.get("types") or [])
+                # An interest list narrows; an empty one keeps everything.
+                if wanted and not (types & wanted):
+                    continue
+                suggestions.append({
+                    "name": p.get("name") or p.get("displayName"),
+                    "place_id": p.get("id") or p.get("place_id"),
+                    "types": sorted(types),
+                    "rating": p.get("rating"),
+                    "address": p.get("formattedAddress") or p.get("address"),
+                    "google": p.get("_google"),
+                })
+            if not items:
+                suggestions_error = "places returned no items"
+
+        result = {
+            "ok": True,
+            "uid": validate_input.get("uid"),
+            "saved": True,
+            "found_after_write": found,
+            "profile": stored,
+            "suggestions": suggestions,
+            "suggestions_error": suggestions_error,
+        }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: end
+    tool:
+      kind: noop
