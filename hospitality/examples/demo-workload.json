@@ -1,0 +1,9 @@
+{
+  "api_base": "http://127.0.0.1:8099",
+  "property_id": "ranch-demo",
+  "request_key": "demo-booking-001",
+  "room_id": "room-1",
+  "arrival": "2027-10-02",
+  "departure": "2027-10-04",
+  "guests": 2
+}

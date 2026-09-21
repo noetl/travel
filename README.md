@@ -36,3 +36,7 @@ TAG="$(date -u +%Y%m%d-%H%M%S)" ./scripts/build_container.sh
 - Gateway session pattern: `docs/auth/gateway-session-pattern.md`
 - Cloudflare Pages deployment: `docs/deployment/travel-subdomain.md`
 - Scoping context: `noetl/ai-meta sync/issues/2026-05-12-trip-planner-app-scoping.md`
+
+## Hospitality PMS starter
+
+The [hospitality starter](hospitality/README.md) adds seven development playbooks for quoting, inventory holds, simulated payments, confirmation, expiration, and unpaid cancellation. It includes a local test adapter, API/transaction contracts, and a PostgreSQL schema draft. It is not connected to the production trip-planner or live payments. See the [hospitality wiki](https://github.com/noetl/travel/wiki/Hospitality-Platform).

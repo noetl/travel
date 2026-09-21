@@ -1,0 +1,27 @@
+{
+  "version": "0.1.0",
+  "sha256": {
+    ".gitignore": "22bc478fc0eb97818e8c2efd9a6c8f9dce55490bdd8074a3f2b6b8653c5c12d5",
+    "README.md": "9b6e9a7eee98fc5a9af5968031cd30fbfea686ec42af5b584b13aef53ef6019d",
+    "contracts/openapi.json": "42228e98b5fc819f5d0ffb281dd51fc1315ff14912ea5d03beb1f74a88542e55",
+    "contracts/transactions.md": "c6f46129867c1f9fda18e5d56977d2ecd03442ffd726b84bfa2f31d2dd3517cd",
+    "docs/sources.md": "e7c335665a75af36d7a5134fb4333f289b27f25f37778a363973efd9efb01544",
+    "docs/validation-output.txt": "e1eedc3f04ff702578dd7f2406892cad4656cb2d85c816be28073125222aa234",
+    "docs/validation.md": "32ecaf2e18bd59dbb14ccbc06bb7a5a2fbe86e375a4c105bb7da902aa5fb71cf",
+    "examples/demo-workload.json": "d08995a71eb41b1de408688a09833166709cafc95e60af14da717bc9fea0ea3c",
+    "local/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "local/adapter.py": "50b761d38d3437b26ebdd62938aec43dfc873e0a7a665326ee0a3334f102d491",
+    "local/check_playbooks.py": "5c5bd4f0ed399b8e92626b4071f12a1a7861964e5faa92aff2fe4ea7584cf9ec",
+    "playbooks/booking_demo.yaml": "0a090781ce10be266d474b8a1f15865e52e99153f79829f7a1e43247e52040b1",
+    "playbooks/cancel_unpaid_hold.yaml": "576e8ebe80c6baf99dd96af03819b8a2370cdbd6ab4c2e770efcffff233c6ed6",
+    "playbooks/confirm_reservation.yaml": "6adf2b58c6d5620668abcc0cf5ef6e1a616083c91741388da7f751417d094577",
+    "playbooks/hold_inventory.yaml": "4009c65e74b1cccca3d5dc227b798b0da5379e60ae3a15536d5cd345a3b5adea",
+    "playbooks/quote_stay.yaml": "2c8dc7a38a0646f5d9058c1c4b69913e0612599d7d91cf5dc6d2253e2d25bf72",
+    "playbooks/release_expired_holds.yaml": "ab2776e32e210636c98a539e9ec35a7cbe22ccd52bd8888cf74d4a3896c019d1",
+    "playbooks/simulate_payment.yaml": "fa9c3638e08b1941edd74dc7ce390cd75663442836819e40a10f3e038f7589fb",
+    "requirements.txt": "913746461911d5bd20acae178b7688401865975615b9d0ae4ea16609ffde66f5",
+    "sql/001_schema.draft.sql": "10b439a47ae70a5087900526a0cb95948084d9d27aa620b79436b151961112e8",
+    "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/test_booking.py": "59e1ee794df90b75cde79c31b7e37eac25f58934b592911968420b6d64eb7d8b"
+  }
+}

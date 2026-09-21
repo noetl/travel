@@ -1,0 +1,85 @@
+# Development adapter only. See README.md before registration.
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: hospitality_release_expired_holds
+  path: hospitality/v0_1/release_expired_holds
+  description: Development starter; requires the command adapter. No live payment
+    or messaging integration.
+  version: 0.1.0
+executor:
+  profile: auto
+  version: noetl-runtime/1
+  requires:
+    tools:
+    - http
+    - python
+  spec:
+    entry_step: start
+    no_next_is_error: false
+workload:
+  api_base: http://127.0.0.1:8099
+  property_id: ranch-demo
+  request_key: REPLACE_WITH_NEW_REQUEST_KEY
+  limit: 100
+workflow:
+- step: start
+  desc: Explicit entry required by the Rust runtime
+  tool:
+    kind: python
+    input:
+      payload:
+        status: initialized
+    code: 'result = payload
+
+      '
+  next:
+    spec:
+      mode: exclusive
+    arcs:
+    - step: release_expired_holds
+- step: release_expired_holds
+  desc: Execute release_expired_holds through the atomic command boundary
+  tool:
+    kind: http
+    method: POST
+    url: '{{ api_base }}/v1/holds/expire'
+    timeout_seconds: 15
+    headers:
+      Content-Type: application/json
+      X-Demo-Principal: demo-worker
+      Idempotency-Key: '{{ request_key }}:release_expired_holds'
+    json:
+      property_id: '{{ property_id }}'
+      limit: '{{ limit }}'
+    spec:
+      policy:
+        rules:
+        - when: '{{ output.data.status_code in [429, 502, 503, 504] }}'
+          then:
+            do: retry
+            attempts: 3
+            backoff: exponential
+            delay: 1.0
+        - when: '{{ output.status == "error" }}'
+          then:
+            do: fail
+        - else:
+            then:
+              do: continue
+              set:
+                ctx.release_expired_holds: '{{ output.data.data }}'
+  next:
+    spec:
+      mode: exclusive
+    arcs:
+    - step: end
+- step: end
+  desc: Return the domain result; business status is separate from tool status
+  tool:
+    kind: python
+    input:
+      payload: '{{ ctx.release_expired_holds }}'
+    code: 'result = payload
+
+      '
