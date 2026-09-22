@@ -1,0 +1,16 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_bundle_link
+  path: adiona/v1/bundle_link
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), locked AS MATERIALIZED(SELECT pg_advisory_xact_lock(816234911)), checked AS MATERIALIZED (SELECT j FROM p CROSS JOIN locked WHERE adiona.require(current_setting('transaction_isolation')='serializable','Graph writes require SERIALIZABLE') AND adiona.require(adiona.is_admin() OR (adiona.is_provider() AND (SELECT count(*)=2 FROM adiona.items WHERE item_id IN ((j->>'bundle_id')::bigint,(j->>'item_id')::bigint) AND provider_id=adiona.actor_id())),'Bundle ownership required') AND adiona.require(EXISTS(SELECT FROM adiona.items WHERE item_id=(j->>'bundle_id')::bigint AND is_bundle=1),'Parent must be a bundle') AND adiona.require(NOT EXISTS(WITH RECURSIVE descendants(id) AS (SELECT (j->>'item_id')::bigint UNION SELECT b.item_id FROM adiona.items_bundle b JOIN descendants d ON b.bundle_id=d.id) SELECT FROM descendants WHERE id=(j->>'bundle_id')::bigint),'Bundle cycle')), changed AS (INSERT INTO adiona.items_bundle(bundle_id,item_id,bundle_type_id) SELECT (j->>'bundle_id')::bigint,(j->>'item_id')::bigint,(j->>'bundle_type_id')::bigint FROM checked ON CONFLICT(bundle_id,item_id) DO UPDATE SET bundle_type_id=EXCLUDED.bundle_type_id RETURNING *) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

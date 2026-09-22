@@ -1,0 +1,19 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_category_image_upsert
+  path: adiona/v1/category_image_upsert
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (SELECT j FROM p WHERE adiona.require(adiona.is_admin(),'Operation not authorized')), changed AS (
+         INSERT INTO adiona.category_images(category_id,category_image_uri,is_main_image,category_image_order,comments) SELECT (j->>'category_id')::bigint,(j->>'category_image_uri')::text,COALESCE(j->>'is_main_image','N'),(j->>'category_image_order')::integer,(j->>'comments')::text FROM checked
+         ON CONFLICT(category_id,category_image_uri) DO UPDATE SET is_main_image=EXCLUDED.is_main_image,category_image_order=EXCLUDED.category_image_order,comments=EXCLUDED.comments RETURNING *
+        ) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

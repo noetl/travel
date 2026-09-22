@@ -1,0 +1,19 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_user_identity_upsert
+  path: adiona/v1/user_identity_upsert
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (SELECT j FROM p WHERE adiona.require(adiona.is_admin(),'Operation not authorized')), changed AS (
+         INSERT INTO adiona.user_auth(user_id,method,id,credential_ref,email) SELECT (j->>'user_id')::bigint,(j->>'method')::text,(j->>'id')::text,(j->>'credential_ref')::text,(j->>'email')::text FROM checked
+         ON CONFLICT(user_id,method) DO UPDATE SET id=EXCLUDED.id,credential_ref=EXCLUDED.credential_ref,email=EXCLUDED.email RETURNING *
+        ) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

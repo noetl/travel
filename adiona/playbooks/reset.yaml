@@ -1,0 +1,19 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_reset
+  path: adiona/v1/reset
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_migrator
+      command: |
+        DO $reset$
+        BEGIN
+         IF current_database() <> 'adiona_validation' THEN RAISE EXCEPTION 'Reset restricted to adiona_validation'; END IF;
+         DROP SCHEMA IF EXISTS adiona CASCADE;
+         DROP SCHEMA IF EXISTS adiona_migrations CASCADE;
+        END $reset$;

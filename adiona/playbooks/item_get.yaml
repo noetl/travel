@@ -1,0 +1,16 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_item_get
+  path: adiona/v1/item_get
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j) SELECT to_jsonb(result_row) AS result FROM (SELECT i.*, COALESCE((SELECT jsonb_agg(c) FROM adiona.item_content c WHERE c.item_id=i.item_id),'[]') AS content, COALESCE((SELECT jsonb_agg(c.category_id) FROM adiona.item_category c WHERE c.item_id=i.item_id),'[]') AS categories, COALESCE((SELECT jsonb_agg(c) FROM adiona.item_images c WHERE c.item_id=i.item_id),'[]') AS images, COALESCE((SELECT jsonb_agg(c) FROM adiona.item_attributes c WHERE c.item_id=i.item_id),'[]') AS attributes, COALESCE((SELECT jsonb_agg(c) FROM adiona.items_bundle c WHERE c.bundle_id=i.item_id),'[]') AS bundle FROM adiona.items i CROSS JOIN p WHERE i.item_id=(j->>'item_id')::bigint) result_row;

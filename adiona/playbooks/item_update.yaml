@@ -1,0 +1,16 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_item_update
+  path: adiona/v1/item_update
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), changed AS (UPDATE adiona.items SET price=(j->>'price')::bigint FROM p WHERE item_id=(j->>'item_id')::bigint AND adiona.require(adiona.is_admin() OR (adiona.is_provider() AND provider_id=adiona.actor_id()),'Provider not authorized') RETURNING items.*) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

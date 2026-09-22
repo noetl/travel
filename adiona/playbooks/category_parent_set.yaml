@@ -1,0 +1,16 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_category_parent_set
+  path: adiona/v1/category_parent_set
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), changed AS (UPDATE adiona.categories SET master_category_id=(j->>'master_category_id')::bigint FROM p WHERE category_id=(j->>'category_id')::bigint AND adiona.require(adiona.is_admin(),'Administrator required') AND adiona.require(current_setting('transaction_isolation')='serializable','Graph writes require SERIALIZABLE') AND adiona.require(NOT EXISTS(WITH RECURSIVE ancestors(id) AS (SELECT (j->>'master_category_id')::bigint UNION SELECT c.master_category_id FROM adiona.categories c JOIN ancestors a ON c.category_id=a.id) SELECT FROM ancestors WHERE id=(j->>'category_id')::bigint),'Hierarchy cycle') RETURNING categories.*) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

@@ -37,6 +37,6 @@ TAG="$(date -u +%Y%m%d-%H%M%S)" ./scripts/build_container.sh
 - Cloudflare Pages deployment: `docs/deployment/travel-subdomain.md`
 - Scoping context: `noetl/ai-meta sync/issues/2026-05-12-trip-planner-app-scoping.md`
 
-## Hospitality PMS starter
+## Adiona catalog and hospitality foundation
 
-The [hospitality starter](hospitality/README.md) adds seven development playbooks for quoting, inventory holds, simulated payments, confirmation, expiration, and unpaid cancellation. It includes a local test adapter, API/transaction contracts, and a PostgreSQL schema draft. It is not connected to the production trip-planner or live payments. See the [hospitality wiki](https://github.com/noetl/travel/wiki/Hospitality-Platform).
+The [Adiona migration](adiona/README.md) converts the source MySQL catalog/user model to PostgreSQL and implements operations as NoETL playbooks. It replaces the Python mock starter. See its setup instructions, validation report, migration mapping, and [wiki](https://github.com/noetl/travel/wiki/Adiona-Migration). This draft is not deployed.

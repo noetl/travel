@@ -1,0 +1,14 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_currency_list
+  path: adiona/v1/currency_list
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      command: |
+        SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM adiona.currencies ORDER BY currency_code) result_row;

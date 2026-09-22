@@ -1,3 +1,3 @@
-# Pending wiki publication
+# Wiki sources
 
-Hospitality-Platform.md is the prepared source for the GitHub wiki page. Publishing is pending an authenticated wiki connection. Add a link to [[Hospitality-Platform]] in wiki Home and _Sidebar after publication. The source package is on feat/hospitality-playbooks, PR #125.
+`Adiona-Migration.md` and `Hospitality-Platform.md` are the source pages for the [GitHub wiki](https://github.com/noetl/travel/wiki/Adiona-Migration). Publish through the separate `noetl/travel.wiki.git` repository, preserving unrelated pages and adding navigation entries only when absent. These pages describe the unmerged migration branch and its validation limits.

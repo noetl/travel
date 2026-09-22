@@ -1,0 +1,16 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_language_list
+  path: adiona/v1/language_list
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j) SELECT to_jsonb(result_row) AS result FROM (SELECT l.* FROM adiona.languages l CROSS JOIN p WHERE (j->>'supported') IS NULL OR supported=j->>'supported' ORDER BY lang_code) result_row;

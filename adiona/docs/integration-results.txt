@@ -1,0 +1,37 @@
+PASS repeat provisioning preserves migration ledger
+PASS actual PostgreSQL source fixture can be provisioned twice
+PASS user upsert preserves identity and creation timestamp
+PASS user validation rejects malformed email
+PASS customer cannot create users or elevate role
+PASS self profile edits work without granting identity/role changes
+PASS cross-user PII is hidden by database RLS
+PASS legacy category filter mapping and localized label
+PASS natural-key category retries return the same id
+PASS catalog taxonomy is admin-only
+PASS item and default translation created atomically
+PASS repeat item upsert reuses id and updates price
+PASS negative prices fail without changing persisted price
+PASS cross-provider writes rejected by both playbook and RLS
+PASS customers cannot write catalog or spoof provider_id
+PASS bound SQL safely preserves quotes and injection-like text
+PASS requested translation and default-language fallback
+PASS failure in second write rolls back first item write
+PASS foreign-key failure rolls back relationship insert
+PASS category relationship retries do not duplicate
+PASS attributes and media relationships are preserved
+PASS other providers cannot change owned child rows
+PASS bundle relationships replay and reject self-cycle
+PASS nested bundle cycles are rejected
+PASS category and category-type ancestry reject cycles
+PASS graph mutation refuses a weaker isolation level
+PASS forged child ownership fails the composite foreign key
+PASS unknown translation language rejects mutation
+PASS identity upsert uses stable provider subject; no raw tokens
+PASS identity linking requires admin; subject cannot link to another user
+PASS referenced parents cannot be deleted
+PASS explicit unlink and deletion remove only selected item
+PASS repeat provisioning never resets business data
+PASS unmapped runtime identity cannot see rows or provision
+PASS checksum drift fails without losing data
+PASS six concurrent retries create one item and translation
+PASS 36 integration checks; upstream Rust PostgresTool + PostgreSQL; distributed orchestration not asserted.
