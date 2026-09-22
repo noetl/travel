@@ -2,7 +2,7 @@
 
 The service keeps Adiona's general product/service catalog and adds lodging operations through NoETL YAML and the Rust runtime, targeting PostgreSQL 19. The earlier Python mock was removed; the new reservation workflows execute against real PostgreSQL.
 
-The [catalog migration #125](https://github.com/noetl/travel/pull/125) and [PostgreSQL tool fix #104](https://github.com/noetl/tools/pull/104) are merged. The next hospitality increment is on the [review branch](https://github.com/noetl/travel/tree/kadyapam/hospitality-reservations/adiona), not deployed to production.
+The [catalog migration #125](https://github.com/noetl/travel/pull/125) and [PostgreSQL tool fix #104](https://github.com/noetl/tools/pull/104) are merged. The next hospitality increment is [PR #126](https://github.com/noetl/travel/pull/126), ready for review on the [implementation branch](https://github.com/noetl/travel/tree/kadyapam/hospitality-reservations/adiona), not deployed to production.
 
 ## Implemented in the hospitality increment
 
@@ -17,7 +17,7 @@ The [catalog migration #125](https://github.com/noetl/travel/pull/125) and [Post
 
 ## Validation
 
-The local tests run on PostgreSQL 19 Beta 3 using the actual Rust PostgreSQL tool and full Rust server → EHDB → worker execution. They cover concurrent competing holds, retries, rollback, invalid input, expired holds, state/version checks, room closure and cross-provider/guest access boundaries. [Evidence and limits](https://github.com/noetl/travel/blob/kadyapam/hospitality-reservations/adiona/docs/validation.md) link to committed results. A dedicated PostgreSQL 19 CI job runs the direct database suites.
+The local tests passed 24 direct hospitality checks and 23 full-runtime scenarios (61 executions), plus the existing 37 catalog checks and 21 runtime executions. They run on PostgreSQL 19 Beta 3 using the actual Rust PostgreSQL tool and full Rust server → EHDB → worker execution. They cover concurrent competing holds, retries, rollback, invalid input, expired holds, state/version checks, room closure and cross-provider/guest access boundaries. [Evidence and limits](https://github.com/noetl/travel/blob/kadyapam/hospitality-reservations/adiona/docs/validation.md) link to committed results. A dedicated PostgreSQL 19 CI job runs the direct database suites.
 
 Final PostgreSQL 19.x qualification remains pending. The pinned Rust server still requires the included positional-parameter parser patch. No live property database, payment provider or production deployment is connected.
 

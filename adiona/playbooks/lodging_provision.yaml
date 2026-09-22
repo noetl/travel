@@ -63,7 +63,7 @@ workflow:
         GRANT UPDATE(capacity,nightly_rate,currency_code,active) ON adiona.lodging_units TO adiona_runtime;
         GRANT UPDATE(status,version,modified_at) ON adiona.reservations TO adiona_runtime;
         GRANT USAGE,SELECT ON SEQUENCE adiona.lodging_units_unit_id_seq,adiona.reservations_reservation_id_seq TO adiona_runtime;
-        
+
          INSERT INTO adiona_migrations.versions(version,sha256) VALUES(2,'2fabf926e9b80d7ae73efaa7455626e2b4014af020609b94557cf8fca4917a4b');
          END IF;
         END $migration$;
