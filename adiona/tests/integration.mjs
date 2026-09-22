@@ -121,8 +121,8 @@ test('checksum drift fails without losing data',()=>{sql("UPDATE adiona_migratio
 const concurrent={provider_id:provider.user_id,item_name:'Concurrent retry',price:500,item_slug:'concurrent'};
 async function concurrentCall(attempt=0){try{return await new Promise((resolve,reject)=>{
  const child=spawn(binary,[path.join(root,'playbooks/item_upsert.yaml'),'av_provider',JSON.stringify(concurrent)]);
- let out='',err='';child.stdout.on('data',d=>out+=d);child.stderr.on('data',d=>err+=d);child.on('exit',c=>c?reject(Error(err)):resolve(JSON.parse(out).rows[0].result.item_id));
-});}catch(e){if(attempt<8&&/40001|40P01/.test(e.message))return concurrentCall(attempt+1);throw e;}}
+ let out='',err='';child.stdout.on('data',d=>out+=d);child.stderr.on('data',d=>err+=d);child.on('error',reject);child.on('close',(code,signal)=>code!==0?reject(Error(err||`Validation process exited with code ${code}, signal ${signal}`)):resolve(JSON.parse(out).rows[0].result.item_id));
+});}catch(e){if(attempt<8&&/40001|40P01/.test(e.message)){await new Promise(resolve=>setTimeout(resolve,Math.min(250,10*2**attempt)+Math.random()*20));return concurrentCall(attempt+1);}throw e;}}
 const outputs=await Promise.all(Array.from({length:6},()=>concurrentCall()));
 test('six concurrent retries create one item and translation',()=>{assert.equal(new Set(outputs).size,1);assert.equal(sql("SELECT count(*) FROM adiona.items WHERE item_name='Concurrent retry'"),'1');});
 console.log(`PASS ${passed} integration checks; upstream Rust PostgresTool + PostgreSQL; distributed orchestration not asserted.`);

@@ -52,6 +52,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: adiona-postgres19-evidence
+          include-hidden-files: true
           path: |
             adiona/.local/*-ci.log
             adiona/.local/hospitality-ci-results.json
