@@ -1,111 +1,111 @@
 {
   "postgres_version": "19beta3",
   "checks": 21,
-  "registered": 44,
+  "registered": 51,
   "executions": [
     {
       "playbook": "provision",
-      "execution_id": "360657390613106688",
+      "execution_id": "360664872509050880",
       "status": "COMPLETED"
     },
     {
       "playbook": "provision",
-      "execution_id": "360657391833649152",
+      "execution_id": "360664873717010432",
       "status": "COMPLETED"
     },
     {
       "playbook": "user_type_list",
-      "execution_id": "360657393087746048",
+      "execution_id": "360664874908192768",
       "status": "COMPLETED"
     },
     {
       "playbook": "user_upsert",
-      "execution_id": "360657394325065728",
+      "execution_id": "360664876065820672",
       "status": "COMPLETED"
     },
     {
       "playbook": "user_upsert",
-      "execution_id": "360657395566579712",
+      "execution_id": "360664877215059968",
       "status": "COMPLETED"
     },
     {
       "playbook": "item_upsert",
-      "execution_id": "360657396829065216",
+      "execution_id": "360664878364299264",
       "status": "COMPLETED"
     },
     {
       "playbook": "item_upsert",
-      "execution_id": "360657398066384896",
+      "execution_id": "360664879513538560",
       "status": "COMPLETED"
     },
     {
       "playbook": "item_translation_upsert",
-      "execution_id": "360657399265955840",
+      "execution_id": "360664880658583552",
       "status": "COMPLETED"
     },
     {
       "playbook": "item_get",
-      "execution_id": "360657400515858432",
+      "execution_id": "360664881807822848",
       "status": "COMPLETED"
     },
     {
       "playbook": "item_update",
-      "execution_id": "360657401740595200",
+      "execution_id": "360664882978033664",
       "status": "FAILED"
     },
     {
       "playbook": "item_get",
-      "execution_id": "360657402952749056",
+      "execution_id": "360664884135661568",
       "status": "COMPLETED"
     },
     {
       "playbook": "item_upsert",
-      "execution_id": "360657404185874432",
+      "execution_id": "360664885272317952",
       "status": "FAILED"
     },
     {
       "playbook": "item_upsert",
-      "execution_id": "360657405452554240",
+      "execution_id": "360664886455111680",
       "status": "FAILED"
     },
     {
       "playbook": "user_upsert",
-      "execution_id": "360657406664708096",
+      "execution_id": "360664887604350976",
       "status": "FAILED"
     },
     {
       "playbook": "user_get",
-      "execution_id": "360657407872667648",
+      "execution_id": "360664888745201664",
       "status": "COMPLETED"
     },
     {
       "playbook": "catalog_list",
-      "execution_id": "360657409097404416",
+      "execution_id": "360664889911218176",
       "status": "COMPLETED"
     },
     {
       "playbook": "item_translation_delete",
-      "execution_id": "360657410313752576",
+      "execution_id": "360664891060457472",
       "status": "COMPLETED"
     },
     {
       "playbook": "item_translation_delete",
-      "execution_id": "360657411542683648",
+      "execution_id": "360664892209696768",
       "status": "COMPLETED"
     },
     {
       "playbook": "item_delete",
-      "execution_id": "360657412771614720",
+      "execution_id": "360664893434433536",
       "status": "COMPLETED"
     },
     {
       "playbook": "item_get",
-      "execution_id": "360657414034100224",
+      "execution_id": "360664894701113344",
       "status": "COMPLETED"
     },
     {
       "playbook": "user_delete",
-      "execution_id": "360657415263031296",
+      "execution_id": "360664895955210240",
       "status": "COMPLETED"
     }
   ]

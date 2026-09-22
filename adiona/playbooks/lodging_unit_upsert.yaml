@@ -1,0 +1,23 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_lodging_unit_upsert
+  path: adiona/v1/lodging_unit_upsert
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (
+         SELECT j FROM p WHERE adiona.require(adiona.is_admin() OR (adiona.is_provider() AND (j->>'provider_id')::bigint=adiona.actor_id()),'Provider not authorized')
+        ), changed AS (
+         INSERT INTO adiona.lodging_units AS existing(item_id,provider_id,unit_code,capacity,nightly_rate,currency_code,active)
+         SELECT (j->>'item_id')::bigint,(j->>'provider_id')::bigint,j->>'unit_code',(j->>'capacity')::integer,(j->>'nightly_rate')::bigint,upper(j->>'currency_code'),COALESCE((j->>'active')::boolean,true) FROM checked
+         ON CONFLICT(provider_id,unit_code) DO UPDATE SET capacity=EXCLUDED.capacity,nightly_rate=EXCLUDED.nightly_rate,currency_code=EXCLUDED.currency_code,active=EXCLUDED.active
+         WHERE adiona.require(existing.item_id=EXCLUDED.item_id,'A room cannot change catalog item') RETURNING *
+        ) SELECT to_jsonb(r) || jsonb_build_object('unit_id',unit_id::text,'item_id',item_id::text,'provider_id',provider_id::text,'nightly_rate',nightly_rate::text) AS result FROM changed r;

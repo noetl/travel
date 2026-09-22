@@ -1,0 +1,21 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_lodging_availability
+  path: adiona/v1/lodging_availability
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), dates AS MATERIALIZED (SELECT j,(j->>'arrival')::date AS arrival,(j->>'departure')::date AS departure,(j->>'guests')::integer AS guests FROM p), checked AS MATERIALIZED (SELECT * FROM dates WHERE adiona.require((adiona.is_admin() OR adiona.is_provider()) AND arrival IS NOT NULL AND departure IS NOT NULL AND isfinite(arrival) AND isfinite(departure) AND departure>arrival AND departure-arrival<=365 AND guests BETWEEN 1 AND 100,'Staff role, finite dates (1-365 nights), and guests required'))
+         SELECT jsonb_build_object('unit_id',u.unit_id::text,'item_id',u.item_id::text,'unit_code',u.unit_code,'capacity',u.capacity,'currency_code',u.currency_code,'nightly_rate',u.nightly_rate::text,'nights',departure-arrival,'total_cents',(u.nightly_rate*(departure-arrival))::text) AS result
+         FROM adiona.lodging_units u CROSS JOIN checked
+         WHERE u.active AND u.capacity>=guests AND (j->>'item_id' IS NULL OR u.item_id=(j->>'item_id')::bigint)
+         AND NOT EXISTS(SELECT FROM adiona.reservations r WHERE r.unit_id=u.unit_id AND r.status IN ('held','confirmed','checked_in') AND daterange(r.arrival,r.departure,'[)') && daterange(checked.arrival,checked.departure,'[)'))
+         ORDER BY u.unit_id LIMIT 100;

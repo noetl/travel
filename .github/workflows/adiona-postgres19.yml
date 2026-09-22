@@ -1,0 +1,56 @@
+name: Adiona PostgreSQL 19
+on:
+  pull_request:
+    paths:
+      - 'adiona/**'
+      - '.github/workflows/adiona-postgres19.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'adiona/**'
+      - '.github/workflows/adiona-postgres19.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: adiona-postgres19-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  postgres:
+    name: Rust tool and PostgreSQL 19 integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install PostgreSQL build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y bison flex
+      - name: Build checksummed PostgreSQL 19 prerelease
+        run: |
+          ./adiona/scripts/build-postgres19.sh
+          echo "PG_BIN=$PWD/adiona/.local/postgresql19-build/install/bin" >> "$GITHUB_ENV"
+          echo "$PWD/adiona/.local/postgresql19-build/install/bin" >> "$GITHUB_PATH"
+      - name: Build pinned actual Rust tool adapter
+        run: cargo build --locked --manifest-path adiona/tests/rust/Cargo.toml
+      - name: Validate catalog and hospitality on isolated PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./adiona/scripts/start-postgres.sh
+          trap './adiona/scripts/stop-postgres.sh' EXIT
+          node adiona/tests/integration.mjs | tee adiona/.local/catalog-ci.log
+          node adiona/tests/hospitality.mjs | tee adiona/.local/hospitality-ci.log
+      - name: Preserve validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adiona-postgres19-evidence
+          path: |
+            adiona/.local/*-ci.log
+            adiona/docs/hospitality-tool-results.json

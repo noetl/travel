@@ -1,0 +1,29 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_reservation_transition
+  path: adiona/v1/reservation_transition
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (
+         SELECT j FROM p WHERE adiona.require((adiona.is_admin() OR adiona.is_provider()) AND j->>'status' IN ('confirmed','cancelled','checked_in','checked_out') AND (j->>'expected_version')::integer>0,'Staff role, target status and expected_version required')
+        ), changed AS (
+         UPDATE adiona.reservations r SET
+         status=CASE WHEN adiona.require(r.status=j->>'status' OR (r.version=(j->>'expected_version')::integer AND (
+           (r.status='held' AND j->>'status'='confirmed' AND r.expires_at>statement_timestamp()) OR
+           (r.status IN ('held','confirmed') AND j->>'status'='cancelled') OR
+           (r.status='confirmed' AND j->>'status'='checked_in') OR
+           (r.status='checked_in' AND j->>'status'='checked_out')
+         )), 'Stale version or invalid reservation transition') THEN j->>'status' END,
+         version=CASE WHEN r.status=j->>'status' THEN r.version ELSE r.version+1 END,
+         modified_at=CASE WHEN r.status=j->>'status' THEN r.modified_at ELSE statement_timestamp() END
+         FROM checked WHERE r.reservation_id=(j->>'reservation_id')::bigint RETURNING r.*
+        ) SELECT to_jsonb(r) || jsonb_build_object('reservation_id',reservation_id::text,'unit_id',unit_id::text,'provider_id',provider_id::text,'guest_id',guest_id::text,'total_cents',total_cents::text,'nightly_rate',nightly_rate::text) AS result FROM changed r;
