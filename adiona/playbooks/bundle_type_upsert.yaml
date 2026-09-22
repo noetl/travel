@@ -1,0 +1,19 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_bundle_type_upsert
+  path: adiona/v1/bundle_type_upsert
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (SELECT j FROM p WHERE adiona.require(adiona.is_admin(),'Operation not authorized')), changed AS (
+         INSERT INTO adiona.bundle_type(bundle_type) SELECT (j->>'bundle_type')::text FROM checked
+         ON CONFLICT(bundle_type) DO UPDATE SET bundle_type=EXCLUDED.bundle_type RETURNING *
+        ) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

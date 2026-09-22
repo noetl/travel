@@ -1,0 +1,24 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_item_upsert
+  path: adiona/v1/item_upsert
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (SELECT j FROM p WHERE adiona.require(adiona.is_admin() OR (adiona.is_provider() AND (j->>'provider_id')::bigint=adiona.actor_id()),'Provider not authorized')), item AS (
+         INSERT INTO adiona.items(default_lang_code,is_bundle,item_name,provider_id,price)
+         SELECT COALESCE(j->>'default_lang_code','en'),COALESCE((j->>'is_bundle')::smallint,0),j->>'item_name',(j->>'provider_id')::bigint,(j->>'price')::bigint FROM checked
+         ON CONFLICT(provider_id,default_lang_code,item_name) DO UPDATE SET is_bundle=EXCLUDED.is_bundle,price=EXCLUDED.price RETURNING *
+        ), content AS (
+         INSERT INTO adiona.item_content(item_id,provider_id,lang_code,item_name,item_header,item_desc,item_address1,item_address2,item_slug)
+         SELECT item_id,provider_id,default_lang_code,item_name,j->>'item_header',j->>'item_desc',j->>'item_address1',j->>'item_address2',j->>'item_slug' FROM item CROSS JOIN checked
+         ON CONFLICT(item_id,lang_code) DO UPDATE SET item_name=EXCLUDED.item_name,item_header=EXCLUDED.item_header,item_desc=EXCLUDED.item_desc,item_address1=EXCLUDED.item_address1,item_address2=EXCLUDED.item_address2,item_slug=EXCLUDED.item_slug RETURNING item_content_id
+        ) SELECT to_jsonb(result_row) AS result FROM (SELECT item.*,content.item_content_id FROM item CROSS JOIN content) result_row;

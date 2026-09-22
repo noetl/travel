@@ -1,0 +1,11 @@
+{
+  "request": {
+    "user_type_id": 3,
+    "email": "customer@example.invalid",
+    "display_name": "Example Customer",
+    "first_name": "Example",
+    "last_name": "Customer",
+    "currency": "USD",
+    "language_iso_639_1": "en"
+  }
+}

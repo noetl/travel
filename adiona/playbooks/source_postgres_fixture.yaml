@@ -1,0 +1,18 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_source_postgres_fixture
+  path: adiona/v1/source_postgres_fixture
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_migrator
+      command: |
+        DO $fixture$ BEGIN
+         IF current_database()<>'adiona_validation' THEN RAISE EXCEPTION 'Fixture restricted to validation database'; END IF;
+         CREATE SCHEMA IF NOT EXISTS adiona_source_fixture;
+         CREATE TABLE IF NOT EXISTS adiona_source_fixture.test_data_table(id SERIAL PRIMARY KEY,name TEXT NOT NULL,age INTEGER,created_at TIMESTAMP DEFAULT now(),is_active BOOLEAN DEFAULT true,meta_data JSONB,description TEXT);
+         END $fixture$;

@@ -36,3 +36,7 @@ TAG="$(date -u +%Y%m%d-%H%M%S)" ./scripts/build_container.sh
 - Gateway session pattern: `docs/auth/gateway-session-pattern.md`
 - Cloudflare Pages deployment: `docs/deployment/travel-subdomain.md`
 - Scoping context: `noetl/ai-meta sync/issues/2026-05-12-trip-planner-app-scoping.md`
+
+## Adiona catalog and hospitality foundation
+
+The [Adiona migration](adiona/README.md) converts the source MySQL catalog/user model to PostgreSQL and implements operations as NoETL playbooks. It replaces the Python mock starter. See its setup instructions, validation report, migration mapping, and [wiki](https://github.com/noetl/travel/wiki/Adiona-Migration). This draft is not deployed.

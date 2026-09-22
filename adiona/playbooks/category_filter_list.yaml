@@ -1,0 +1,16 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_category_filter_list
+  path: adiona/v1/category_filter_list
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j) SELECT to_jsonb(result_row) AS result FROM (SELECT CASE ct.category_type WHEN 'trip_category' THEN 'trips' WHEN 'tour_category' THEN 'tours' WHEN 'car_type' THEN 'cars' END AS filter_type,ct.category_type,cc.content_id,cc.category_id,c.category_name,cc.category,cc.lang_code,ci.category_image_uri FROM adiona.category_content cc JOIN adiona.categories c USING(category_id) JOIN adiona.category_types ct USING(category_type_id) LEFT JOIN adiona.category_images ci ON ci.category_id=c.category_id AND ci.is_main_image='Y' CROSS JOIN p WHERE cc.lang_code=COALESCE(j->>'lang','en') AND ct.category_type=CASE j->>'type' WHEN 'trips' THEN 'trip_category' WHEN 'tours' THEN 'tour_category' WHEN 'cars' THEN 'car_type' END ORDER BY cc.category_id) result_row;

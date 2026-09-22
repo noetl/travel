@@ -1,0 +1,14 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_user_type_list
+  path: adiona/v1/user_type_list
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      command: |
+        SELECT to_jsonb(result_row) AS result FROM (SELECT user_type_id,user_type_name,comments FROM adiona.user_type ORDER BY user_type_id) result_row;

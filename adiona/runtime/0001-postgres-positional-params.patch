@@ -1,0 +1,37 @@
+diff --git a/orchestrate-core/src/playbook.rs b/orchestrate-core/src/playbook.rs
+index e37cd267..0a89c596 100644
+--- a/orchestrate-core/src/playbook.rs
++++ b/orchestrate-core/src/playbook.rs
+@@ -302,9 +302,10 @@ pub struct ToolSpec {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub connection: Option<String>,
+
+-    /// HTTP params.
++    /// Tool parameters: HTTP query objects or PostgreSQL positional arrays.
++    /// Preserve the shape for the receiving tool's typed configuration parser.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub params: Option<HashMap<String, serde_json::Value>>,
++    pub params: Option<serde_json::Value>,
+
+     /// HTTP headers.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -1800,3 +1801,19 @@ mod tool_kind_tests {
+         assert!(!s.contains("agent"), "the invalid kinds must not be advertised");
+     }
+ }
++
++#[cfg(test)]
++mod positional_parameter_tests {
++    use super::ToolDefinition;
++    #[test]
++    fn preserves_postgres_bound_values_and_http_query_objects() {
++        for (yaml, expected) in [
++            ("kind: postgres\ncommand: SELECT $1::text\nparams: [\"{{ request | tojson }}\"]\n", serde_json::json!(["{{ request | tojson }}"])),
++            ("kind: http\nurl: https://example.invalid\nparams: {page: 2}\n", serde_json::json!({"page":2})),
++        ] {
++            let tool: ToolDefinition = serde_yaml::from_str(yaml).unwrap();
++            let value = serde_json::to_value(tool).unwrap();
++            assert_eq!(value["params"], expected);
++        }
++    }
++}

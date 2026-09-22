@@ -1,0 +1,4 @@
+/tests/rust/target/
+*.log
+.env*
+/.local/

@@ -1,0 +1,16 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_item_category_unlink
+  path: adiona/v1/item_category_unlink
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), changed AS (DELETE FROM adiona.item_category USING p WHERE item_id=(j->>'item_id')::bigint AND category_id=(j->>'category_id')::bigint RETURNING *) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

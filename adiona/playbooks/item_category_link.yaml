@@ -1,0 +1,19 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_item_category_link
+  path: adiona/v1/item_category_link
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (SELECT j FROM p WHERE adiona.require(adiona.is_admin() OR (adiona.is_provider() AND EXISTS(SELECT FROM adiona.items WHERE item_id=(j->>'item_id')::bigint AND provider_id=adiona.actor_id())),'Operation not authorized')), changed AS (
+         INSERT INTO adiona.item_category(item_id,category_id) SELECT (j->>'item_id')::bigint,(j->>'category_id')::bigint FROM checked
+         ON CONFLICT(item_id,category_id) DO UPDATE SET item_id=EXCLUDED.item_id RETURNING *
+        ) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

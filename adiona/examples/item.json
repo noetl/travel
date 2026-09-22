@@ -1,0 +1,11 @@
+{
+  "request": {
+    "provider_id": 1,
+    "item_name": "Example guided experience",
+    "default_lang_code": "en",
+    "price": 1099,
+    "item_slug": "example-guided-experience",
+    "item_header": "A product or service in the shared catalog",
+    "item_desc": "Synthetic example; use a provisioned provider ID."
+  }
+}

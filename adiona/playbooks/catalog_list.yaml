@@ -1,0 +1,16 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_catalog_list
+  path: adiona/v1/catalog_list
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j) SELECT to_jsonb(result_row) AS result FROM (SELECT i.*,c.item_header,c.item_desc,c.item_slug,c.lang_code FROM adiona.items i CROSS JOIN p LEFT JOIN LATERAL(SELECT * FROM adiona.item_content c WHERE c.item_id=i.item_id AND c.lang_code IN (COALESCE(j->>'lang','en'),i.default_lang_code) ORDER BY (c.lang_code=COALESCE(j->>'lang','en')) DESC LIMIT 1)c ON true WHERE ((j->>'category_id') IS NULL OR EXISTS(SELECT FROM adiona.item_category ic WHERE ic.item_id=i.item_id AND ic.category_id=(j->>'category_id')::bigint)) AND ((j->>'price_min') IS NULL OR i.price>=(j->>'price_min')::bigint) AND ((j->>'price_max') IS NULL OR i.price<=(j->>'price_max')::bigint) AND i.item_id>COALESCE((j->>'after_id')::bigint,0) ORDER BY i.item_id LIMIT 100) result_row;

@@ -1,0 +1,16 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_user_identity_delete
+  path: adiona/v1/user_identity_delete
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), changed AS (DELETE FROM adiona.user_auth USING p WHERE user_id=(j->>'user_id')::bigint AND method=(j->>'method')::text RETURNING *) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

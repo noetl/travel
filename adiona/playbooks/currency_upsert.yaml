@@ -1,0 +1,19 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_currency_upsert
+  path: adiona/v1/currency_upsert
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (SELECT j FROM p WHERE adiona.require(adiona.is_admin(),'Operation not authorized')), changed AS (
+         INSERT INTO adiona.currencies(currency_code,exchange_rate,currency_name,glyph) SELECT upper(j->>'currency_code'),(j->>'exchange_rate')::numeric,(j->>'currency_name')::text,(j->>'glyph')::text FROM checked
+         ON CONFLICT(currency_code) DO UPDATE SET exchange_rate=EXCLUDED.exchange_rate,currency_name=EXCLUDED.currency_name,glyph=EXCLUDED.glyph RETURNING *
+        ) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

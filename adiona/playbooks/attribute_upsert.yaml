@@ -1,0 +1,19 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_attribute_upsert
+  path: adiona/v1/attribute_upsert
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (SELECT j FROM p WHERE adiona.require(adiona.is_admin(),'Operation not authorized')), changed AS (
+         INSERT INTO adiona.attributes(attribute_category_id,attribute_name) SELECT (j->>'attribute_category_id')::bigint,(j->>'attribute_name')::text FROM checked
+         ON CONFLICT(attribute_category_id,attribute_name) DO UPDATE SET attribute_category_id=EXCLUDED.attribute_category_id RETURNING *
+        ) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;

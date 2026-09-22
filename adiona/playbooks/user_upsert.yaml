@@ -1,0 +1,19 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_user_upsert
+  path: adiona/v1/user_upsert
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (SELECT j FROM p WHERE adiona.require(adiona.is_admin(),'Operation not authorized')), changed AS (
+         INSERT INTO adiona.users(user_type_id,email,primary_phone_number,alternative_phone_numbers,currency,display_name,first_name,last_name,middle_name,language_iso_639_1,timezone,gender,address,additional_info,comments) SELECT (j->>'user_type_id')::smallint,lower(j->>'email'),(j->>'primary_phone_number')::text,(j->>'alternative_phone_numbers')::text,upper(j->>'currency'),(j->>'display_name')::text,(j->>'first_name')::text,(j->>'last_name')::text,(j->>'middle_name')::text,lower(COALESCE(j->>'language_iso_639_1','en')),COALESCE(j->>'timezone','UTC'),upper(j->>'gender'),(j->>'address')::text,(j->>'additional_info')::text,(j->>'comments')::text FROM checked
+         ON CONFLICT(email,user_type_id) DO UPDATE SET primary_phone_number=EXCLUDED.primary_phone_number,alternative_phone_numbers=EXCLUDED.alternative_phone_numbers,currency=EXCLUDED.currency,display_name=EXCLUDED.display_name,first_name=EXCLUDED.first_name,last_name=EXCLUDED.last_name,middle_name=EXCLUDED.middle_name,language_iso_639_1=EXCLUDED.language_iso_639_1,timezone=EXCLUDED.timezone,gender=EXCLUDED.gender,address=EXCLUDED.address,additional_info=EXCLUDED.additional_info,comments=EXCLUDED.comments RETURNING *
+        ) SELECT to_jsonb(result_row) AS result FROM (SELECT * FROM changed) result_row;
