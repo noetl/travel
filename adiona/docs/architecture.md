@@ -1,6 +1,6 @@
 # Architecture and boundaries
 
-Adiona's MySQL model is the business-schema source. PostgreSQL is the target. Business queries and transaction composition live in NoETL YAML; there is no Python backend, mock server, or new production Rust service. The Rust code here is a validation adapter calling upstream `noetl-tools`, plus a minimal server parser compatibility patch.
+Adiona's MySQL model is the business-schema source. PostgreSQL 19 is the target; see [target/version policy](postgresql19.md). Business queries and transaction composition live in NoETL YAML; there is no Python backend, mock server, or new production Rust service. The Rust code here is a validation adapter calling upstream `noetl-tools`, plus a minimal server parser compatibility patch.
 
 ## Database and orchestration
 

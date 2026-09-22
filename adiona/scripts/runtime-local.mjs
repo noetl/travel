@@ -24,14 +24,16 @@ if(!source||!target)throw Error('Set NOETL_SOURCE_ROOT (contains server and work
 try{const r=await fetch('http://127.0.0.1:58082/health',{signal:AbortSignal.timeout(500)});if(r)throw Error('port 58082 occupied');}catch(e){if(e.message==='port 58082 occupied')throw e;}
 const args=['-X','-v','ON_ERROR_STOP=1','-h','127.0.0.1','-p','55439','-U','migration_owner','-d','adiona_validation'];
 const actual=execFileSync(process.env.PSQL||'psql',[...args,'-At','-c','SHOW data_directory'],{encoding:'utf8'}).trim();
-if(fs.realpathSync(actual)!==fs.realpathSync(path.join(local,'pgdata')))throw Error('PostgreSQL is not the cluster created by start-postgres.sh');
+if(fs.realpathSync(actual)!==fs.realpathSync(path.join(local,'pgdata-19')))throw Error('PostgreSQL is not the cluster created by start-postgres.sh');
+const version=Number(execFileSync(process.env.PSQL||'psql',[...args,'-At','-c','SHOW server_version_num'],{encoding:'utf8'}).trim());
+if(version<190000||version>=200000)throw Error('PostgreSQL 19 server required');
 execFileSync(process.env.PSQL||'psql',[...args,'-c','CREATE SCHEMA IF NOT EXISTS noetl'],{stdio:'ignore'});
 execFileSync(process.env.PSQL||'psql',[...args,'-f',path.join(source,'server/db/ddl/postgres/schema_ddl.sql')],{stdio:'ignore'});
 const keyFile=path.join(local,'runtime.key');if(!fs.existsSync(keyFile))fs.writeFileSync(keyFile,randomBytes(32).toString('base64'),{mode:0o600});
 const common={PATH:process.env.PATH,RUST_LOG:'info',NOETL_INTERNAL_AUTH_MODE:'disabled',NOETL_COMMAND_BUS:'ehdb',NOETL_EVENT_BUS:'ehdb'};
 for(const [name,bin,env] of [
  ['server','noetl-control-plane',{POSTGRES_HOST:'127.0.0.1',POSTGRES_PORT:'55439',POSTGRES_USER:'migration_owner',POSTGRES_DATABASE:'adiona_validation',NOETL_HOST:'127.0.0.1',NOETL_PORT:'58082',NOETL_PUBLIC_SERVER_URL:'http://127.0.0.1:58082',NOETL_ENCRYPTION_KEY:fs.readFileSync(keyFile,'utf8').trim(),NOETL_ORCHESTRATE_PLUGIN_DRIVE:'false',NOETL_STATE_BUILDER:'server',NOETL_COMMAND_BUS_WRITER_ADDRS:'0@127.0.0.1:59100',NOETL_EVENT_BUS_WRITER_ADDRS:'0@127.0.0.1:59103',NOETL_ENABLE_GCP_TOKEN_API:'false'}],
- ['worker','noetl-worker',{NOETL_SERVER_URL:'http://127.0.0.1:58082',WORKER_ID:'adiona-validation',WORKER_POOL_NAME:'shared',NOETL_FEED_FILTER_SUBJECT:'noetl.commands.shared.>',WORKER_METRICS_BIND:'127.0.0.1:59090',NOETL_COMMAND_BUS_HOST:'true',NOETL_COMMAND_BUS_WRITER_DIR:path.join(local,'command-bus'),NOETL_COMMAND_BUS_INGEST_BIND:'127.0.0.1:59100',NOETL_COMMAND_BUS_CLAIM_BIND:'127.0.0.1:59101',NOETL_COMMAND_BUS_CLAIM_ADDR:'127.0.0.1:59101',NOETL_EVENT_BUS_HOST:'true',NOETL_EVENT_BUS_WRITER_DIR:path.join(local,'event-bus'),NOETL_EVENT_BUS_INGEST_BIND:'127.0.0.1:59103'}]
+ ['worker','noetl-worker',{NOETL_SERVER_URL:'http://127.0.0.1:58082',WORKER_ID:'adiona-validation',WORKER_POOL_NAME:'shared',NOETL_FEED_FILTER_SUBJECT:'noetl.commands.shared.>',WORKER_METRICS_BIND:'127.0.0.1:59090',NOETL_COMMAND_BUS_HOST:'true',NOETL_COMMAND_BUS_WRITER_DIR:path.join(local,'command-bus-19'),NOETL_COMMAND_BUS_INGEST_BIND:'127.0.0.1:59100',NOETL_COMMAND_BUS_CLAIM_BIND:'127.0.0.1:59101',NOETL_COMMAND_BUS_CLAIM_ADDR:'127.0.0.1:59101',NOETL_EVENT_BUS_HOST:'true',NOETL_EVENT_BUS_WRITER_DIR:path.join(local,'event-bus-19'),NOETL_EVENT_BUS_INGEST_BIND:'127.0.0.1:59103'}]
 ]){
  const log=fs.openSync(path.join(local,name+'.log'),'a');
  const child=spawn(path.join(target,'debug',bin),[],{cwd:local,env:{...common,...env},detached:true,stdio:['ignore',log,log]});

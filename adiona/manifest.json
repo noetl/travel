@@ -54,5 +54,6 @@
   "excluded_from_application_registration": [
     "reset.yaml",
     "source_postgres_fixture.yaml"
-  ]
+  ],
+  "database_major_target": 19
 }

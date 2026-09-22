@@ -1,5 +1,3 @@
-PASS PostgreSQL major 19 target
-Database version: 19beta3
 PASS repeat provisioning preserves migration ledger
 PASS actual PostgreSQL source fixture can be provisioned twice
 PASS user upsert preserves identity and creation timestamp
@@ -36,4 +34,4 @@ PASS repeat provisioning never resets business data
 PASS unmapped runtime identity cannot see rows or provision
 PASS checksum drift fails without losing data
 PASS six concurrent retries create one item and translation
-PASS 37 integration checks; upstream Rust PostgresTool + PostgreSQL; distributed orchestration not asserted.
+PASS 36 integration checks; upstream Rust PostgresTool + PostgreSQL; distributed orchestration not asserted.

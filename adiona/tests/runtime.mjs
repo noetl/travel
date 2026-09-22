@@ -10,6 +10,8 @@ const base='http://127.0.0.1:58082';
 let checks=0;const executions=[];
 async function post(route,body){const r=await fetch(base+route,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const v=await r.json();assert.ok(r.ok,JSON.stringify(v));return v;}
 function sql(q){return execFileSync(process.env.PSQL||'psql',['-X','-At','-v','ON_ERROR_STOP=1','-h','127.0.0.1','-p','55439','-U','migration_owner','-d','adiona_validation','-c',q],{encoding:'utf8'}).trim();}
+const postgresVersion=sql('SHOW server_version');
+assert.ok(Number(sql('SHOW server_version_num'))>=190000&&Number(sql('SHOW server_version_num'))<200000,'PostgreSQL 19 server required');
 async function credential(name,user){await post('/api/credentials',{name,type:'postgres',data:{db_host:'127.0.0.1',db_port:55439,db_name:'adiona_validation',db_user:user,db_password:''}});}
 for(const f of fs.readdirSync(path.join(root,'playbooks')).filter(f=>f.endsWith('.yaml')&&f!=='reset.yaml'))await post('/api/catalog/register',{content:fs.readFileSync(path.join(root,'playbooks',f),'utf8')});
 await credential('adiona_migrator','migration_owner');
@@ -55,6 +57,6 @@ await run('item_delete',{item_id:item.item_id},'av_provider');
 assert.equal((await run('item_get',{item_id:item.item_id},'av_customer')).length,0);
 await run('user_delete',{user_id:u.user_id});
 assert.equal(sql(`SELECT count(*) FROM adiona.users WHERE user_id=${u.user_id}`),'0');
-const report={checks,registered:fs.readdirSync(path.join(root,'playbooks')).filter(f=>f.endsWith('.yaml')&&f!=='reset.yaml').length,executions};
+const report={postgres_version:postgresVersion,checks,registered:fs.readdirSync(path.join(root,'playbooks')).filter(f=>f.endsWith('.yaml')&&f!=='reset.yaml').length,executions};
 fs.writeFileSync(path.join(root,'docs/runtime-results.json'),JSON.stringify(report,null,2)+'\n');
 console.log(`PASS ${checks} real Rust runtime executions; including expected terminal failures.`);

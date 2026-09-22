@@ -1,6 +1,8 @@
 # Adiona → NoETL catalog and users
 
-MySQL is the business-schema source; PostgreSQL is the target. This package replaces the Python hospitality mock with NoETL YAML operations for Adiona's general product/service catalog and users. It is a tested local foundation, not a deployed public API or finished reservation system.
+MySQL is the business-schema source; **PostgreSQL 19 is the target**. This package replaces the Python hospitality mock with NoETL YAML operations for Adiona's general product/service catalog and users. It is a tested local foundation, not a deployed public API or finished reservation system.
+
+See [PostgreSQL 19 target and release policy](docs/postgresql19.md). The earlier PostgreSQL 17 results remain historical evidence.
 
 Read [source mapping and differences](docs/migration-map.md), [architecture/access boundaries](docs/architecture.md), [validation](docs/validation.md), [pinned sources](docs/sources.md), and [Rust compatibility](runtime/README.md).
 
@@ -17,20 +19,21 @@ All operation files are in `playbooks/` with catalog paths `adiona/v1/<filename-
 
 ## Isolated local PostgreSQL + actual Rust tool
 
-Requires PostgreSQL 17 server binaries, Node.js, Rust/Cargo and Git. The test runner links the pinned upstream NoETL Rust tool; it is not a mock and not a replacement workflow engine. These tests reset only the disposable `adiona_validation` database at loopback port 55439.
+Requires PostgreSQL 19 server binaries (currently tested with 19beta3), Node.js, Rust/Cargo and Git. The test runner links the pinned upstream NoETL Rust tool; it is not a mock and not a replacement workflow engine. These tests reset only the disposable `adiona_validation` database at loopback port 55439.
 
 From the repository root:
 
 ```bash
-# On macOS, point to server binaries rather than client-only libpq.
-export PG_BIN=/opt/homebrew/opt/postgresql@17/bin
+# Use installed PostgreSQL 19 binaries, or build the pinned local-test prerelease:
+./adiona/scripts/build-postgres19.sh
+export PG_BIN="$PWD/adiona/.local/postgresql19-build/install/bin"
 export PATH="$PG_BIN:$PATH"
 ./adiona/scripts/start-postgres.sh
 CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --locked --manifest-path adiona/tests/rust/Cargo.toml --target-dir adiona/tests/rust/target
 node adiona/tests/integration.mjs
 ```
 
-The startup script refuses an occupied port, creates a private test cluster under ignored `adiona/.local`, and binds only to 127.0.0.1. Local trust authentication is for this disposable fixture only. Synthetic users use `example.invalid`; no source data is loaded. Stop it after runtime validation:
+The startup script refuses an occupied port, requires PostgreSQL 19 binaries and creates a private test cluster under ignored `adiona/.local/pgdata-19`, and binds only to 127.0.0.1. Local trust authentication is for this disposable fixture only. Synthetic users use `example.invalid`; no source data is loaded. Stop it after runtime validation:
 
 ```bash
 ./adiona/scripts/stop-postgres.sh

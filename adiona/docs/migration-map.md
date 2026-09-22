@@ -1,5 +1,7 @@
 # Source analysis and migration map
 
+Target: PostgreSQL 19. Earlier PostgreSQL 17 validation is retained as historical evidence; see [version policy](postgresql19.md).
+
 ## Authority and scope
 
 The source backend is a PHP Slim 3 application using PDO calls into MySQL stored procedures and lookup views. The source-of-truth business schema for this migration is the modular DDL under `adiona-datamodel/mysqldb`, as requested. The older monolithic `adiona-entity-attribute-value-model.sql` and `adiona-travel-model.sql` are design snapshots: they contain overlapping/contradictory table definitions and a different generic entities/attribute_content model. They are not concatenated into a pretend runnable schema.

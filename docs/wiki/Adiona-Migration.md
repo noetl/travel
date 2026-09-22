@@ -2,7 +2,7 @@
 
 [Implementation and setup](https://github.com/noetl/travel/tree/feat/hospitality-playbooks/adiona) · [Draft PR #125](https://github.com/noetl/travel/pull/125) · [Source/schema/endpoint mapping](https://github.com/noetl/travel/blob/feat/hospitality-playbooks/adiona/docs/migration-map.md) · [Validation evidence](https://github.com/noetl/travel/blob/feat/hospitality-playbooks/adiona/docs/validation.md)
 
-The business model comes from Adiona's modular **MySQL** definitions, converted to PostgreSQL. The supplied PostgreSQL source contains only a test table; it is preserved separately as an optional validation fixture. The catalog remains suitable for all products and services, including future hospitality use.
+The business model comes from Adiona's modular **MySQL** definitions, converted to **PostgreSQL 19**. The supplied PostgreSQL source contains only a test table; it is preserved separately as an optional validation fixture. The catalog remains suitable for all products and services, including future hospitality use.
 
 ## Implemented foundation
 
@@ -10,9 +10,13 @@ NoETL YAML owns the database operations. The Rust PostgreSQL tool executes prepa
 
 PostgreSQL RLS derives identity from a trusted mapping of the connection login, not a workload user ID. Providers manage their own catalog rows; customers see their own profiles; taxonomy/account linking require administrative authority. This is not yet connected to the public frontend or an identity-verifying gateway. Never expose the administrative credential through public execution routes.
 
+## PostgreSQL version target
+
+PostgreSQL 19 is the target, with local validation against the available 19 Beta 3 prerelease. The final 19.x release is the intended production baseline. Setup and tests enforce major version 19 and use a separate data directory. Earlier 17.11 results remain archived, not relabeled. See the [version policy and pinned build](https://github.com/noetl/travel/blob/feat/hospitality-playbooks/adiona/docs/postgresql19.md).
+
 ## Validation and runtime requirements
 
-The package has passed direct Rust-tool/PostgreSQL integration tests and full local Rust server → EHDB bus → Rust worker executions, including expected terminal failures. The linked validation report and execution-ID artifact distinguish those levels and list the actual coverage. No live database or production deployment was modified.
+On PostgreSQL 19beta3, the package passed **37 direct Rust-tool/database checks** and **21 full local Rust server → EHDB bus → Rust worker executions**, including expected terminal failures. The linked validation report and execution-ID artifact distinguish those levels and list the actual coverage. No live database or production deployment was modified.
 
 The inspected server parser rejects PostgreSQL positional parameter arrays; the package includes a tested compatibility patch required for those executions. The independent smallint result decoding fix is [noetl/tools#104](https://github.com/noetl/tools/pull/104). The playbooks use JSON row projection as a compatible workaround while that fix is under review. Literal template syntax inside caller data is preserved by encoding the bound request between rendering stages.
 

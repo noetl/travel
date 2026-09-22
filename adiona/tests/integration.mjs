@@ -14,6 +14,8 @@ function sql(query,login='migration_owner') {
 }
 function test(label,fn){fn();passed++;console.log('PASS '+label);}
 function fails(fn,pattern){assert.throws(fn,e=>pattern.test(String(e.stderr||e)));}
+test('PostgreSQL major 19 target',()=>{const version=Number(sql('SHOW server_version_num'));assert.ok(version>=190000&&version<200000,'PostgreSQL 19 server required');});
+console.log('Database version: '+sql('SHOW server_version'));
 call('reset',{},'migration_owner');
 call('provision',{},'migration_owner');
 sql(`DO $$ BEGIN

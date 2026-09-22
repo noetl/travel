@@ -13,6 +13,9 @@ workflow:
       command: |
         DO $migration$
         BEGIN
+         IF current_setting('server_version_num')::integer < 190000 OR current_setting('server_version_num')::integer >= 200000 THEN
+          RAISE EXCEPTION 'Adiona provisioning targets PostgreSQL 19; use a separate PostgreSQL 19 cluster';
+         END IF;
          PERFORM pg_advisory_xact_lock(816234910);
          CREATE SCHEMA IF NOT EXISTS adiona_migrations;
          CREATE TABLE IF NOT EXISTS adiona_migrations.versions(version integer PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now());
