@@ -1,6 +1,6 @@
 # Adiona → NoETL catalog and users
 
-MySQL is the business-schema source; **PostgreSQL 19 is the target**. This package replaces the Python hospitality mock with NoETL YAML operations for Adiona's general product/service catalog and users. It is a tested local foundation, not a deployed public API or finished reservation system.
+MySQL is the business-schema source; **PostgreSQL 19 is the target**. This package replaces the Python hospitality mock with NoETL YAML operations for Adiona's general product/service catalog and users. It is a tested local foundation, not a deployed public API. The [hospitality extension](docs/hospitality.md) adds real room inventory and staff-managed reservations.
 
 See [PostgreSQL 19 target and release policy](docs/postgresql19.md). The earlier PostgreSQL 17 results remain historical evidence.
 
@@ -16,6 +16,10 @@ Read [source mapping and differences](docs/migration-map.md), [architecture/acce
 - Prepared parameters for all caller values. One SQL statement per operation; item and default translation roll back together.
 
 All operation files are in `playbooks/` with catalog paths `adiona/v1/<filename-without-yaml>`. Request shape is `{"request": {...}}`; inspect each playbook's JSON field names. Upserts are full replacements of their listed fields, not partial JSON patches. `item_update` updates only price. Read/delete of a missing or invisible entity returns no rows. Upserts/links return the stable persisted row; SQL validation/authorization failures fail the execution. Output rows are `output.data.rows[].result` at the tool boundary; runtime event envelopes add their own wrappers.
+
+## Hospitality extension
+
+Apply `lodging_provision` after `provision` to add migration 2. Seven additional YAML workflows cover rooms, exact flat-rate quotes, holds, confirmation/cancellation, check-in/out and expiry. See [contracts, setup and remaining service stages](docs/hospitality.md). Run `node adiona/tests/hospitality.mjs` after the catalog integration suite; with the Rust server/worker running, also run `node adiona/tests/hospitality.mjs --runtime`.
 
 ## Isolated local PostgreSQL + actual Rust tool
 
@@ -82,8 +86,8 @@ VALUES ('catalog_provider', 123, 'provider');
 4. Register playbooks using the pinned server's `POST /api/catalog/register` with a JSON body containing `content` (the YAML string). Execute with `POST /api/execute`, `{"path":"adiona/v1/item_upsert","payload":{"request":{...}}}`. See `examples/item.json` and `examples/user.json`; use actual provisioned IDs. Register only reviewed operations and pin catalog revisions in the gateway. Keep credential selection and catalog/execution management APIs behind trusted access controls.
 5. Connect a real verified-identity gateway before serving multiple users. The example static actor alias models one deployment principal, not a public caller-selected identity. This package intentionally does not wire the existing travel frontend to a shared administrator credential.
 
-PostgreSQL tool fix: [noetl/tools#104](https://github.com/noetl/tools/pull/104). The target playbooks also use JSON row projection, so they work with the inspected tools revision before that fix is merged. The server parser patch remains a separate runtime requirement.
+PostgreSQL tool fix: [noetl/tools#104](https://github.com/noetl/tools/pull/104). The fix is merged; the direct validation adapter pins that merge revision. JSON projection also keeps the pinned worker compatible. The server parser patch remains a separate runtime requirement.
 
 ## Remaining scope
 
-Specialized trip/tour/car availability and pricing response parity, trip/itinerary/order/invoice schema migration, payments, hospitality inventory/holds/reservations/refunds/outbox, public gateway integration, verified account linking, GCS object operations, historical data cleanup/import and production TLS validation are not implemented. The migration map names the source rules and unresolved gaps. No production database, bucket, payment provider or deployment was modified.
+Specialized trip/tour/car availability and pricing response parity, trip/itinerary/order/invoice schema migration, seasonal pricing/taxes/fees, payments/refunds/outbox, public gateway integration, verified account linking, GCS object operations, historical data cleanup/import and production TLS validation are not implemented. The migration map names the source rules and unresolved gaps. No production database, bucket, payment provider or deployment was modified.

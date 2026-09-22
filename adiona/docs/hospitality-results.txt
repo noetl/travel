@@ -1,0 +1,50 @@
+PASS tool versioned provisioning is repeatable
+PASS tool room links to catalog and retries return same ID
+PASS tool availability quotes exact cents and nights
+PASS tool invalid dates and capacities fail
+PASS tool customers and other providers cannot manage rooms
+PASS tool hold snapshots price and blocks overlapping inventory
+PASS tool retry preserves hold ID, expiry, version and quote
+PASS tool idempotency key payload mismatch fails atomically
+PASS tool room closure blocks new holds without breaking an existing retry
+PASS tool adjacent dates do not overlap
+PASS tool guest sees own booking; another provider cannot read or mutate it
+PASS tool stale version and skipped state transitions fail
+PASS tool confirmation replay does not increment version or claim payment
+PASS tool check-in and checkout advance the lifecycle
+PASS tool terminal booking cannot be revived
+PASS tool expired hold cannot confirm and blocks until explicit release
+PASS tool missing guest rolls back the reservation
+PASS tool foreign room ownership and invalid currency are rejected
+PASS tool another room remains available for the same dates
+PASS tool cancellation releases inventory and preserves history
+PASS tool database privileges prevent altering immutable snapshots
+PASS tool six competing holds cannot double-book
+PASS tool six identical concurrent retries return one reservation
+PASS tool repeat migration preserves reservations and detects ledger drift
+PASS 24 hospitality checks (tool); 0 runtime executions
+
+PASS runtime versioned provisioning is repeatable
+PASS runtime room links to catalog and retries return same ID
+PASS runtime availability quotes exact cents and nights
+PASS runtime invalid dates and capacities fail
+PASS runtime customers and other providers cannot manage rooms
+PASS runtime hold snapshots price and blocks overlapping inventory
+PASS runtime retry preserves hold ID, expiry, version and quote
+PASS runtime idempotency key payload mismatch fails atomically
+PASS runtime room closure blocks new holds without breaking an existing retry
+PASS runtime adjacent dates do not overlap
+PASS runtime guest sees own booking; another provider cannot read or mutate it
+PASS runtime stale version and skipped state transitions fail
+PASS runtime confirmation replay does not increment version or claim payment
+PASS runtime check-in and checkout advance the lifecycle
+PASS runtime terminal booking cannot be revived
+PASS runtime expired hold cannot confirm and blocks until explicit release
+PASS runtime missing guest rolls back the reservation
+PASS runtime foreign room ownership and invalid currency are rejected
+PASS runtime another room remains available for the same dates
+PASS runtime cancellation releases inventory and preserves history
+PASS runtime database privileges prevent altering immutable snapshots
+PASS runtime six competing holds cannot double-book
+PASS runtime repeat migration preserves reservations and detects ledger drift
+PASS 23 hospitality checks (runtime); 61 runtime executions

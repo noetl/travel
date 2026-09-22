@@ -1,0 +1,19 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_reservation_release_expired
+  path: adiona/v1/reservation_release_expired
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), checked AS MATERIALIZED (SELECT j FROM p WHERE adiona.require(adiona.is_admin() OR adiona.is_provider(),'Staff role required')), changed AS (
+         UPDATE adiona.reservations r SET status='expired',version=version+1,modified_at=statement_timestamp() FROM checked
+         WHERE r.status='held' AND r.expires_at<=statement_timestamp() RETURNING r.*
+        ) SELECT to_jsonb(r) || jsonb_build_object('reservation_id',reservation_id::text,'unit_id',unit_id::text,'provider_id',provider_id::text,'guest_id',guest_id::text,'total_cents',total_cents::text,'nightly_rate',nightly_rate::text) AS result FROM changed r;

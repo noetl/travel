@@ -2022,7 +2022,7 @@ dependencies = [
 [[package]]
 name = "noetl-directives"
 version = "0.1.0"
-source = "git+https://github.com/noetl/tools?rev=e66e49c27a3d9022c5bf5cab98423f13fbe5bc88#e66e49c27a3d9022c5bf5cab98423f13fbe5bc88"
+source = "git+https://github.com/noetl/tools?rev=8048b14169f3bbaea6430b0b9762ae2cdfe4d8c6#8048b14169f3bbaea6430b0b9762ae2cdfe4d8c6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2032,12 +2032,12 @@ dependencies = [
 [[package]]
 name = "noetl-locator"
 version = "0.1.1"
-source = "git+https://github.com/noetl/tools?rev=e66e49c27a3d9022c5bf5cab98423f13fbe5bc88#e66e49c27a3d9022c5bf5cab98423f13fbe5bc88"
+source = "git+https://github.com/noetl/tools?rev=8048b14169f3bbaea6430b0b9762ae2cdfe4d8c6#8048b14169f3bbaea6430b0b9762ae2cdfe4d8c6"
 
 [[package]]
 name = "noetl-tools"
 version = "4.0.1"
-source = "git+https://github.com/noetl/tools?rev=e66e49c27a3d9022c5bf5cab98423f13fbe5bc88#e66e49c27a3d9022c5bf5cab98423f13fbe5bc88"
+source = "git+https://github.com/noetl/tools?rev=8048b14169f3bbaea6430b0b9762ae2cdfe4d8c6#8048b14169f3bbaea6430b0b9762ae2cdfe4d8c6"
 dependencies = [
  "anyhow",
  "arrow",

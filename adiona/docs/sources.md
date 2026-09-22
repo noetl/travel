@@ -8,7 +8,7 @@ Private source repositories require their own access. Only adapted definitions a
 | [adiona/adiona](https://github.com/adiona/adiona/tree/d12c0af490272dc3bf184bbc5483f8d3c5895d15) | `d12c0af490272dc3bf184bbc5483f8d3c5895d15` |
 | [adiona/adiona-datamodel](https://github.com/adiona/adiona-datamodel/tree/9a4bdbbff0de411f0cb132af0584491874659d75) | `9a4bdbbff0de411f0cb132af0584491874659d75` |
 | [noetl/noetl](https://github.com/noetl/noetl/tree/0a01c0df2d2a7d8bf66e0d553124e20928282f2c) | `0a01c0df2d2a7d8bf66e0d553124e20928282f2c` |
-| [noetl/tools](https://github.com/noetl/tools/tree/e66e49c27a3d9022c5bf5cab98423f13fbe5bc88) | `e66e49c27a3d9022c5bf5cab98423f13fbe5bc88` |
+| [noetl/tools](https://github.com/noetl/tools/tree/8048b14169f3bbaea6430b0b9762ae2cdfe4d8c6) | `8048b14169f3bbaea6430b0b9762ae2cdfe4d8c6` |
 | [noetl/server](https://github.com/noetl/server/tree/35c451825106ff7e5723bcaa14935f1dca88a9cc) | `35c451825106ff7e5723bcaa14935f1dca88a9cc` |
 | [noetl/worker](https://github.com/noetl/worker/tree/7bce66c6a1486ccf73d1de698431a179c6646c90) | `7bce66c6a1486ccf73d1de698431a179c6646c90` |
 | [noetl/cli](https://github.com/noetl/cli/tree/8b1e6ae7152dab2f6f2f30c8d9a6d4abe2ef5503) | `8b1e6ae7152dab2f6f2f30c8d9a6d4abe2ef5503` |

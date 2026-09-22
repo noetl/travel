@@ -98,3 +98,7 @@ Source `upsert_users_proc` calls `insert_user_type_proc`/`insert_user_auth_proc`
 `get_cars` parses long age strings from their first two characters, filters minimum driver age and date boundaries, and returns car-specific attributes and image variants. Its currency conversion is also commented out. These unusual legacy semantics need an explicit compatibility decision before public car search is migrated.
 
 Order definitions have status lookup tables, customer order headers/lines and invoices, but several intended provider/trip/item links are indexes or unconstrained IDs instead of FKs. Itineraries link trips and items with unique `(trip_id,item_id,event_day,event_order)` and separate localized day content. Their incomplete source constraints are a reason for a separately reviewed domain migration, not a reason to assume reservation correctness from catalog CRUD.
+
+## New hospitality extension (migration 2)
+
+[Lodging inventory and reservation playbooks](hospitality.md) extend the MySQL-derived items/users rather than replacing them. They are new dated-inventory behavior, not a claim of legacy order/invoice/payment response parity. Generic order history and specialized legacy availability remain unresolved migration scope.

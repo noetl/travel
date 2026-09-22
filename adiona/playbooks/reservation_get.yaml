@@ -1,0 +1,16 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_reservation_get
+  path: adiona/v1/reservation_get
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j) SELECT to_jsonb(r) || jsonb_build_object('reservation_id',reservation_id::text,'unit_id',unit_id::text,'provider_id',provider_id::text,'guest_id',guest_id::text,'total_cents',total_cents::text,'nightly_rate',nightly_rate::text) AS result FROM adiona.reservations r CROSS JOIN p WHERE reservation_id=(j->>'reservation_id')::bigint;

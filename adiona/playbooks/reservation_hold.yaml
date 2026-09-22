@@ -1,0 +1,25 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_reservation_hold
+  path: adiona/v1/reservation_hold
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_actor
+      params:
+        - "{{ request | tojson | b64encode }}"
+      command: |
+        WITH p AS MATERIALIZED (SELECT convert_from(decode($1::text,'base64'),'UTF8')::jsonb AS j), dates AS MATERIALIZED (SELECT j,(j->>'arrival')::date AS arrival,(j->>'departure')::date AS departure,(j->>'guests')::integer AS guests FROM p), checked AS MATERIALIZED (SELECT * FROM dates WHERE adiona.require((adiona.is_admin() OR adiona.is_provider()) AND arrival IS NOT NULL AND departure IS NOT NULL AND isfinite(arrival) AND isfinite(departure) AND departure>arrival AND departure-arrival<=365 AND guests BETWEEN 1 AND 100,'Staff role, finite dates (1-365 nights), and guests required')), unit AS MATERIALIZED (
+         SELECT u.*,j,arrival,departure,guests FROM adiona.lodging_units u CROSS JOIN checked WHERE u.unit_id=(j->>'unit_id')::bigint FOR SHARE OF u
+        ), changed AS (
+         INSERT INTO adiona.reservations AS existing(provider_id,unit_id,guest_id,idempotency_key,arrival,departure,guests,nightly_rate,currency_code,expires_at)
+         SELECT provider_id,unit_id,(j->>'guest_id')::bigint,j->>'idempotency_key',arrival,departure,guests,nightly_rate,currency_code,statement_timestamp()+interval '15 minutes' FROM unit
+         WHERE adiona.require((active AND guests<=capacity) OR EXISTS(SELECT FROM adiona.reservations prior WHERE prior.provider_id=unit.provider_id AND prior.idempotency_key=unit.j->>'idempotency_key'),'Room inactive or guest capacity exceeded')
+         ON CONFLICT(provider_id,idempotency_key) DO UPDATE SET status=existing.status
+         WHERE adiona.require(existing.unit_id=EXCLUDED.unit_id AND existing.guest_id=EXCLUDED.guest_id AND existing.arrival=EXCLUDED.arrival AND existing.departure=EXCLUDED.departure AND existing.guests=EXCLUDED.guests,'Idempotency key reused for a different reservation')
+         RETURNING *
+        ) SELECT to_jsonb(r) || jsonb_build_object('reservation_id',reservation_id::text,'unit_id',unit_id::text,'provider_id',provider_id::text,'guest_id',guest_id::text,'total_cents',total_cents::text,'nightly_rate',nightly_rate::text) AS result FROM changed r;

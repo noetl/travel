@@ -9,7 +9,7 @@ git -C "$NOETL_SOURCE_ROOT/server" apply "$TRAVEL_ROOT/adiona/runtime/0001-postg
 cargo test --manifest-path "$NOETL_SOURCE_ROOT/server/orchestrate-core/Cargo.toml" positional_parameter_tests
 ```
 
-The independent smallint result-decoding fix is [noetl/tools#104](https://github.com/noetl/tools/pull/104). This package also projects rows with PostgreSQL `to_jsonb`, so its tests run against the pinned unmodified tools revision while that fix is under review.
+The independent smallint result-decoding fix is [noetl/tools#104](https://github.com/noetl/tools/pull/104). That fix is merged and the direct adapter pins the merge commit. JSON projection keeps the playbooks compatible with the separately pinned worker, which still uses the earlier published tools release.
 
 The current CLI's local interpreter does not execute PostgreSQL. Use the Rust distributed server/worker/EHDB validation below; do not count `noetl exec --runtime local` as a database test.
 

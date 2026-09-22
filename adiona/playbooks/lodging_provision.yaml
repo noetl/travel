@@ -1,0 +1,69 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: adiona_lodging_provision
+  path: adiona/v1/lodging_provision
+workload:
+  request: {}
+workflow:
+  - step: start
+    tool:
+      kind: postgres
+      auth: adiona_migrator
+      command: |
+        DO $migration$
+        BEGIN
+         IF current_setting('server_version_num')::integer NOT BETWEEN 190000 AND 199999 THEN RAISE EXCEPTION 'PostgreSQL 19 required'; END IF;
+         PERFORM pg_advisory_xact_lock(816234910);
+         IF NOT EXISTS(SELECT FROM adiona_migrations.versions WHERE version=1 AND sha256='d81d076b0dd64a84c4baefdc2e58ecc6414d64301093c7e4321c5bf287b2f751') THEN RAISE EXCEPTION 'Apply catalog migration 1 first'; END IF;
+         IF EXISTS(SELECT FROM adiona_migrations.versions WHERE version=2 AND sha256<>'2fabf926e9b80d7ae73efaa7455626e2b4014af020609b94557cf8fca4917a4b') THEN RAISE EXCEPTION 'Migration 2 checksum mismatch'; END IF;
+         IF NOT EXISTS(SELECT FROM adiona_migrations.versions WHERE version=2) THEN
+        CREATE TABLE adiona.lodging_units (
+         unit_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+         item_id bigint NOT NULL, provider_id bigint NOT NULL,
+         unit_code text NOT NULL CHECK(length(trim(unit_code)) BETWEEN 1 AND 100),
+         capacity integer NOT NULL CHECK(capacity BETWEEN 1 AND 100),
+         nightly_rate bigint NOT NULL CHECK(nightly_rate BETWEEN 0 AND 1000000000),
+         currency_code char(3) NOT NULL REFERENCES adiona.currencies,
+         active boolean NOT NULL DEFAULT true,
+         FOREIGN KEY(item_id,provider_id) REFERENCES adiona.items(item_id,provider_id),
+         UNIQUE(provider_id,unit_code), UNIQUE(unit_id,provider_id)
+        );
+        CREATE TABLE adiona.reservations (
+         reservation_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+         provider_id bigint NOT NULL, unit_id bigint NOT NULL,
+         guest_id bigint NOT NULL REFERENCES adiona.users,
+         idempotency_key text NOT NULL CHECK(length(trim(idempotency_key)) BETWEEN 1 AND 128),
+         arrival date NOT NULL, departure date NOT NULL,
+         guests integer NOT NULL CHECK(guests BETWEEN 1 AND 100),
+         nightly_rate bigint NOT NULL CHECK(nightly_rate BETWEEN 0 AND 1000000000),
+         currency_code char(3) NOT NULL REFERENCES adiona.currencies,
+         total_cents bigint GENERATED ALWAYS AS (nightly_rate * (departure-arrival)) STORED,
+         status text NOT NULL DEFAULT 'held' CHECK(status IN ('held','confirmed','cancelled','expired','checked_in','checked_out')),
+         expires_at timestamptz NOT NULL,
+         version integer NOT NULL DEFAULT 1 CHECK(version>0),
+         created_at timestamptz NOT NULL DEFAULT now(), modified_at timestamptz NOT NULL DEFAULT now(),
+         CHECK(isfinite(arrival) AND isfinite(departure) AND departure>arrival AND departure-arrival<=365),
+         FOREIGN KEY(unit_id,provider_id) REFERENCES adiona.lodging_units(unit_id,provider_id),
+         UNIQUE(provider_id,idempotency_key),
+         EXCLUDE USING gist (int8range(unit_id,unit_id,'[]') WITH &&, daterange(arrival,departure,'[)') WITH &&)
+         WHERE (status IN ('held','confirmed','checked_in'))
+        );
+        CREATE INDEX reservation_expiry ON adiona.reservations(provider_id,expires_at) WHERE status='held';
+        CREATE INDEX reservation_guest ON adiona.reservations(guest_id,arrival);
+        ALTER TABLE adiona.lodging_units ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE adiona.reservations ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY staff_read ON adiona.lodging_units FOR SELECT TO adiona_runtime USING(adiona.is_admin() OR (adiona.is_provider() AND provider_id=adiona.actor_id()));
+        CREATE POLICY staff_insert ON adiona.lodging_units FOR INSERT TO adiona_runtime WITH CHECK(adiona.is_admin() OR (adiona.is_provider() AND provider_id=adiona.actor_id()));
+        CREATE POLICY staff_update ON adiona.lodging_units FOR UPDATE TO adiona_runtime USING(adiona.is_admin() OR (adiona.is_provider() AND provider_id=adiona.actor_id())) WITH CHECK(adiona.is_admin() OR (adiona.is_provider() AND provider_id=adiona.actor_id()));
+        CREATE POLICY reservation_read ON adiona.reservations FOR SELECT TO adiona_runtime USING(adiona.is_admin() OR (adiona.is_provider() AND provider_id=adiona.actor_id()) OR guest_id=adiona.actor_id());
+        CREATE POLICY reservation_insert ON adiona.reservations FOR INSERT TO adiona_runtime WITH CHECK(adiona.is_admin() OR (adiona.is_provider() AND provider_id=adiona.actor_id()));
+        CREATE POLICY reservation_update ON adiona.reservations FOR UPDATE TO adiona_runtime USING(adiona.is_admin() OR (adiona.is_provider() AND provider_id=adiona.actor_id())) WITH CHECK(adiona.is_admin() OR (adiona.is_provider() AND provider_id=adiona.actor_id()));
+        GRANT SELECT,INSERT ON adiona.lodging_units,adiona.reservations TO adiona_runtime;
+        GRANT UPDATE(capacity,nightly_rate,currency_code,active) ON adiona.lodging_units TO adiona_runtime;
+        GRANT UPDATE(status,version,modified_at) ON adiona.reservations TO adiona_runtime;
+        GRANT USAGE,SELECT ON SEQUENCE adiona.lodging_units_unit_id_seq,adiona.reservations_reservation_id_seq TO adiona_runtime;
+
+         INSERT INTO adiona_migrations.versions(version,sha256) VALUES(2,'2fabf926e9b80d7ae73efaa7455626e2b4014af020609b94557cf8fca4917a4b');
+         END IF;
+        END $migration$;

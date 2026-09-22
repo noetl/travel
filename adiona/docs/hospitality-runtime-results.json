@@ -1,0 +1,311 @@
+{
+  "postgres_version": "19beta3",
+  "checks": 23,
+  "executions": [
+    {
+      "playbook": "lodging_provision",
+      "execution_id": "360664897557434368",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_provision",
+      "execution_id": "360664898798948352",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "item_upsert",
+      "execution_id": "360664900099182592",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664901323919360",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664902561239040",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_availability",
+      "execution_id": "360664903777587200",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_availability",
+      "execution_id": "360664905006518272",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664906164146176",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664907372105728",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664908533927936",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664909708333056",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_availability",
+      "execution_id": "360664910874349568",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664912052948992",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_availability",
+      "execution_id": "360664913298657280",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664914535976960",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664915697799168",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664916922535936",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664918109523968",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_get",
+      "execution_id": "360664919271346176",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664920533831680",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664921762762752",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664922995888128",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664924178681856",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_availability",
+      "execution_id": "360664925407612928",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_get",
+      "execution_id": "360664926590406656",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_get",
+      "execution_id": "360664927806754816",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664929048268800",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664930264616960",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664931422244864",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664932592455680",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664933766860800",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664935008374784",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664936228917248",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664937386545152",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664938531590144",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664939777298432",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664940922343424",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664942180634624",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664943443120128",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_availability",
+      "execution_id": "360664944583970816",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_release_expired",
+      "execution_id": "360664945825484800",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_release_expired",
+      "execution_id": "360664947054415872",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_release_expired",
+      "execution_id": "360664948266569728",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_availability",
+      "execution_id": "360664949474529280",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664950699266048",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664951873671168",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664953018716160",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664954188926976",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_availability",
+      "execution_id": "360664955443023872",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_unit_upsert",
+      "execution_id": "360664956671954944",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664957875720192",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_transition",
+      "execution_id": "360664959100456960",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_availability",
+      "execution_id": "360664960316805120",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664961600262146",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664961596067841",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664961596067840",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664961604456448",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664961604456449",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "reservation_hold",
+      "execution_id": "360664961604456450",
+      "status": "FAILED"
+    },
+    {
+      "playbook": "lodging_provision",
+      "execution_id": "360664962879524864",
+      "status": "COMPLETED"
+    },
+    {
+      "playbook": "lodging_provision",
+      "execution_id": "360664964171370496",
+      "status": "FAILED"
+    }
+  ]
+}

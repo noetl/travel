@@ -39,4 +39,4 @@ TAG="$(date -u +%Y%m%d-%H%M%S)" ./scripts/build_container.sh
 
 ## Adiona catalog and hospitality foundation
 
-The [Adiona migration](adiona/README.md) converts the source MySQL catalog/user model to PostgreSQL and implements operations as NoETL playbooks. It replaces the Python mock starter. See its setup instructions, validation report, migration mapping, and [wiki](https://github.com/noetl/travel/wiki/Adiona-Migration). This draft is not deployed.
+The [Adiona migration](adiona/README.md) converts the source MySQL catalog/user model to PostgreSQL 19 and implements operations as NoETL playbooks. The [hospitality extension](adiona/docs/hospitality.md) adds room availability, holds and staff-managed reservations. It replaces the Python mock starter. See its setup instructions, validation report, migration mapping, and [wiki](https://github.com/noetl/travel/wiki/Adiona-Migration). The service is not deployed to production.

@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-noetl-tools = { git = "https://github.com/noetl/tools", rev = "e66e49c27a3d9022c5bf5cab98423f13fbe5bc88", default-features = false }
+noetl-tools = { git = "https://github.com/noetl/tools", rev = "8048b14169f3bbaea6430b0b9762ae2cdfe4d8c6", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde_json = "1"
 serde_yaml = "0.9"
