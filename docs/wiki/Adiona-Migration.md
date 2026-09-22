@@ -84,4 +84,4 @@ All paths below are `adiona/v1/<name>` in the NoETL catalog. See the YAML for ac
 
 ## Hospitality continuation
 
-The next implementation adds individual room inventory, quotes, holds and staff-managed reservation transitions. See [Hospitality Platform](Hospitality-Platform) for the review branch, contracts and real PostgreSQL/Rust validation. The original catalog migration PR #125 and tool fix #104 are merged.
+[PR #126](https://github.com/noetl/travel/pull/126) is merged and adds individual room inventory, quotes, holds and staff-managed reservation transitions. See [Hospitality Platform](Hospitality-Platform) for the implementation, contracts and real PostgreSQL/Rust validation. The original catalog migration PR #125 and tool fix #104 are merged.

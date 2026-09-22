@@ -34,8 +34,8 @@ async function call(name,request={},login='av_provider',attempt=0){
   const raw=sql(`SELECT result::text FROM noetl.event WHERE execution_id=${id} AND event_type='call.done' ORDER BY event_id DESC LIMIT 1`);
   return (JSON.parse(raw)?.context?.result?.context?.data?.rows||[]).map(r=>r.result??r);
  }
- try{return await new Promise((resolve,reject)=>{const child=spawn(binary,[path.join(root,'playbooks',name+'.yaml'),login,JSON.stringify(request)]);let out='',err='';child.stdout.on('data',d=>out+=d);child.stderr.on('data',d=>err+=d);child.on('error',reject);child.on('exit',code=>code?reject(Error(err)):resolve((JSON.parse(out).rows||[]).map(r=>r.result??r)));});}
- catch(e){if(attempt<8&&/40001|40P01/.test(e.message))return call(name,request,login,attempt+1);throw e;}
+ try{return await new Promise((resolve,reject)=>{const child=spawn(binary,[path.join(root,'playbooks',name+'.yaml'),login,JSON.stringify(request)]);let out='',err='';child.stdout.on('data',d=>out+=d);child.stderr.on('data',d=>err+=d);child.on('error',reject);child.on('close',(code,signal)=>code!==0?reject(Error(err||`Validation process exited with code ${code}, signal ${signal}`)):resolve((JSON.parse(out).rows||[]).map(r=>r.result??r)));});}
+ catch(e){if(attempt<8&&/40001|40P01/.test(e.message)){await new Promise(resolve=>setTimeout(resolve,Math.min(250,10*2**attempt)+Math.random()*20));return call(name,request,login,attempt+1);}throw e;}
 }
 async function test(label,fn){await fn();passed++;console.log('PASS '+suffix+' '+label);}
 async function fails(fn,pattern){await assert.rejects(fn,runtime?/Runtime FAILED/:pattern);}
