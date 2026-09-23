@@ -1,6 +1,6 @@
 # Authenticated front desk
 
-This increment provides an opt-in front-desk application for availability, holds, reservation lookup/listing, confirmation/cancellation, check-in/out and expired-hold release. PostgreSQL 19 and NoETL YAML remain the business backend. It is implemented on review branches, not enabled in production.
+This increment provides an opt-in front-desk application for availability, holds, reservation lookup/listing, confirmation/cancellation, check-in/out and expired-hold release. PostgreSQL 19 and NoETL YAML remain the business backend. It is implemented in [travel PR #129](https://github.com/noetl/travel/pull/129) and [gateway PR #51](https://github.com/noetl/gateway/pull/51), both ready for review. It is not enabled in production.
 
 The Rust gateway maps a validated session user to operator-approved catalog IDs. Each provider receives fixed credential-bound copies of the reviewed playbooks; the browser cannot choose a database identity or arbitrary playbook. Signed, session-bound receipts protect result polling, and only business rows are returned. A dedicated restricted gateway omits generic proxy, GraphQL, SSE and push-ingress routes.
 

@@ -1,6 +1,6 @@
 # Authenticated front desk
 
-Status: implementation. Scope decisions below follow the existing Auth0/gateway session architecture and the user's PostgreSQL 19 / NoETL Rust requirements.
+Status: implemented and locally verified; ready for review. Scope decisions below follow the existing Auth0/gateway session architecture and the user's PostgreSQL 19 / NoETL Rust requirements.
 
 ## Problem and goals
 Provider staff need to find available rooms, create a hold for an existing guest, and manage reservations without database credentials or unrestricted NoETL execution access.
@@ -27,3 +27,9 @@ The first page accepts an existing guest account ID; guest discovery/onboarding,
 
 ## Open questions
 None blocking this increment. Public production identity configuration and staff enrollment remain operator deployment requirements, not guessed defaults.
+
+## Review artifacts
+
+- [Gateway #51](https://github.com/noetl/gateway/pull/51): restricted action execution and receipts.
+- [Travel #129](https://github.com/noetl/travel/pull/129): UI, list playbook, exports and tests.
+- Evidence: `adiona/docs/front-desk-validation.json`; production identity/deployment scenarios remain explicitly unexecuted.
