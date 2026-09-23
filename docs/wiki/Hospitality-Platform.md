@@ -24,3 +24,7 @@ Final PostgreSQL 19.x qualification remains pending. The pinned Rust server stil
 ## Next service stages
 
 Verified-identity gateway and front-desk UI; property/timezone configuration; seasonal rates, taxes and fees; reservation audit/outbox; real payments and refunds; housekeeping and maintenance blocks; channel synchronization. Public self-service bookings and multi-room group transactions remain future work. The new dated room model does not claim migration parity for legacy Adiona orders/invoices or specialized tour/car availability.
+
+## Authenticated front-desk increment
+
+[Front Desk](Front-Desk) documents the opt-in staff interface, scoped Rust gateway execution, provider credential bindings and validation/deployment boundaries.

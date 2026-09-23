@@ -46,6 +46,7 @@ jobs:
           trap './adiona/scripts/stop-postgres.sh' EXIT
           node adiona/tests/integration.mjs | tee adiona/.local/catalog-ci.log
           node adiona/tests/hospitality.mjs | tee adiona/.local/hospitality-ci.log
+          node adiona/tests/front-desk.mjs | tee adiona/.local/front-desk-ci.log
           cp adiona/docs/hospitality-tool-results.json adiona/.local/hospitality-ci-results.json
       - name: Preserve validation evidence
         if: always()

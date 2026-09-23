@@ -2,6 +2,7 @@ import { Alert, Box, Button, CircularProgress, Drawer, Stack, Typography, useMed
 import { useTheme } from '@mui/material/styles';
 import { useCallback, useState } from 'react';
 import { Route, Routes } from 'react-router-dom';
+import { FrontDesk } from './components/FrontDesk';
 import { AuthCallback } from './auth/AuthCallback';
 import { useMunoAuth } from './auth/MunoAuthProvider';
 import { Sidebar, type ChatHistorySummary, type SidebarView } from './components/shell/Sidebar';
@@ -142,8 +143,9 @@ function AuthenticatedShell() {
 export default function App() {
   return (
     <Routes>
+      {import.meta.env.VITE_FRONT_DESK_ENABLED === 'true' && <Route path="/front-desk" element={<FrontDesk />} />}
       <Route path="/callback" element={<AuthCallback />} />
-      <Route path="*" element={<AuthenticatedShell />} />
+      <Route path="*" element={import.meta.env.VITE_FRONT_DESK_ENABLED === 'true' ? <FrontDesk /> : <AuthenticatedShell />} />
     </Routes>
   );
 }

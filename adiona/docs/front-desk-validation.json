@@ -1,0 +1,20 @@
+{
+  "postgres_version": "19beta3",
+  "database_and_export_checks": 7,
+  "frontend_tests": 62,
+  "gateway_unit_tests": 88,
+  "gateway_live_test": "real_runtime_scoped_actions",
+  "live_workflow_executions": 7,
+  "live_operations": [
+    "reservations",
+    "availability",
+    "hold",
+    "hold replay",
+    "confirm",
+    "reservation lookup",
+    "cancel"
+  ],
+  "identity_validation": "Synthetic already-validated UserContext injected only in HTTP test; live OIDC/session backend not exercised",
+  "runtime": "Existing pinned Rust server with positional-parameter patch, EHDB and Rust worker",
+  "production_deployment": false
+}
