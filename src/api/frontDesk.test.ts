@@ -1,3 +1,4 @@
+import { clearSession } from "./gatewaySession";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   frontDesk,
@@ -74,4 +75,12 @@ describe("front desk boundary", () => {
   it("formats exact bigint cents without floating-point loss", () => {
     expect(money("9007199254740993", "USD")).toBe("USD 90071992547409.93");
   });
+});
+
+it("clears expired sessions and rejects a write before any polling", async () => {
+  const fetch = vi.fn().mockResolvedValue(response({}, 401));
+  vi.stubGlobal("fetch", fetch);
+  await expect(frontDesk("hold", {})).rejects.toThrow("session expired");
+  expect(clearSession).toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledTimes(1);
 });

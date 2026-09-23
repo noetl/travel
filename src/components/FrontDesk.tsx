@@ -49,16 +49,26 @@ export function FrontDesk() {
   }, [auth.user?.sub, auth.isGatewayLinked]);
   async function perform<T>(work: () => Promise<T>, done: (value: T) => void) {
     const session = getStoredSession()?.token;
+    if (!session) {
+      auth.logout();
+      return;
+    }
     setBusy(true);
     setMessage("");
     setNotice("");
     try {
       const value = await work();
-      if (getStoredSession()?.token !== session) return;
+      if (getStoredSession()?.token !== session) {
+        if (!getStoredSession()?.token) auth.logout();
+        return;
+      }
       done(value);
       setPending(undefined);
     } catch (e) {
-      if (getStoredSession()?.token !== session) return;
+      if (getStoredSession()?.token !== session) {
+        if (!getStoredSession()?.token) auth.logout();
+        return;
+      }
       if (e instanceof PendingOperation) setPending(e);
       setMessage(e instanceof Error ? e.message : "Operation failed.");
     } finally {
