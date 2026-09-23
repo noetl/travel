@@ -1,0 +1,25 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: travel_qa_negcontrol
+  path: muno/qa/regression/selftest/vanishing-case
+  description: >-
+    Harness self-test, NOT a travel check. A case that dies before writing any verdict. Run it
+    through the suite and the suite must go RED -- if it goes green, the runner is losing cases and
+    every other result it reports is worth less than it appears.
+executor:
+  profile: local
+  version: noetl-runtime/1
+workload:
+  repo: ""
+  workspace: ""
+workflow:
+  - step: die
+    tool:
+      kind: shell
+      cmds: ["echo 'dying before writing a verdict' >&2; exit 3"]
+    next:
+      arcs: [{step: end}]
+  - step: end
+    tool:
+      kind: noop

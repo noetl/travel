@@ -1,0 +1,314 @@
+{
+  "assertion_total": 19,
+  "cases": [
+    {
+      "assertion_count": 4,
+      "assertions": [
+        {
+          "actual": "[{\"exit_code\": 0, \"sample\": 1, \"seconds\": 0.0184}, {\"exit_code\": 0, \"sample\": 2, \"seconds\": 0.0177}, {\"exit_code\": 0, \"sample\": 3, \"seconds\": 0.0183}]",
+          "assertion": "samples_were_collected",
+          "detail": "no timing samples were recorded",
+          "expected": "non-empty",
+          "ok": true
+        },
+        {
+          "actual": 0,
+          "assertion": "every_dispatch_exited_zero",
+          "detail": "a dispatch that failed outright is not a latency question",
+          "expected": 0,
+          "ok": true
+        },
+        {
+          "actual": "0.018s",
+          "assertion": "median_dispatch_within_budget",
+          "detail": "must complete within 20.0s",
+          "expected": "<= 20.0s",
+          "ok": true
+        },
+        {
+          "actual": "0.018s",
+          "assertion": "slowest_dispatch_within_double_budget",
+          "detail": "one sample far outside the budget is a stall even if the median holds",
+          "expected": "<= 40.0s",
+          "ok": true
+        }
+      ],
+      "blocked_reason": "",
+      "case_id": "dispatch_health",
+      "duration_ms": 0.125,
+      "ended_at": "2026-09-23T16:03:07.013542+00:00",
+      "evidence": {
+        "budget_seconds": 20.0,
+        "max_seconds": 0.0184,
+        "median_seconds": 0.0183,
+        "min_seconds": 0.0177,
+        "sample_count": 3
+      },
+      "failed_assertions": [],
+      "schema_version": 1,
+      "started_at": "2026-09-23T16:03:07.013233+00:00",
+      "status": "pass",
+      "suite": "travel-regression",
+      "title": "A trivial playbook still dispatches and completes in normal time"
+    },
+    {
+      "assertion_count": 5,
+      "assertions": [
+        {
+          "actual": true,
+          "assertion": "hostname_resolves",
+          "detail": "team4.mestumre.dev must resolve",
+          "expected": true,
+          "ok": true
+        },
+        {
+          "actual": "200",
+          "assertion": "http_status",
+          "detail": "the frontend must answer the expected status",
+          "expected": "200",
+          "ok": true
+        },
+        {
+          "actual": "<!doctype html><html lang=\"en\"><head><meta charset=\"UTF-8\"/><link rel=\"icon\" type=\"image/svg+xml\"/><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/><meta name=\"theme-color\" content=...",
+          "assertion": "response_body",
+          "detail": "a 200 with no body is not a healthy page",
+          "expected": "non-empty",
+          "ok": true
+        },
+        {
+          "actual": true,
+          "assertion": "body_is_html",
+          "detail": "the response must actually be the SPA document",
+          "expected": true,
+          "ok": true
+        },
+        {
+          "actual": "0.114s",
+          "assertion": "latency_within_budget",
+          "detail": "must complete within 8.0s",
+          "expected": "<= 8.0s",
+          "ok": true
+        }
+      ],
+      "blocked_reason": "",
+      "case_id": "frontend_health",
+      "duration_ms": 0.188,
+      "ended_at": "2026-09-23T16:03:06.753333+00:00",
+      "evidence": {
+        "bytes_downloaded": 791,
+        "redirects": 0,
+        "status": "200",
+        "time_total_seconds": 0.113737,
+        "url": "https://team4.mestumre.dev/"
+      },
+      "failed_assertions": [],
+      "schema_version": 1,
+      "started_at": "2026-09-23T16:03:06.752985+00:00",
+      "status": "pass",
+      "suite": "travel-regression",
+      "title": "The travel frontend answers 200 and its host resolves"
+    },
+    {
+      "assertion_count": 6,
+      "assertions": [
+        {
+          "actual": true,
+          "assertion": "playbook_parses_as_yaml",
+          "detail": "top level is a mapping",
+          "expected": true,
+          "ok": true
+        },
+        {
+          "actual": "muno/playbooks/hotel-cards",
+          "assertion": "catalog_path_unchanged",
+          "detail": "a renamed catalog path silently orphans every caller",
+          "expected": "muno/playbooks/hotel-cards",
+          "ok": true
+        },
+        {
+          "actual": "[{\"desc\": \"Entry point \\u2014 the Rust runtime requires a step named `start`\", \"next\": {\"arcs\": [{\"step\": \"search_hotels\"}], \"spec\": {\"mode\": \"exclusive\"}}, \"step\": \"start\", \"tool\": {\"kind\": \"noop\"}},...",
+          "assertion": "workflow_has_steps",
+          "detail": "a playbook with no steps runs nothing",
+          "expected": "non-empty",
+          "ok": true
+        },
+        {
+          "actual": "[\"end\"]",
+          "assertion": "playbook_has_a_terminal_step",
+          "detail": "without one, an execution has no defined place to finish",
+          "expected": "non-empty",
+          "ok": true
+        },
+        {
+          "actual": "apiVersion: noetl.io/v2\nkind: Playbook\nmetadata:\n  name: hotel_cards\n  path: muno/playbooks/hotel-cards\n  description: |\n    HotelBeds hotel search returning the Muno hotel-card JSON shape.\n\n    Calls...",
+          "assertion": "declares_expected_widget_type",
+          "detail": "the widget type the frontend renders must still be referenced",
+          "expected": "contains 'hotel_cards'",
+          "ok": true
+        },
+        {
+          "actual": 5,
+          "assertion": "step_names_are_unique",
+          "detail": "duplicate step names make routing ambiguous",
+          "expected": 5,
+          "ok": true
+        }
+      ],
+      "blocked_reason": "",
+      "case_id": "hotel_cards_contract",
+      "duration_ms": 16.191,
+      "ended_at": "2026-09-23T16:03:06.818344+00:00",
+      "evidence": {
+        "catalog_path": "muno/playbooks/hotel-cards",
+        "playbook": "playbooks/hotel-cards.yaml",
+        "step_count": 5,
+        "terminal_steps": [
+          "end"
+        ]
+      },
+      "failed_assertions": [],
+      "schema_version": 1,
+      "started_at": "2026-09-23T16:03:06.801969+00:00",
+      "status": "pass",
+      "suite": "travel-regression",
+      "title": "hotel-cards parses, keeps its catalog path, and declares its widget"
+    },
+    {
+      "assertion_count": 0,
+      "assertions": [],
+      "blocked_reason": "workload.server_endpoint is empty. hotel-cards runs on kind: python, which the local runtime skips while still exiting 0, so it cannot be executed here. The contract tier still ran; this tier is blocked, which is not a pass.",
+      "case_id": "hotel_cards_execution",
+      "duration_ms": 0.011,
+      "ended_at": "2026-09-23T16:03:06.851782+00:00",
+      "evidence": {},
+      "failed_assertions": [],
+      "schema_version": 1,
+      "started_at": "2026-09-23T16:03:06.851635+00:00",
+      "status": "blocked",
+      "suite": "travel-regression",
+      "title": "hotel-cards executes and reaches a terminal event"
+    },
+    {
+      "assertion_count": 4,
+      "assertions": [
+        {
+          "actual": true,
+          "assertion": "detector_accepts_a_correct_merge",
+          "detail": "both sections present -> detector must accept",
+          "expected": true,
+          "ok": true
+        },
+        {
+          "actual": true,
+          "assertion": "detector_rejects_a_wipe",
+          "detail": "section A missing -> detector must reject",
+          "expected": true,
+          "ok": true
+        },
+        {
+          "actual": true,
+          "assertion": "detector_rejects_an_empty_document",
+          "detail": "empty document -> detector must reject",
+          "expected": true,
+          "ok": true
+        },
+        {
+          "actual": true,
+          "assertion": "detector_rejects_a_null_document",
+          "detail": "absent document -> detector must reject",
+          "expected": true,
+          "ok": true
+        }
+      ],
+      "blocked_reason": "",
+      "case_id": "profile_merge_detector",
+      "duration_ms": 0.021,
+      "ended_at": "2026-09-23T16:03:06.521057+00:00",
+      "evidence": {
+        "controls": "positive + three negative",
+        "note": "Run before any live assertion so a broken detector cannot report a pass."
+      },
+      "failed_assertions": [],
+      "schema_version": 1,
+      "started_at": "2026-09-23T16:03:06.520866+00:00",
+      "status": "pass",
+      "suite": "travel-regression",
+      "title": "The merge assertion catches a wipe before it is trusted live"
+    },
+    {
+      "assertion_count": 0,
+      "assertions": [],
+      "blocked_reason": "workload.gateway_url is empty, so the live merge was not exercised. The detector controls still ran; this half is blocked, which is not a pass.",
+      "case_id": "profile_merge_live",
+      "duration_ms": 0.015,
+      "ended_at": "2026-09-23T16:03:06.555780+00:00",
+      "evidence": {},
+      "failed_assertions": [],
+      "schema_version": 1,
+      "started_at": "2026-09-23T16:03:06.555578+00:00",
+      "status": "blocked",
+      "suite": "travel-regression",
+      "title": "Saving profile section B must not wipe section A"
+    }
+  ],
+  "counts": {
+    "blocked": 2,
+    "error": 0,
+    "fail": 0,
+    "pass": 4
+  },
+  "dispatch_seconds_total": 0.548,
+  "dispatches": [
+    {
+      "case": "profile-merge",
+      "error": "",
+      "exit_code": 0,
+      "produced": [
+        "profile_merge_detector.json",
+        "profile_merge_live.json"
+      ],
+      "seconds": 0.0913
+    },
+    {
+      "case": "frontend-health",
+      "error": "",
+      "exit_code": 0,
+      "produced": [
+        "frontend_health.json"
+      ],
+      "seconds": 0.1968
+    },
+    {
+      "case": "hotel-cards-smoke",
+      "error": "",
+      "exit_code": 0,
+      "produced": [
+        "hotel_cards_contract.json",
+        "hotel_cards_execution.json"
+      ],
+      "seconds": 0.0977
+    },
+    {
+      "case": "dispatch-health",
+      "error": "",
+      "exit_code": 0,
+      "produced": [
+        "dispatch_health.json"
+      ],
+      "seconds": 0.1622
+    }
+  ],
+  "duration_ms_total": 16.551,
+  "fail_on_blocked": false,
+  "generated_at": "2026-09-23T16:03:07.149340+00:00",
+  "requested_cases": [
+    "profile-merge",
+    "frontend-health",
+    "hotel-cards-smoke",
+    "dispatch-health"
+  ],
+  "schema_version": 1,
+  "suite": "travel-regression",
+  "suite_status": "pass",
+  "total_cases": 6
+}

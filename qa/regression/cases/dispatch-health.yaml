@@ -1,0 +1,168 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: travel_qa_dispatch_health
+  path: muno/qa/regression/dispatch-health
+  description: >-
+    Health check: a trivial playbook still dispatches and completes in normal time. Catches the
+    tier-stall class of failure, where nothing is broken but everything is slow.
+
+executor:
+  profile: local
+  version: noetl-runtime/1
+
+# The failure this catches does not look like a failure. Dispatch keeps working, executions keep
+# completing, and a turn that took 4 seconds last week takes 90 this week. Nothing throws. Every
+# functional check stays green. So the assertion here is a clock, not a value: a playbook that does
+# nothing at all must still come back quickly, and a budget breach is a failure even though the run
+# succeeded.
+workload:
+  repo: /Volumes/X10/projects/noetl/ai-meta/repos/travel
+  workspace: /tmp/travel-qa-regression
+  probe_playbook: qa/regression/cases/_dispatch-probe.yaml
+  # Generous for a no-op on a warm CLI; a breach means something is genuinely wrong.
+  budget_seconds: "20"
+  # Three runs: one slow sample is noise, three are a signal, and the median is what is judged.
+  sample_count: "3"
+  # The CLI to time. Empty means resolve it here; the suite runner passes its own pinned path so a
+  # nested dispatch cannot pick up a different `noetl` than the one the suite verified.
+  noetl_bin: ""
+
+workflow:
+  - step: time_trivial_dispatches
+    desc: Act -- dispatch a do-nothing playbook several times and record each wall clock
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+          PROBE="{{ workload.probe_playbook }}"
+
+          test -n "$WORKSPACE" || { echo "required value is empty: workspace" >&2; exit 1; }
+          case "$PROBE" in
+            /*) ;;
+            *) PROBE="$REPO/$PROBE" ;;
+          esac
+          test -f "$PROBE" || { echo "dispatch probe playbook not found: $PROBE" >&2; exit 1; }
+          # Pin the binary rather than letting the subprocess re-resolve it. On a host with more
+          # than one `noetl` on PATH -- a working CLI and a broken shim, say -- PATH order inside a
+          # child process need not match the shell's, and the harness would then time whichever one
+          # it happened to find. A QA suite must test the binary it meant to test.
+          NOETL_BIN="{{ workload.noetl_bin }}"
+          if [ -z "$NOETL_BIN" ]; then
+            NOETL_BIN="$(command -v noetl)" \
+              || { echo "the noetl CLI is not on PATH" >&2; exit 1; }
+          fi
+          "$NOETL_BIN" --version >/dev/null 2>&1 \
+            || { echo "the resolved noetl CLI does not run: $NOETL_BIN" >&2; exit 1; }
+          echo "pinned noetl: $NOETL_BIN"
+          mkdir -p "$WORKSPACE/results" "$WORKSPACE/evidence"
+
+          PROBE="$PROBE" SAMPLES="{{ workload.sample_count }}" NOETL_BIN="$NOETL_BIN" \
+          python3 - "$WORKSPACE" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          workspace = Path(sys.argv[1])
+          probe = os.environ["PROBE"]
+          samples = []
+          log = open(workspace / "evidence" / "dispatch-runs.log", "w", encoding="utf-8")
+          for index in range(1, int(os.environ["SAMPLES"]) + 1):
+              start = time.monotonic()
+              completed = subprocess.run(
+                  [os.environ["NOETL_BIN"], "exec", probe, "--runtime", "local"],
+                  capture_output=True, text=True, timeout=300,
+              )
+              elapsed = time.monotonic() - start
+              log.write(
+                  f"--- sample {index} rc={completed.returncode}\n"
+                  f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}\n"
+              )
+              samples.append({
+                  "sample": index,
+                  "seconds": round(elapsed, 4),
+                  "exit_code": completed.returncode,
+              })
+          log.close()
+          (workspace / "evidence" / "dispatch-samples.json").write_text(
+              json.dumps(samples, indent=2) + "\n", encoding="utf-8"
+          )
+          print(json.dumps({"samples": len(samples),
+                            "seconds": [s["seconds"] for s in samples]}))
+          PY
+    next:
+      arcs:
+        - step: assert_dispatch_within_budget
+
+  - step: assert_dispatch_within_budget
+    desc: Assert -- every dispatch succeeded and the median is inside the budget
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          BUDGET_SECONDS="{{ workload.budget_seconds }}" \
+          env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
+          import json
+          import os
+          import statistics
+          import sys
+          from pathlib import Path
+
+          repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
+          sys.path.insert(0, str(repo / "qa" / "regression" / "lib"))
+          import qa_report
+
+          qa_report.require_debug()
+          case = qa_report.Case(
+              "dispatch_health", "A trivial playbook still dispatches and completes in normal time"
+          )
+
+          samples = json.loads((workspace / "evidence" / "dispatch-samples.json").read_text())
+
+          # No samples means the probe never ran. That is an error, not a fast pass.
+          case.assert_non_empty("samples_were_collected", samples, "no timing samples were recorded")
+          if not samples:
+              sys.exit(case.finish(workspace / "results" / "dispatch_health.json"))
+
+          durations = [float(s["seconds"]) for s in samples]
+          failures = [s for s in samples if int(s.get("exit_code", 1)) != 0]
+          budget = float(os.environ["BUDGET_SECONDS"])
+          median = statistics.median(durations)
+
+          case.assert_equal(
+              "every_dispatch_exited_zero", len(failures), 0,
+              "a dispatch that failed outright is not a latency question",
+          )
+          case.assert_max_duration("median_dispatch_within_budget", median, budget)
+          case.assert_max_duration(
+              "slowest_dispatch_within_double_budget", max(durations), budget * 2,
+              "one sample far outside the budget is a stall even if the median holds",
+          )
+
+          case.add_evidence(
+              sample_count=len(samples),
+              median_seconds=round(median, 4),
+              min_seconds=round(min(durations), 4),
+              max_seconds=round(max(durations), 4),
+              budget_seconds=budget,
+          )
+          sys.exit(case.finish(workspace / "results" / "dispatch_health.json"))
+          PY
+    next:
+      arcs:
+        - step: end
+
+  - step: end
+    desc: Dispatch health check complete
+    tool:
+      kind: noop
