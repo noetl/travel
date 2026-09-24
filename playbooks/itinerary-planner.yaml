@@ -62,6 +62,20 @@ workload:
   llm_extraction_model: gemini-3.8-flash
   vertex_project: shastaratech-noetl-prod
   vertex_region: global
+
+  # Selectable model backend (mirrors ops `NOETL_SLM_BACKEND`).
+  #   gemini -> Vertex `:generateContent` (default; unchanged behaviour)
+  #   vllm   -> any OpenAI-shaped /chat/completions server: a self-hosted
+  #             vLLM in-cluster, or a Vertex Model Garden Gemma endpoint
+  #             (Model Garden serves Gemma through vLLM, so it is OpenAI-
+  #             shaped, NOT :generateContent).
+  # The strict-JSON contract is identical on both paths; only the transport
+  # and the response envelope differ.  Unset = gemini = today's behaviour,
+  # so this is reversible by clearing one field.
+  slm_backend: gemini
+  slm_endpoint: ""
+  slm_model: ""
+  slm_api_key: ""
   # Kill switch for the LLM extraction added in v68 (noetl/ai-meta#268).
   # Set false in an execute payload to force the heuristic without a
   # re-register; the heuristic remains the fallback on any LLM failure.
@@ -346,6 +360,10 @@ workflow:
         default_origin: "{{ workload.default_origin | default('SFO') }}"
         vertex_project: "{{ workload.vertex_project | default('shastaratech-noetl-prod') }}"
         vertex_region: "{{ workload.vertex_region | default('global') }}"
+        slm_backend: "{{ workload.slm_backend | default('gemini') }}"
+        slm_endpoint: "{{ workload.slm_endpoint | default('') }}"
+        slm_model: "{{ workload.slm_model | default('') }}"
+        slm_api_key: "{{ workload.slm_api_key | default('') }}"
       code: |
         import copy
         import json
@@ -1202,8 +1220,8 @@ workflow:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read().decode("utf-8"))["access_token"]
 
-        def _llm_extract(model, user_text, current_slots, ev_type,
-                         project, region):
+        def _llm_extract_gemini(model, user_text, current_slots, ev_type,
+                                project, region):
             """Vertex AI Gemini generateContent, stdlib urllib only.
 
             Swapped from OpenAI chat/completions 2026-08-17: the OpenAI account
@@ -1257,6 +1275,78 @@ workflow:
             parts = ((cands[0].get("content") or {}).get("parts") or [])
             text_out = "".join(p.get("text", "") for p in parts)
             return json.loads(text_out)
+
+        def _llm_extract_openai(model, user_text, current_slots, ev_type,
+                                endpoint, api_key):
+            """OpenAI-shaped /chat/completions.  Same strict-JSON contract.
+
+            Covers a self-hosted vLLM in-cluster AND a Vertex Model Garden
+            Gemma endpoint -- Model Garden serves Gemma through vLLM, so it
+            speaks the OpenAI API, not `:generateContent`.  That difference is
+            the whole reason this function exists: pointing the Gemini path at
+            a Gemma endpoint 404s, it does not degrade.
+
+            `response_format: {"type": "json_object"}` is the OpenAI
+            equivalent of Gemini's `responseMimeType`, so `_llm_validate`
+            downstream is untouched.
+            """
+            body = json.dumps({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": LLM_SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps({
+                        "event_type": ev_type,
+                        "user_message": user_text,
+                        "slot_state": current_slots,
+                        "today": date.today().isoformat(),
+                    }, default=str)},
+                ],
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+            }).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            if str(api_key or "").strip():
+                headers["Authorization"] = "Bearer %s" % str(api_key).strip()
+            elif (".googleapis.com" in endpoint) or (".vertexai.goog" in endpoint):
+                # A Vertex dedicated endpoint still wants the pod's Workload
+                # Identity token; a plain in-cluster vLLM wants nothing.
+                headers["Authorization"] = "Bearer %s" % _vertex_token()
+            req = urllib.request.Request(
+                endpoint, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            choices = payload.get("choices") or []
+            if not choices:
+                raise ValueError("openai backend returned no choices: %s"
+                                 % json.dumps(payload)[:200])
+            text_out = ((choices[0].get("message") or {}).get("content") or "")
+            if not str(text_out).strip():
+                # An empty completion is a failure, not an empty answer --
+                # raise so the caller falls back rather than emitting a blank
+                # turn.  Matches the no-candidates guard on the Gemini path.
+                raise ValueError("openai backend returned empty content")
+            return json.loads(text_out)
+
+        def _llm_extract(model, user_text, current_slots, ev_type,
+                         project, region):
+            """Dispatch on `slm_backend`.  Default (unset/gemini) is the
+            existing Vertex `:generateContent` path, byte-for-byte."""
+            backend = str(slm_backend or "gemini").strip().lower()
+            if backend in ("vllm", "openai"):
+                ep = str(slm_endpoint or "").strip()
+                if not ep:
+                    raise ValueError(
+                        "slm_backend=%s requires slm_endpoint" % backend)
+                return _llm_extract_openai(
+                    str(slm_model or "").strip() or model,
+                    user_text, current_slots, ev_type, ep,
+                    str(slm_api_key or ""))
+            if backend != "gemini":
+                # Loud, not a silent fallback: a typo that quietly served the
+                # old model would be indistinguishable from the flag working.
+                raise ValueError("unknown slm_backend: %r" % backend)
+            return _llm_extract_gemini(
+                model, user_text, current_slots, ev_type, project, region)
 
         llm_used = False
         llm_error = ""
