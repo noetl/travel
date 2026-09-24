@@ -47,15 +47,21 @@ workload:
   # Vertex lives in noetl-demo-19700101, the same project already serving
   # Firestore and Places for this planner, and authenticates with the pod's
   # Workload Identity rather than an API key.
-  # gemini-2.5-flash, NOT 2.0/1.5: probed against this project 2026-08-17 and
+  # gemini-3.8-flash on the GLOBAL endpoint in shastaratech-noetl-prod.
+  # gemini-2.5-flash retires 2026-10-16; the whole 3.x line 404s in
+  # us-central1 for this project and resolves only on `global` (probed
+  # 2026-09-23).  There is no gemini-4.*; 3.8-flash is the newest GA flash.
+  # Previous pin, for rollback: gemini-2.5-flash / noetl-demo-19700101 /
+  # us-central1.
+  # (historical) gemini-2.5-flash, NOT 2.0/1.5: probed 2026-08-17 and
   # the entire 2.0 and 1.5 generation returns 404 "Publisher model ... not
   # found or your project does not have access", in both us-central1 and
   # global.  Only 2.5-flash and 2.5-pro resolve.  Flash is the cheaper tier and
   # is ample for slot extraction; switch to gemini-2.5-pro here if quality
   # needs it -- this is a workload key, so no code change.
-  llm_extraction_model: gemini-2.5-flash
-  vertex_project: noetl-demo-19700101
-  vertex_region: us-central1
+  llm_extraction_model: gemini-3.8-flash
+  vertex_project: shastaratech-noetl-prod
+  vertex_region: global
   # Kill switch for the LLM extraction added in v68 (noetl/ai-meta#268).
   # Set false in an execute payload to force the heuristic without a
   # re-register; the heuristic remains the fallback on any LLM failure.
@@ -338,8 +344,8 @@ workflow:
         duffel_env: "{{ workload.duffel_env | default('test') }}"
         llm_extraction_enabled: "{{ workload.llm_extraction_enabled | default(true) }}"
         default_origin: "{{ workload.default_origin | default('SFO') }}"
-        vertex_project: "{{ workload.vertex_project | default('noetl-demo-19700101') }}"
-        vertex_region: "{{ workload.vertex_region | default('us-central1') }}"
+        vertex_project: "{{ workload.vertex_project | default('shastaratech-noetl-prod') }}"
+        vertex_region: "{{ workload.vertex_region | default('global') }}"
       code: |
         import copy
         import json
@@ -1273,8 +1279,8 @@ workflow:
                     text,
                     slot_state,
                     event_type,
-                    vertex_project or "noetl-demo-19700101",
-                    vertex_region or "us-central1",
+                    vertex_project or "shastaratech-noetl-prod",
+                    vertex_region or "global",
                 )
                 _u, _t, _i = _llm_validate(_parsed)
                 # MERGE, never replace.  The heuristic has already parsed the
