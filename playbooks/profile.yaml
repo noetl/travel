@@ -71,12 +71,33 @@ metadata:
     If a profile save later lands on a latency-sensitive path, inline it then
     and add it to the drift audit — but pay that cost when it buys something.
 
-    ⚠ NOT TESTED AGAINST A LIVE FIRESTORE. Written against the provider
-    contracts (`set_doc(path, data, merge)`, `get_doc(path)`,
-    `nearby_search(lat, lng, type, radius, maxResultCount)`) read from
-    `automation/agents/mcp/{firestore,google-places}.yaml` in noetl/ops. It
-    needs one live run against `users/{uid}` before it is called proven.
+    ✓ PROVEN AGAINST LIVE FIRESTORE (2026-09-22). Two runs against
+    `users/test-profile-probe-20260922` in project shastaratech-noetl-prod:
 
+      A: {display_name, home_city, home_lat, home_lng}  createTime 10:25:49Z
+      B: {interests, dietary}                           updateTime 10:48:03Z
+
+    The read-back after B returned all SIX fields, so B merged into A rather
+    than replacing it — the merge guarantee this playbook is built around is
+    now measured, not assumed. Distinct createTime/updateTime confirm two
+    separate writes to one document.
+
+    KNOWN LIMITATION, deliberate. The suggestion guard reads the INPUT
+    profile, not the merged stored one. Saving a section that carries no
+    coordinates therefore skips suggestions even when the stored profile
+    already has a home city from an earlier save (run B above reported
+    `suggestions_error: "profile has no home_lat/home_lng"` while the store
+    held Lisbon's). The save is unaffected. Reading coordinates back from
+    `load_profile` instead would fix it and is the obvious next change if
+    suggestions on partial saves turn out to matter.
+
+  # ⚠ REQUIRED. Without `version` the runtime records playbook_started and the
+  # catalog snapshot and then issues NO command — the execution sits at 2
+  # events with no error anywhere and never terminates. Every sibling that
+  # works carries one (flights-details 1.0, hotel-cards 1.1,
+  # itinerary-planner 1.7); this playbook did not, and all 8 of its runs
+  # stalled identically before it was added.
+  version: "1.0"
   tags: [muno, profile, firestore, places, adiona]
   terminal:
     visible: true
@@ -108,39 +129,77 @@ workflow:
     desc: Refuse an unaddressable save rather than writing to `users/`
     tool:
       kind: python
+      # ⚠ A python step sees ONLY the names bound here. `workload` is NOT in
+      # scope inside `code:` — a bare `workload.get("uid")` raises
+      # `NameError: name 'workload' is not defined` and fails the step, which
+      # is exactly how this playbook's first real run died. Templates
+      # (input / payload / when) are where `workload` and prior step results
+      # live; `code:` sees only these bindings.
+      input:
+        uid: "{{ workload.uid | default('') }}"
+        profile: "{{ workload.profile | default({}) }}"
       code: |
         # A blank uid would make the document path `users/` — which is a
         # COLLECTION, not a document. Firestore would reject it, but only
         # after the request left; refusing here keeps the error local and
         # legible instead of surfacing as a 400 from the provider.
-        uid = (workload.get("uid") or "").strip()
-        profile = workload.get("profile") or {}
-        if not uid:
+        _uid = (uid or "").strip() if isinstance(uid, str) else ""
+        _profile = profile
+        if not _uid:
             result = {"ok": False, "error": "uid is required to address users/{uid}"}
-        elif not isinstance(profile, dict):
-            result = {"ok": False, "error": f"profile must be an object, got {type(profile).__name__}"}
+        elif not isinstance(_profile, dict):
+            result = {"ok": False, "error": f"profile must be an object, got {type(_profile).__name__}"}
         else:
             # Coordinates decide whether suggestions are even possible. Absent
             # ones are normal (a profile may have no home city yet), so this is
-            # a branch condition and not an error.
-            lat = profile.get("home_lat")
-            lng = profile.get("home_lng")
-            has_coords = isinstance(lat, (int, float)) and isinstance(lng, (int, float))
+            # a branch condition and not an error. `bool` is excluded on
+            # purpose: it is an int subclass, so True would read as a latitude.
+            lat = _profile.get("home_lat")
+            lng = _profile.get("home_lng")
+            has_coords = (
+                isinstance(lat, (int, float)) and not isinstance(lat, bool)
+                and isinstance(lng, (int, float)) and not isinstance(lng, bool)
+            )
             result = {
                 "ok": True,
-                "uid": uid,
-                "doc_path": f"users/{uid}",
-                "profile": profile,
+                "uid": _uid,
+                "doc_path": f"users/{_uid}",
+                "profile": _profile,
                 "has_coords": has_coords,
                 "lat": lat if has_coords else None,
                 "lng": lng if has_coords else None,
-                "interests": [i for i in (profile.get("interests") or []) if isinstance(i, str)],
+                "interests": [i for i in (_profile.get("interests") or []) if isinstance(i, str)],
             }
     next:
       spec: { mode: exclusive }
       arcs:
         - when: "{{ validate_input.ok }}"
           step: save_profile
+        - step: reject_input
+
+  - step: reject_input
+    desc: |
+      The rejected-input branch, for the same reason `skip_suggestions`
+      exists: `end` must not be an alternative inside an exclusive arc set.
+      Naming it there marks `end` SKIPPED on every VALID save, which strands
+      the run at the last hop with no terminal state.
+
+      It also gives a refused save a real payload instead of an empty
+      terminal, so the caller learns WHY it was refused.
+    tool:
+      kind: python
+      input:
+        validated: "{{ validate_input | default({}) }}"
+      code: |
+        _v = validated if isinstance(validated, dict) else {}
+        result = {
+            "ok": False,
+            "saved": False,
+            "error": _v.get("error") or "profile input rejected",
+        }
+    next:
+      spec: { mode: exclusive }
+      arcs:
         - step: end
 
   - step: save_profile
@@ -184,6 +243,28 @@ workflow:
       arcs:
         - when: "{{ validate_input.has_coords }}"
           step: suggest_pois
+        - step: skip_suggestions
+
+  - step: skip_suggestions
+    desc: |
+      The no-coordinates branch. Exists purely so `build_response` is NOT an
+      alternative inside load_profile's exclusive arc set.
+
+      ⚠ A step named in an exclusive arc set is marked SKIPPED when a sibling
+      arc wins, and a SKIPPED step never runs afterwards — even when a later
+      step routes to it. `build_response` used to sit in that set as the
+      no-coords alternative, so a profile WITH coordinates skipped it at the
+      branch and then stranded the run: save/load/suggest all succeeded and
+      the execution sat at 33 events with no terminal state, because its join
+      step had already been skipped. Routing the quiet branch here keeps the
+      join reachable from both sides.
+    tool:
+      kind: python
+      code: |
+        result = {"suggestions_skipped": True}
+    next:
+      spec: { mode: exclusive }
+      arcs:
         - step: build_response
 
   - step: suggest_pois
@@ -225,6 +306,14 @@ workflow:
     desc: Assemble { profile, suggestions } for the SPA
     tool:
       kind: python
+      # Same binding rule as validate_input: prior step results reach `code:`
+      # only through `input:`. `suggest_pois` is skipped when the profile has
+      # no coordinates, so it must carry a default or the template fails on
+      # the very branch the guard exists to allow.
+      input:
+        validated: "{{ validate_input | default({}) }}"
+        loaded: "{{ load_profile | default({}) }}"
+        places_raw: "{{ suggest_pois | default({}) }}"
       code: |
         def _unwrap(step_out):
             # The MCP envelope nests the payload under `data`; a failed call
@@ -234,46 +323,47 @@ workflow:
                 return {}
             return step_out.get("data") or step_out.get("structuredContent") or {}
 
-        loaded = _unwrap(load_profile)
-        document = (loaded.get("document") or {}) if isinstance(loaded, dict) else {}
+        _validated = validated if isinstance(validated, dict) else {}
+        loaded_doc = _unwrap(loaded)
+        document = (loaded_doc.get("document") or {}) if isinstance(loaded_doc, dict) else {}
         # `get_doc` reports found=False for a path that does not exist. After a
         # successful set_doc that should be impossible, so it is surfaced
         # rather than smoothed over.
-        found = bool(loaded.get("found")) if isinstance(loaded, dict) else False
+        found = bool(loaded_doc.get("found")) if isinstance(loaded_doc, dict) else False
 
         stored = document.get("fields") or document.get("data") or document or {}
 
         suggestions = []
         suggestions_error = None
-        if not validate_input.get("has_coords"):
+        if not _validated.get("has_coords"):
             suggestions_error = "profile has no home_lat/home_lng; suggestions skipped"
         else:
-            places = _unwrap(suggest_pois)
+            places = _unwrap(places_raw)
             items = places.get("items") or places.get("places") or []
             if not isinstance(items, list):
                 items = []
-            wanted = set(validate_input.get("interests") or [])
-            for p in items:
-                if not isinstance(p, dict):
+            wanted = set(_validated.get("interests") or [])
+            for pl in items:
+                if not isinstance(pl, dict):
                     continue
-                types = set(p.get("types") or [])
+                types = set(pl.get("types") or [])
                 # An interest list narrows; an empty one keeps everything.
                 if wanted and not (types & wanted):
                     continue
                 suggestions.append({
-                    "name": p.get("name") or p.get("displayName"),
-                    "place_id": p.get("id") or p.get("place_id"),
+                    "name": pl.get("name") or pl.get("displayName"),
+                    "place_id": pl.get("id") or pl.get("place_id"),
                     "types": sorted(types),
-                    "rating": p.get("rating"),
-                    "address": p.get("formattedAddress") or p.get("address"),
-                    "google": p.get("_google"),
+                    "rating": pl.get("rating"),
+                    "address": pl.get("formattedAddress") or pl.get("address"),
+                    "google": pl.get("_google"),
                 })
             if not items:
                 suggestions_error = "places returned no items"
 
         result = {
             "ok": True,
-            "uid": validate_input.get("uid"),
+            "uid": _validated.get("uid"),
             "saved": True,
             "found_after_write": found,
             "profile": stored,
