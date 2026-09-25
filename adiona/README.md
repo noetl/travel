@@ -88,6 +88,10 @@ VALUES ('catalog_provider', 123, 'provider');
 
 PostgreSQL tool fix: [noetl/tools#104](https://github.com/noetl/tools/pull/104). The fix is merged; the direct validation adapter pins that merge revision. JSON projection also keeps the pinned worker compatible. The server parser patch remains a separate runtime requirement.
 
+## Optional authenticated front desk
+
+The [front-desk guide](docs/front-desk.md) covers provider-scoped catalog exports, the restricted Rust gateway, and the opt-in React interface. It requires the companion gateway change and reviewed staff mappings; enabling the UI alone does not grant access.
+
 ## Remaining scope
 
-Specialized trip/tour/car availability and pricing response parity, trip/itinerary/order/invoice schema migration, seasonal pricing/taxes/fees, payments/refunds/outbox, public gateway integration, verified account linking, GCS object operations, historical data cleanup/import and production TLS validation are not implemented. The migration map names the source rules and unresolved gaps. No production database, bucket, payment provider or deployment was modified.
+Specialized trip/tour/car availability and pricing response parity, trip/itinerary/order/invoice schema migration, seasonal pricing/taxes/fees, payments/refunds/outbox, production gateway/identity deployment, verified account linking, GCS object operations, historical data cleanup/import and production TLS validation are not implemented. The migration map names the source rules and unresolved gaps. No production database, bucket, payment provider or deployment was modified.

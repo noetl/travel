@@ -45,6 +45,7 @@
     "region_list.yaml",
     "reservation_get.yaml",
     "reservation_hold.yaml",
+    "reservation_list.yaml",
     "reservation_release_expired.yaml",
     "reservation_transition.yaml",
     "reset.yaml",
