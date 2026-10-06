@@ -110,6 +110,16 @@ workload:
   # body, passed through untouched.
   uid: ""
   profile: {}
+  # Read-only mode: load `users/{uid}` and return it WITHOUT writing.
+  #
+  # ⚠ The SPA already sends `read_only: true` at login, with `profile: {}`. Before this
+  # existed the run went validate_input -> save_profile UNCONDITIONALLY, so every login
+  # performed a Firestore `set_doc`. That is not data loss — merging `{}` changes no
+  # field — but it is a write on a read path, on the login critical path, behind a
+  # `timeout: 60`. And because `set` with merge CREATES the document, after one login
+  # "this user never saved a profile" became indistinguishable from "saved an empty one".
+  # adiona/frontend#59.
+  read_only: false
   # Suggestion tuning. `poi_type` maps onto the Places `includedType` filter;
   # leaving it empty asks Places for everything nearby.
   poi_radius_m: 5000
@@ -138,6 +148,7 @@ workflow:
       input:
         uid: "{{ workload.uid | default('') }}"
         profile: "{{ workload.profile | default({}) }}"
+        read_only: "{{ workload.read_only | default(false) }}"
       code: |
         # A blank uid would make the document path `users/` — which is a
         # COLLECTION, not a document. Firestore would reject it, but only
@@ -145,6 +156,20 @@ workflow:
         # legible instead of surfacing as a 400 from the provider.
         _uid = (uid or "").strip() if isinstance(uid, str) else ""
         _profile = profile
+
+        # ⚠ Normalised, not trusted as a bool. The value crosses a template boundary, so
+        # it can arrive as the STRING "false" — and `bool("false")` is True, which would
+        # route a real SAVE down the read path and look like it worked. Only an explicit
+        # truthy spelling counts. Anything unrecognised means WRITE, because defaulting an
+        # unknown value to read-only would silently stop saving profiles altogether.
+        if isinstance(read_only, bool):
+            _read_only = read_only
+        elif isinstance(read_only, str):
+            _read_only = read_only.strip().lower() in ("1", "true", "yes", "on")
+        elif isinstance(read_only, int):
+            _read_only = bool(read_only)
+        else:
+            _read_only = False
         if not _uid:
             result = {"ok": False, "error": "uid is required to address users/{uid}"}
         elif not isinstance(_profile, dict):
@@ -163,6 +188,7 @@ workflow:
             result = {
                 "ok": True,
                 "uid": _uid,
+                "read_only": _read_only,
                 "doc_path": f"users/{_uid}",
                 "profile": _profile,
                 "has_coords": has_coords,
@@ -173,6 +199,12 @@ workflow:
     next:
       spec: { mode: exclusive }
       arcs:
+        # ⚠ ORDER IS LOAD-BEARING. `mode: exclusive` takes the FIRST matching arc, so the
+        # read-only arc must precede the save arc. Reversed, `validate_input.ok` matches
+        # first and every read still writes — the exact defect this fixes, reintroduced by
+        # an edit that looks harmless.
+        - when: "{{ validate_input.ok and validate_input.read_only }}"
+          step: load_profile
         - when: "{{ validate_input.ok }}"
           step: save_profile
         - step: reject_input
@@ -361,11 +393,21 @@ workflow:
             if not items:
                 suggestions_error = "places returned no items"
 
+        # ⚠ `saved` and `found_after_write` describe a WRITE. On the read-only path no
+        # write happened, so reporting them as though one did would make the response lie
+        # about what the backend did, and a caller could not tell a successful save from a
+        # read that never attempted one. `found_after_write` is KEPT rather than dropped
+        # because existing consumers read it; it is simply False when nothing was written.
+        # `found` is added so a read still reports whether the document exists.
+        _read_only = bool(_validated.get("read_only"))
+
         result = {
             "ok": True,
             "uid": _validated.get("uid"),
-            "saved": True,
-            "found_after_write": found,
+            "saved": (not _read_only),
+            "read_only": _read_only,
+            "found_after_write": (False if _read_only else found),
+            "found": found,
             "profile": stored,
             "suggestions": suggestions,
             "suggestions_error": suggestions_error,

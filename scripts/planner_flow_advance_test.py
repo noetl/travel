@@ -31,6 +31,21 @@ def run(event_type, payload, loaded_slot_state):
         "anthropic_api_key": "",
         "flight_provider": "duffel",
         "duffel_env": "test",
+            # ⚠ Added 2026-10-06. These eight bindings were added to the playbook's
+            # `extract_turn` step after this harness was written, and because nothing ran
+            # the harness, it rotted silently: both planner tests died on
+            # `NameError: name 'llm_extraction_enabled' is not defined` while reporting
+            # nothing. `extract_turn_bindings_test.py` now fails loudly when the playbook
+            # binds a name no harness supplies. Defaults mirror the playbook's own
+            # `| default(...)` expressions. adiona/frontend#59.
+            "llm_extraction_enabled": True,
+            "default_origin": "SFO",
+            "vertex_project": "shastaratech-noetl-prod",
+            "vertex_region": "global",
+            "slm_backend": "gemini",
+            "slm_endpoint": "",
+            "slm_model": "",
+            "slm_api_key": "",
     }
     exec(compile(code, PLAYBOOK + ":extract_turn", "exec"), g)
     return g["result"]
