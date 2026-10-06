@@ -1,0 +1,279 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: travel_qa_profile_merge
+  path: muno/qa/regression/profile-merge
+  description: >-
+    Regression: saving one profile section must not wipe another. Writes section A, writes section
+    B, then asserts a read-back returns BOTH. This is the case that was previously only checked by
+    hand against Firestore.
+
+# Local runtime only. Verified from the runtime itself: local mode supports
+# shell, http, playbook, duckdb, auth, sink -- and SKIPS anything else while still exiting 0.
+# A QA suite is the last place that should run on a tool kind the runtime silently drops.
+executor:
+  profile: local
+  version: noetl-runtime/1
+
+workload:
+  repo: /Volumes/X10/projects/noetl/ai-meta/repos/travel
+  workspace: /tmp/travel-qa-regression
+
+  # A synthetic id, never a real person. The document it writes is disposable by construction.
+  test_user_id: qa-regression-user-0001
+
+  # Live mode needs a gateway that will accept a profile write for the test user. With it absent
+  # the case reports `blocked`, never `pass`: a check that could not run has not passed.
+  gateway_url: ""
+  profile_path_template: "users/{user_id}/profile"
+
+  # The two sections the regression is about. B must not erase A.
+  section_a_key: home_airport
+  section_a_value: LIS
+  section_b_key: seat_preference
+  section_b_value: aisle
+
+workflow:
+  - step: prepare_workspace
+    desc: Arrange -- a clean result directory for this case
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+          TEST_USER="{{ workload.test_user_id }}"
+
+          test -n "$REPO" || { echo "required value is empty: repo" >&2; exit 1; }
+          test -n "$WORKSPACE" || { echo "required value is empty: workspace" >&2; exit 1; }
+          test -n "$TEST_USER" || { echo "required value is empty: test_user_id" >&2; exit 1; }
+          case "$WORKSPACE" in
+            /*) ;;
+            *) echo "workspace must be an absolute path: $WORKSPACE" >&2; exit 1 ;;
+          esac
+
+          # A real user id must never reach this case. The guard is cheap and the mistake is not.
+          case "$TEST_USER" in
+            qa-*|test-*) ;;
+            *) echo "test_user_id must start with qa- or test-: $TEST_USER" >&2; exit 1 ;;
+          esac
+
+          mkdir -p "$WORKSPACE/results"
+          echo "workspace ready: $WORKSPACE"
+    next:
+      arcs:
+        - step: verify_merge_detector
+
+  - step: verify_merge_detector
+    desc: >-
+      Positive control -- prove the merge assertion can actually catch a wipe before trusting it
+      against the live system.
+    # This is the step that keeps the case honest. An assertion that has never been seen to fail is
+    # an assertion nobody has tested, and "read back both sections" passes trivially if the
+    # comparison is wrong. So: a correct merge must pass the detector, and a wipe must FAIL it.
+    # If the wipe does not fail, the detector is broken and the whole case is reported as error.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
+          sys.path.insert(0, str(repo / "qa" / "regression" / "lib"))
+          import qa_report
+
+          qa_report.require_debug()
+
+          def merged_ok(document, a_key, a_value, b_key, b_value):
+              """The detector under test: both sections present with their own values."""
+              data = (document or {}).get("data") or {}
+              return data.get(a_key) == a_value and data.get(b_key) == b_value
+
+          A, AV, B, BV = "home_airport", "LIS", "seat_preference", "aisle"
+
+          case = qa_report.Case(
+              "profile_merge_detector",
+              "The merge assertion catches a wipe before it is trusted live",
+          )
+
+          # Positive control: a correctly merged document must satisfy the detector.
+          good = {"data": {A: AV, B: BV}}
+          case.assert_true(
+              "detector_accepts_a_correct_merge",
+              merged_ok(good, A, AV, B, BV),
+              "both sections present -> detector must accept",
+          )
+
+          # Negative control: section B having wiped section A must be REJECTED.
+          wiped = {"data": {B: BV}}
+          case.assert_true(
+              "detector_rejects_a_wipe",
+              not merged_ok(wiped, A, AV, B, BV),
+              "section A missing -> detector must reject",
+          )
+
+          # Negative control: an empty read-back must be rejected, not read as success.
+          case.assert_true(
+              "detector_rejects_an_empty_document",
+              not merged_ok({}, A, AV, B, BV),
+              "empty document -> detector must reject",
+          )
+          case.assert_true(
+              "detector_rejects_a_null_document",
+              not merged_ok(None, A, AV, B, BV),
+              "absent document -> detector must reject",
+          )
+
+          case.add_evidence(
+              controls="positive + three negative",
+              note="Run before any live assertion so a broken detector cannot report a pass.",
+          )
+          sys.exit(case.finish(workspace / "results" / "profile_merge_detector.json"))
+          PY
+    next:
+      arcs:
+        - step: run_live_profile_merge
+          when: '{{ workload.gateway_url != "" }}'
+        - step: report_live_blocked
+          when: '{{ workload.gateway_url == "" }}'
+
+  - step: run_live_profile_merge
+    desc: Act and assert -- write section A, write section B, read back, require both
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          GATEWAY_URL="{{ workload.gateway_url }}" \
+          TEST_USER_ID="{{ workload.test_user_id }}" \
+          PROFILE_PATH_TEMPLATE="{{ workload.profile_path_template }}" \
+          SECTION_A_KEY="{{ workload.section_a_key }}" \
+          SECTION_A_VALUE="{{ workload.section_a_value }}" \
+          SECTION_B_KEY="{{ workload.section_b_key }}" \
+          SECTION_B_VALUE="{{ workload.section_b_value }}" \
+          env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
+          sys.path.insert(0, str(repo / "qa" / "regression" / "lib"))
+          import qa_report
+
+          qa_report.require_debug()
+
+          case = qa_report.Case(
+              "profile_merge_live",
+              "Saving profile section B must not wipe section A",
+          )
+
+          gateway = os.environ.get("GATEWAY_URL", "").rstrip("/")
+          user_id = os.environ["TEST_USER_ID"]
+          path = os.environ["PROFILE_PATH_TEMPLATE"].replace("{user_id}", user_id)
+          a_key, a_value = os.environ["SECTION_A_KEY"], os.environ["SECTION_A_VALUE"]
+          b_key, b_value = os.environ["SECTION_B_KEY"], os.environ["SECTION_B_VALUE"]
+          token = os.environ.get("QA_GATEWAY_TOKEN", "").strip()
+
+          def call(action, payload):
+              body = json.dumps({"action": action, "path": path, "payload": payload}).encode()
+              headers = {"Content-Type": "application/json"}
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+              request = urllib.request.Request(
+                  f"{gateway}/api/profile", data=body, headers=headers, method="POST"
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.loads(response.read().decode("utf-8") or "{}")
+
+          try:
+              # Arrange + act: two independent section writes, in order.
+              call("save_section", {a_key: a_value})
+              call("save_section", {b_key: b_value})
+              read_back = call("read_profile", {})
+          except urllib.error.HTTPError as exc:
+              detail = exc.read().decode("utf-8", "replace")[:300]
+              case.block(f"gateway rejected the QA write: HTTP {exc.code}: {detail}")
+              sys.exit(case.finish(workspace / "results" / "profile_merge_live.json"))
+          except Exception as exc:  # noqa: BLE001 - any transport failure blocks, never passes
+              case.block(f"gateway unreachable: {type(exc).__name__}: {exc}")
+              sys.exit(case.finish(workspace / "results" / "profile_merge_live.json"))
+
+          data = (read_back or {}).get("data") or {}
+
+          # An empty read-back is the false green this case exists to prevent: writes "succeeded",
+          # nothing came back, and a naive assertion sees no exception and reports green.
+          case.assert_non_empty(
+              "read_back_returned_a_document", data,
+              "a read-back that returned nothing cannot evidence a merge",
+          )
+          case.assert_equal(
+              "section_b_was_saved", data.get(b_key), b_value,
+              "the write under test must itself have landed",
+          )
+          case.assert_equal(
+              "section_a_survived_the_section_b_write", data.get(a_key), a_value,
+              "THE REGRESSION: writing section B must merge, not replace the document",
+          )
+
+          case.add_evidence(
+              profile_path=path, gateway=gateway,
+              read_back_keys=sorted(data.keys()),
+              authenticated=bool(token),
+          )
+          sys.exit(case.finish(workspace / "results" / "profile_merge_live.json"))
+          PY
+    next:
+      arcs:
+        - step: end
+
+  - step: report_live_blocked
+    desc: Record the live half as blocked -- absent preconditions never read as a pass
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
+          sys.path.insert(0, str(repo / "qa" / "regression" / "lib"))
+          import qa_report
+
+          case = qa_report.Case(
+              "profile_merge_live",
+              "Saving profile section B must not wipe section A",
+          )
+          case.block(
+              "workload.gateway_url is empty, so the live merge was not exercised. The detector "
+              "controls still ran; this half is blocked, which is not a pass."
+          )
+          case.write(workspace / "results" / "profile_merge_live.json")
+          print('{"case_id": "profile_merge_live", "status": "blocked"}')
+          PY
+    next:
+      arcs:
+        - step: end
+
+  - step: end
+    desc: Profile merge regression complete
+    tool:
+      kind: noop

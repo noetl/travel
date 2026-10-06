@@ -1,0 +1,135 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: travel_qa_frontend_health
+  path: muno/qa/regression/frontend-health
+  description: >-
+    Health check: the travel frontend answers 200 and its hostname resolves. Catches the
+    "deployed but the edge is not serving it" class of failure.
+
+executor:
+  profile: local
+  version: noetl-runtime/1
+
+workload:
+  repo: /Volumes/X10/projects/noetl/ai-meta/repos/travel
+  workspace: /tmp/travel-qa-regression
+  frontend_url: "https://team4.mestumre.dev/"
+  frontend_host: "team4.mestumre.dev"
+  expected_status: "200"
+  # A page that answers 200 in 8 seconds is a page an edge is not really serving.
+  latency_budget_seconds: "8"
+
+workflow:
+  - step: probe_frontend
+    desc: Act -- resolve the host and fetch the page, recording status, latency and size
+    # The act step writes evidence to a file rather than returning it. Verified in the local
+    # runtime: step results are NOT addressable from a later step's templates -- `{{ step.field }}`
+    # renders literally -- so a file is the only honest channel between steps.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          WORKSPACE="{{ workload.workspace }}"
+          URL="{{ workload.frontend_url }}"
+          HOSTNAME="{{ workload.frontend_host }}"
+
+          test -n "$WORKSPACE" || { echo "required value is empty: workspace" >&2; exit 1; }
+          test -n "$URL" || { echo "required value is empty: frontend_url" >&2; exit 1; }
+          mkdir -p "$WORKSPACE/results" "$WORKSPACE/evidence"
+
+          # DNS first: a resolve failure and a 000 from curl look alike in a report otherwise.
+          if host "$HOSTNAME" > "$WORKSPACE/evidence/frontend-dns.txt" 2>&1; then
+            echo "resolved: $HOSTNAME"
+          else
+            echo "DNS did not resolve: $HOSTNAME" | tee -a "$WORKSPACE/evidence/frontend-dns.txt"
+          fi
+
+          # `|| true` so a transport failure still produces evidence for the assert step to judge,
+          # rather than aborting the case with no record of what happened.
+          curl -sS -o "$WORKSPACE/evidence/frontend-body.html" \
+            -w '{"status":"%{http_code}","time_total":%{time_total},"size":%{size_download},"redirects":%{num_redirects}}' \
+            --max-time 30 "$URL" > "$WORKSPACE/evidence/frontend-probe.json" 2>"$WORKSPACE/evidence/frontend-curl.err" || true
+
+          test -s "$WORKSPACE/evidence/frontend-probe.json" \
+            || echo '{"status":"000","time_total":0,"size":0,"redirects":0}' > "$WORKSPACE/evidence/frontend-probe.json"
+          cat "$WORKSPACE/evidence/frontend-probe.json"
+    next:
+      arcs:
+        - step: assert_frontend_healthy
+
+  - step: assert_frontend_healthy
+    desc: Assert -- status, non-empty body, resolved host, and latency within budget
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          EXPECTED_STATUS="{{ workload.expected_status }}" \
+          LATENCY_BUDGET="{{ workload.latency_budget_seconds }}" \
+          FRONTEND_URL="{{ workload.frontend_url }}" \
+          FRONTEND_HOST="{{ workload.frontend_host }}" \
+          env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
+          sys.path.insert(0, str(repo / "qa" / "regression" / "lib"))
+          import qa_report
+
+          qa_report.require_debug()
+
+          case = qa_report.Case(
+              "frontend_health", "The travel frontend answers 200 and its host resolves"
+          )
+
+          probe = json.loads((workspace / "evidence" / "frontend-probe.json").read_text())
+          dns = (workspace / "evidence" / "frontend-dns.txt").read_text(encoding="utf-8")
+          body_path = workspace / "evidence" / "frontend-body.html"
+          body = body_path.read_text(encoding="utf-8", errors="replace") if body_path.is_file() else ""
+
+          case.assert_true(
+              "hostname_resolves",
+              "has address" in dns or "has IPv6 address" in dns,
+              f"{os.environ['FRONTEND_HOST']} must resolve",
+          )
+          case.assert_equal(
+              "http_status", str(probe.get("status")), os.environ["EXPECTED_STATUS"],
+              "the frontend must answer the expected status",
+          )
+          # A 200 with an empty body is a green light over a blank page.
+          case.assert_non_empty("response_body", body, "a 200 with no body is not a healthy page")
+          case.assert_true(
+              "body_is_html",
+              "<html" in body.lower() or "<!doctype" in body.lower(),
+              "the response must actually be the SPA document",
+          )
+          case.assert_max_duration(
+              "latency_within_budget",
+              float(probe.get("time_total") or 0),
+              float(os.environ["LATENCY_BUDGET"]),
+          )
+
+          case.add_evidence(
+              url=os.environ["FRONTEND_URL"],
+              status=probe.get("status"),
+              time_total_seconds=probe.get("time_total"),
+              bytes_downloaded=probe.get("size"),
+              redirects=probe.get("redirects"),
+          )
+          sys.exit(case.finish(workspace / "results" / "frontend_health.json"))
+          PY
+    next:
+      arcs:
+        - step: end
+
+  - step: end
+    desc: Frontend health check complete
+    tool:
+      kind: noop

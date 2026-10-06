@@ -1,0 +1,339 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: travel_qa_regression_suite
+  path: muno/qa/regression/suite
+  description: >-
+    Run every travel regression case and emit a consolidated report -- report.json for machines,
+    report.md for people. Exits non-zero when any case failed or errored.
+
+executor:
+  profile: local
+  version: noetl-runtime/1
+
+# The runner dispatches each case as its own `noetl exec` rather than calling them as `kind:
+# playbook` children, for one reason: a test runner must run every case and report all of them. A
+# child playbook that fails aborts its parent, so the first red case would hide the rest -- exactly
+# the information a regression run exists to produce. Each case is therefore dispatched in a
+# subprocess whose exit code is recorded rather than propagated, and the verdict is computed at the
+# end from the collected result documents.
+workload:
+  repo: /Volumes/X10/projects/noetl/ai-meta/repos/travel
+  workspace: /tmp/travel-qa-regression
+
+  # Cases to run, in order. Comma-separated so it can be narrowed from the command line:
+  #   --set workload.cases=frontend-health,dispatch-health
+  cases: "profile-merge,frontend-health,hotel-cards-smoke,dispatch-health"
+
+  # Pass-through configuration for the cases that can reach live systems. Left empty, those tiers
+  # report `blocked` rather than `pass`.
+  gateway_url: ""
+  server_endpoint: ""
+  test_user_id: qa-regression-user-0001
+
+  # `blocked` means a case could not run. That is not a pass, and by default it is not a build
+  # failure either -- it is missing coverage, reported as such. Set to "true" in an environment
+  # that is supposed to have every precondition, so silent loss of coverage becomes visible.
+  fail_on_blocked: "false"
+
+workflow:
+  - step: prepare_suite_workspace
+    desc: Arrange -- a clean results directory so a stale case file cannot be counted twice
+    # This matters more than it looks. The report is assembled by reading result documents off
+    # disk, so a result left behind by a previous run would be reported as part of this one --
+    # including a `pass` for a case that was not executed at all.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          test -n "$REPO" || { echo "required value is empty: repo" >&2; exit 1; }
+          test -n "$WORKSPACE" || { echo "required value is empty: workspace" >&2; exit 1; }
+          case "$WORKSPACE" in
+            /*) ;;
+            *) echo "workspace must be an absolute path: $WORKSPACE" >&2; exit 1 ;;
+          esac
+          test -d "$REPO/qa/regression/cases" || {
+            echo "no case directory at $REPO/qa/regression/cases" >&2; exit 1; }
+
+          rm -rf "$WORKSPACE/results"
+          mkdir -p "$WORKSPACE/results" "$WORKSPACE/evidence"
+          echo "suite workspace ready: $WORKSPACE"
+    next:
+      arcs:
+        - step: run_cases
+
+  - step: run_cases
+    desc: Act -- dispatch every case, recording exit code and wall clock for each
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          # Pin the CLI: see the same note in cases/dispatch-health.yaml. A harness that lets a
+          # child process re-resolve the binary may test a different one than it verified.
+          NOETL_BIN="$(command -v noetl)" \
+            || { echo "the noetl CLI is not on PATH" >&2; exit 1; }
+          "$NOETL_BIN" --version >/dev/null 2>&1 \
+            || { echo "the resolved noetl CLI does not run: $NOETL_BIN" >&2; exit 1; }
+
+          CASES="{{ workload.cases }}" \
+          GATEWAY_URL="{{ workload.gateway_url }}" \
+          SERVER_ENDPOINT="{{ workload.server_endpoint }}" \
+          TEST_USER_ID="{{ workload.test_user_id }}" \
+          NOETL_BIN="$NOETL_BIN" \
+          env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
+          noetl = os.environ["NOETL_BIN"]
+          cases = [c.strip() for c in os.environ["CASES"].split(",") if c.strip()]
+          if not cases:
+              raise SystemExit("workload.cases is empty; there is nothing to run")
+
+          dispatches = []
+          logs = workspace / "evidence"
+          logs.mkdir(parents=True, exist_ok=True)
+
+          for name in cases:
+              # A bare name is a case; a name containing "/" is any playbook under qa/regression,
+              # which is how the harness self-test is reached without living among the real cases.
+              base = repo / "qa" / "regression"
+              playbook = (
+                  (base / f"{name}.yaml") if "/" in name else (base / "cases" / f"{name}.yaml")
+              ).resolve()
+              # Log filenames are derived from the case name, so a name with path separators must
+              # not be able to write outside the evidence directory.
+              slug = name.strip("./").replace("/", "__").replace("\\", "__")
+              if not playbook.is_file():
+                  dispatches.append({
+                      "case": name, "exit_code": 127, "seconds": 0.0,
+                      "error": f"case playbook not found: {playbook}",
+                  })
+                  continue
+
+              argv = [
+                  noetl, "exec", str(playbook), "--runtime", "local",
+                  "--set", f"workload.repo={repo}",
+                  "--set", f"workload.workspace={workspace}",
+                  "--set", f"workload.gateway_url={os.environ['GATEWAY_URL']}",
+                  "--set", f"workload.server_endpoint={os.environ['SERVER_ENDPOINT']}",
+                  "--set", f"workload.test_user_id={os.environ['TEST_USER_ID']}",
+                  "--set", f"workload.noetl_bin={noetl}",
+              ]
+              # Snapshot the results directory so a case that dies before writing anything can be
+              # detected rather than silently vanishing from the report.
+              before = {p.name for p in (workspace / "results").glob("*.json")}
+              start = time.monotonic()
+              # Exit codes are RECORDED, not propagated: one red case must not hide the rest.
+              completed = subprocess.run(argv, capture_output=True, text=True, timeout=900)
+              elapsed = time.monotonic() - start
+              (logs / f"{slug}.log").write_text(
+                  f"$ {' '.join(argv)}\n\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}\n",
+                  encoding="utf-8",
+              )
+              after = {p.name for p in (workspace / "results").glob("*.json")}
+              produced_files = sorted(after - before)
+              dispatches.append({
+                  "case": name,
+                  "exit_code": completed.returncode,
+                  "seconds": round(elapsed, 4),
+                  "produced": produced_files,
+                  # A case that failed AND wrote no verdict has not been reported by anyone. The
+                  # report step turns this into an explicit error so it cannot go missing.
+                  "error": (
+                      "" if produced_files else
+                      f"case exited {completed.returncode} without writing any result document"
+                      if completed.returncode != 0 else
+                      "case exited 0 but wrote no result document"
+                  ),
+              })
+              print(f"  {name}: exit={completed.returncode} {elapsed:.2f}s")
+
+          (workspace / "evidence" / "dispatches.json").write_text(
+              json.dumps(dispatches, indent=2) + "\n", encoding="utf-8"
+          )
+          print(json.dumps({"dispatched": len(dispatches)}))
+          PY
+    next:
+      arcs:
+        - step: build_report
+
+  - step: build_report
+    desc: Report -- merge the case results into report.json and report.md, and fail closed
+    # Deliberately NOT `kind: sink`. Verified in the local runtime: `sink` writes the step context,
+    # and because step results are not addressable in local mode the file it produces is EMPTY --
+    # a zero-byte report alongside a zero exit code, which is the precise shape of a false green.
+    # The report is therefore written explicitly by a step that can be held to its contents.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          FAIL_ON_BLOCKED="{{ workload.fail_on_blocked }}" \
+          CASES="{{ workload.cases }}" \
+          env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
+          sys.path.insert(0, str(repo / "qa" / "regression" / "lib"))
+          import qa_report
+
+          qa_report.require_debug()
+
+          results_dir = workspace / "results"
+          dispatch_path = workspace / "evidence" / "dispatches.json"
+          dispatches = json.loads(dispatch_path.read_text()) if dispatch_path.is_file() else []
+
+          results = []
+          for path in sorted(results_dir.glob("*.json")):
+              try:
+                  results.append(json.loads(path.read_text(encoding="utf-8")))
+              except json.JSONDecodeError as exc:
+                  results.append({
+                      "case_id": path.stem, "status": qa_report.ERROR,
+                      "title": "unreadable result document",
+                      "blocked_reason": "", "duration_ms": 0, "assertion_count": 0,
+                      "failed_assertions": [f"result document is not valid JSON: {exc}"],
+                      "assertions": [], "evidence": {},
+                  })
+
+          # A dispatch that produced no result document is an error, never an absence. Without this
+          # a case that crashed before writing a verdict simply vanishes, and the suite reports a
+          # pass over a case nobody ran -- which is the exact false green this suite exists to stop.
+          requested = [c.strip() for c in os.environ["CASES"].split(",") if c.strip()]
+          for dispatch in dispatches:
+              if dispatch.get("error"):
+                  results.append({
+                      "case_id": dispatch["case"], "status": qa_report.ERROR,
+                      "title": "case could not be dispatched",
+                      "blocked_reason": "", "duration_ms": 0, "assertion_count": 0,
+                      "failed_assertions": [dispatch["error"]], "assertions": [], "evidence": {},
+                  })
+          if not results:
+              results.append({
+                  "case_id": "suite", "status": qa_report.ERROR,
+                  "title": "no case produced a result document",
+                  "blocked_reason": "", "duration_ms": 0, "assertion_count": 0,
+                  "failed_assertions": ["the suite ran but nothing reported a verdict"],
+                  "assertions": [], "evidence": {},
+              })
+
+          counts = {v: 0 for v in qa_report.VERDICTS}
+          for result in results:
+              counts[result.get("status", qa_report.ERROR)] = counts.get(
+                  result.get("status", qa_report.ERROR), 0
+              ) + 1
+
+          fail_on_blocked = os.environ["FAIL_ON_BLOCKED"].strip().lower() == "true"
+          red = counts[qa_report.FAIL] + counts[qa_report.ERROR] + (
+              counts[qa_report.BLOCKED] if fail_on_blocked else 0
+          )
+
+          report = {
+              "schema_version": 1,
+              "suite": "travel-regression",
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+              "requested_cases": requested,
+              "total_cases": len(results),
+              "counts": counts,
+              "assertion_total": sum(r.get("assertion_count", 0) for r in results),
+              "duration_ms_total": round(sum(float(r.get("duration_ms", 0)) for r in results), 3),
+              "dispatch_seconds_total": round(
+                  sum(float(d.get("seconds", 0)) for d in dispatches), 3
+              ),
+              "fail_on_blocked": fail_on_blocked,
+              "suite_status": "pass" if red == 0 else "fail",
+              "cases": sorted(results, key=lambda r: r.get("case_id", "")),
+              "dispatches": dispatches,
+          }
+          (workspace / "report.json").write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+
+          icon = {"pass": "PASS", "fail": "FAIL", "blocked": "BLOCKED", "error": "ERROR"}
+          lines = [
+              "# Travel regression report",
+              "",
+              f"**Suite: {report['suite_status'].upper()}** — "
+              f"{counts['pass']} passed, {counts['fail']} failed, "
+              f"{counts['blocked']} blocked, {counts['error']} errored "
+              f"({report['assertion_total']} assertions)",
+              "",
+              f"Generated {report['generated_at']}",
+              "",
+              "| Case | Status | Assertions | Duration | Note |",
+              "|---|---|---|---|---|",
+          ]
+          for result in report["cases"]:
+              note = result.get("blocked_reason") or ", ".join(result.get("failed_assertions") or [])
+              note = (note[:110] + "...") if len(note) > 110 else note
+              lines.append(
+                  f"| `{result.get('case_id')}` | **{icon.get(result.get('status'), '?')}** "
+                  f"| {result.get('assertion_count', 0)} "
+                  f"| {float(result.get('duration_ms', 0)):.1f} ms | {note or '—'} |"
+              )
+
+          failing = [r for r in report["cases"] if r.get("status") in ("fail", "error")]
+          if failing:
+              lines += ["", "## Failures", ""]
+              for result in failing:
+                  lines.append(f"### `{result.get('case_id')}` — {result.get('title', '')}")
+                  for assertion in result.get("assertions", []):
+                      if not assertion.get("ok"):
+                          lines.append(
+                              f"- **{assertion['assertion']}** — {assertion.get('detail', '')}  "
+                          )
+                          lines.append(
+                              f"  expected `{assertion.get('expected')}`, "
+                              f"got `{assertion.get('actual')}`"
+                          )
+                  lines.append("")
+
+          blocked = [r for r in report["cases"] if r.get("status") == "blocked"]
+          if blocked:
+              lines += ["", "## Blocked (not passed — missing coverage)", ""]
+              for result in blocked:
+                  lines.append(f"- `{result.get('case_id')}` — {result.get('blocked_reason', '')}")
+              lines.append("")
+
+          (workspace / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          print(json.dumps({
+              "suite_status": report["suite_status"],
+              "counts": counts,
+              "assertion_total": report["assertion_total"],
+              "report_json": str(workspace / "report.json"),
+              "report_md": str(workspace / "report.md"),
+          }, sort_keys=True))
+
+          # Fail closed: the suite step exits non-zero whenever anything is red, so a CI job that
+          # only checks the exit status still cannot miss a regression.
+          sys.exit(1 if red else 0)
+          PY
+    next:
+      arcs:
+        - step: end
+
+  - step: end
+    desc: Regression suite complete
+    tool:
+      kind: noop

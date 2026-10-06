@@ -1,0 +1,246 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: travel_qa_hotel_cards_smoke
+  path: muno/qa/regression/hotel-cards-smoke
+  description: >-
+    Smoke: the hotel-cards playbook is structurally intact -- it parses, keeps its catalog path,
+    reaches a terminal step, and still declares the widget shape the frontend renders. Optionally
+    executes it against a server and asserts the run reaches a terminal event.
+
+executor:
+  profile: local
+  version: noetl-runtime/1
+
+# Two tiers, and the split is forced by the runtime rather than chosen.
+#
+# hotel-cards runs on `kind: python`, which local mode does NOT execute -- verified: it prints
+# "Tool not supported in local execution mode", SKIPS the step, and the run still exits 0. So a
+# local `noetl exec` of hotel-cards would report success having executed none of its logic. That is
+# the single worst thing a regression suite can do, so this case never pretends to run it locally.
+#
+# Tier 1 (always runs): a static contract check that catches the breakage a diff actually causes --
+# a malformed playbook, a renamed catalog path, a removed terminal step, a dropped widget type.
+# Tier 2 (needs a server): a real execution, asserted to reach a terminal event.
+workload:
+  repo: /Volumes/X10/projects/noetl/ai-meta/repos/travel
+  workspace: /tmp/travel-qa-regression
+  target_playbook: playbooks/hotel-cards.yaml
+  expected_catalog_path: muno/playbooks/hotel-cards
+  expected_widget_type: hotel_cards
+  # Empty by default: without a server the execution tier reports `blocked`, never `pass`.
+  server_endpoint: ""
+
+workflow:
+  - step: check_playbook_contract
+    desc: Assert -- the playbook parses and still declares what its consumers depend on
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          TARGET_PLAYBOOK="{{ workload.target_playbook }}" \
+          EXPECTED_CATALOG_PATH="{{ workload.expected_catalog_path }}" \
+          EXPECTED_WIDGET_TYPE="{{ workload.expected_widget_type }}" \
+          env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
+          sys.path.insert(0, str(repo / "qa" / "regression" / "lib"))
+          import qa_report
+
+          qa_report.require_debug()
+          (workspace / "results").mkdir(parents=True, exist_ok=True)
+
+          case = qa_report.Case(
+              "hotel_cards_contract",
+              "hotel-cards parses, keeps its catalog path, and declares its widget",
+          )
+
+          target = repo / os.environ["TARGET_PLAYBOOK"]
+          if not target.is_file():
+              case.block(f"target playbook is absent: {target}")
+              sys.exit(case.finish(workspace / "results" / "hotel_cards_contract.json"))
+
+          try:
+              import yaml
+          except ImportError:
+              case.block("PyYAML is not installed in the QA interpreter")
+              sys.exit(case.finish(workspace / "results" / "hotel_cards_contract.json"))
+
+          raw = target.read_text(encoding="utf-8")
+          try:
+              document = yaml.safe_load(raw)
+          except yaml.YAMLError as exc:
+              case.assert_true("playbook_parses_as_yaml", False, f"{type(exc).__name__}: {exc}")
+              sys.exit(case.finish(workspace / "results" / "hotel_cards_contract.json"))
+
+          case.assert_true("playbook_parses_as_yaml", isinstance(document, dict), "top level is a mapping")
+
+          metadata = (document or {}).get("metadata") or {}
+          workflow = (document or {}).get("workflow") or []
+
+          case.assert_equal(
+              "catalog_path_unchanged",
+              metadata.get("path"), os.environ["EXPECTED_CATALOG_PATH"],
+              "a renamed catalog path silently orphans every caller",
+          )
+          case.assert_non_empty("workflow_has_steps", workflow, "a playbook with no steps runs nothing")
+
+          # A terminal step is what "runs to a terminal event" means structurally: at least one step
+          # with no outgoing arcs, which is where an execution can legitimately stop.
+          terminal = [
+              step.get("step") for step in workflow
+              if not ((step.get("next") or {}).get("arcs") or [])
+          ]
+          case.assert_non_empty(
+              "playbook_has_a_terminal_step", terminal,
+              "without one, an execution has no defined place to finish",
+          )
+
+          # The frontend renders by widget type; dropping it breaks the card silently.
+          case.assert_in(
+              "declares_expected_widget_type",
+              os.environ["EXPECTED_WIDGET_TYPE"], raw,
+              "the widget type the frontend renders must still be referenced",
+          )
+
+          step_names = [s.get("step") for s in workflow if s.get("step")]
+          case.assert_equal(
+              "step_names_are_unique", len(step_names), len(set(step_names)),
+              "duplicate step names make routing ambiguous",
+          )
+
+          case.add_evidence(
+              playbook=str(target.relative_to(repo)),
+              step_count=len(workflow),
+              terminal_steps=terminal,
+              catalog_path=metadata.get("path"),
+          )
+          sys.exit(case.finish(workspace / "results" / "hotel_cards_contract.json"))
+          PY
+    next:
+      arcs:
+        - step: execute_against_server
+          when: '{{ workload.server_endpoint != "" }}'
+        - step: report_execution_blocked
+          when: '{{ workload.server_endpoint == "" }}'
+
+  - step: execute_against_server
+    desc: Act and assert -- execute hotel-cards and require a terminal event
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          SERVER_ENDPOINT="{{ workload.server_endpoint }}" \
+          EXPECTED_CATALOG_PATH="{{ workload.expected_catalog_path }}" \
+          EXPECTED_WIDGET_TYPE="{{ workload.expected_widget_type }}" \
+          env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
+          sys.path.insert(0, str(repo / "qa" / "regression" / "lib"))
+          import qa_report
+
+          qa_report.require_debug()
+          case = qa_report.Case(
+              "hotel_cards_execution", "hotel-cards executes and reaches a terminal event"
+          )
+
+          endpoint = os.environ["SERVER_ENDPOINT"].rstrip("/")
+          payload = {
+              "path": os.environ["EXPECTED_CATALOG_PATH"],
+              "payload": {"thread_id": "qa-regression-hotel-cards", "user_uid": "qa-regression-user-0001"},
+          }
+          try:
+              request = urllib.request.Request(
+                  f"{endpoint}/api/execute",
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  body = json.loads(response.read().decode("utf-8") or "{}")
+          except Exception as exc:  # noqa: BLE001 - transport failure blocks, never passes
+              case.block(f"server unreachable: {type(exc).__name__}: {exc}")
+              sys.exit(case.finish(workspace / "results" / "hotel_cards_execution.json"))
+
+          case.assert_non_empty("execution_returned_a_body", body, "an empty response proves nothing")
+          case.assert_non_empty(
+              "execution_id_present", body.get("execution_id"),
+              "without an execution id there is nothing to audit",
+          )
+          # COMPLETED does not mean correct -- the shape has to be there too.
+          case.assert_in(
+              "status_is_terminal", str(body.get("status", "")).upper(),
+              ("COMPLETED", "SUCCESS", "FINISHED"),
+              "the run must reach a terminal state, not merely be accepted",
+          )
+          case.assert_in(
+              "response_carries_the_widget_type",
+              os.environ["EXPECTED_WIDGET_TYPE"], json.dumps(body),
+              "a terminal run that rendered no hotel_cards widget is not a pass",
+          )
+
+          case.add_evidence(
+              endpoint=endpoint,
+              execution_id=body.get("execution_id"),
+              status=body.get("status"),
+          )
+          sys.exit(case.finish(workspace / "results" / "hotel_cards_execution.json"))
+          PY
+    next:
+      arcs:
+        - step: end
+
+  - step: report_execution_blocked
+    desc: Record the execution tier as blocked rather than letting its absence read as a pass
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -eu
+          REPO="{{ workload.repo }}"
+          WORKSPACE="{{ workload.workspace }}"
+
+          env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
+          sys.path.insert(0, str(repo / "qa" / "regression" / "lib"))
+          import qa_report
+
+          case = qa_report.Case(
+              "hotel_cards_execution", "hotel-cards executes and reaches a terminal event"
+          )
+          case.block(
+              "workload.server_endpoint is empty. hotel-cards runs on kind: python, which the "
+              "local runtime skips while still exiting 0, so it cannot be executed here. The "
+              "contract tier still ran; this tier is blocked, which is not a pass."
+          )
+          case.write(workspace / "results" / "hotel_cards_execution.json")
+          print('{"case_id": "hotel_cards_execution", "status": "blocked"}')
+          PY
+    next:
+      arcs:
+        - step: end
+
+  - step: end
+    desc: hotel-cards smoke complete
+    tool:
+      kind: noop

@@ -1,0 +1,32 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: travel_qa_dispatch_probe
+  path: muno/qa/regression/_dispatch-probe
+  description: >-
+    The smallest playbook that can complete. Its only job is to be dispatched and timed by
+    dispatch-health.yaml; it deliberately does no work, so any latency measured is the
+    orchestration path rather than the workload.
+
+executor:
+  profile: local
+  version: noetl-runtime/1
+
+workload:
+  marker: dispatch-probe
+
+workflow:
+  - step: touch
+    desc: Do the least possible and finish
+    tool:
+      kind: shell
+      cmds:
+        - echo "dispatch-probe {{ workload.marker }}"
+    next:
+      arcs:
+        - step: end
+
+  - step: end
+    desc: Probe complete
+    tool:
+      kind: noop
