@@ -39,3 +39,7 @@ PostgreSQL fits the actual relational model: foreign keys, localized content, ma
 Item/category image URI columns remain storage-provider neutral. GCS is a suitable object-store option, but bucket IAM, signed uploads, object existence checks, scanning, and lifecycle deletion are not implemented. No object storage was contacted. Catalog IDs/relationships stay in PostgreSQL; blobs do not.
 
 Lodging can be represented as product/service items with categories and attributes. Migration 2 now adds individual room inventory, date-range exclusion, price-snapshotted holds and staff reservation transitions; see [hospitality contracts](hospitality.md). Payments, taxes, outbox messages, refunds and channel synchronization still need additional domain migrations/playbooks. The removed hospitality mock does not establish those guarantees. Specialized legacy tour/car availability and pricing procedures remain explicit migration gaps, not approximations hidden behind generic catalog search.
+
+## Scoped front-desk application
+
+The optional [front-desk gateway and UI](front-desk.md) replace caller-selected execution with operator-pinned per-provider catalog IDs. Receipts bind result retrieval to a validated session; the restricted gateway omits generic execution/proxy routes. This is an implementation path for staff access, not evidence that production identity or ingress configuration is deployed. Business data access remains inside the YAML playbooks.
