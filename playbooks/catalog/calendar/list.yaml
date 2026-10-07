@@ -149,13 +149,29 @@ workflow:
         # query_collection returns {"collection_path": ..., "count": N, "documents": [...]}
         raw_docs = _as_list(qr.get("documents") or [])
 
-        # Each document is a plain dict with the Firestore field values already
-        # decoded by the MCP agent.
+        # ⚠ The fields are NOT at the top level of each document. query_collection
+        # returns `documents` as the connector's plain-doc wrapper --
+        #   {"name":…, "path":…, "createTime":…, "updateTime":…, "data": {…fields…}}
+        # -- built by its `_plain_doc`. The decoded Firestore fields live under
+        # `data`. The previous code read `doc["event_id"]`, which is always absent,
+        # so EVERY document was filtered out: measured against
+        # chat_threads/chat-mtalhs7m-78hi4c, Firestore held 12 event documents and
+        # this step returned event_count: 0. An empty calendar is exactly what a
+        # wrong-project read looks like too, which is why it went unnoticed.
         display_events = []
         for doc in raw_docs:
-            d = _as_dict(doc)
+            wrapper = _as_dict(doc)
+            # Tolerate both shapes: the wrapper (what the connector returns) and an
+            # already-flat dict, so a future connector change cannot silently empty
+            # the calendar again.
+            d = _as_dict(wrapper.get("data")) or wrapper
             if d.get("event_id"):
-                display_events.append(d)
+                event = dict(d)
+                # Keep the document's own path; the widget does not use it today but
+                # an edit path will need it, and it is free here.
+                if wrapper.get("path"):
+                    event.setdefault("_doc_path", wrapper["path"])
+                display_events.append(event)
 
         # Sort by start_at (Firestore order_by may already do this, but be
         # defensive in case the MCP returns them in creation order).
