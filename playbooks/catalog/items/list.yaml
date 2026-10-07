@@ -94,6 +94,18 @@ workflow:
     tool:
       kind: playbook
       path: automation/agents/mcp/firestore
+      # ⚠ Without these three a `kind: playbook` child dispatch is ASYNC: the step
+      # completes immediately carrying the start envelope
+      #   {"async": true, "execution_id": …, "status": "started"}
+      # and the next step runs before the child has produced anything. Measured on
+      # execution 366308427531558912: COMPLETED, 0 failed steps, event_count 0,
+      # while the child reported count: 12. `return_result` blocks for the child's
+      # real result; `result_step` names the child step whose result to return
+      # (the Firestore MCP's dispatch step). noetl/ai-meta#136 -- hotel-cards.yaml
+      # and flights-details.yaml have carried this comment since.
+      return_result: true
+      result_step: firestore_dispatch
+      timeout: 60
       payload:
         method: tools/call
         tool: query_collection
@@ -205,6 +217,18 @@ workflow:
     tool:
       kind: playbook
       path: automation/agents/mcp/firestore
+      # ⚠ Without these three a `kind: playbook` child dispatch is ASYNC: the step
+      # completes immediately carrying the start envelope
+      #   {"async": true, "execution_id": …, "status": "started"}
+      # and the next step runs before the child has produced anything. Measured on
+      # execution 366308427531558912: COMPLETED, 0 failed steps, event_count 0,
+      # while the child reported count: 12. `return_result` blocks for the child's
+      # real result; `result_step` names the child step whose result to return
+      # (the Firestore MCP's dispatch step). noetl/ai-meta#136 -- hotel-cards.yaml
+      # and flights-details.yaml have carried this comment since.
+      return_result: true
+      result_step: firestore_dispatch
+      timeout: 60
       payload:
         method: tools/call
         tool: batch_get_docs

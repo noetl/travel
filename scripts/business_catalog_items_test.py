@@ -210,6 +210,33 @@ for pb in ("playbooks/catalog/items/list.yaml", "playbooks/catalog/calendar/list
         bad = _re.findall(r"\{\{[^}]*\b%s\.result\b[^}]*\}\}" % _re.escape(cs), body)
         check("  `%s` not read via .result" % cs, bad, [])
 
+print("\nstructural: a child dispatch whose result is READ must block for it")
+# ⚠ Without `return_result` a `kind: playbook` dispatch is ASYNC and the step carries
+# {"async": true, "status": "started"} -- the next step then runs before the child has
+# produced anything. Measured: execution 366308427531558912 COMPLETED with 0 failed
+# steps and event_count 0 while its child reported count: 12. noetl/ai-meta#136.
+#
+# No fixture can catch this: the step bodies are correct and the harness feeds them
+# the right shape directly. Only the DECLARATION is wrong, so only a structural check
+# over the YAML can see it. The measured ratio when written was 0 of 2 catalog
+# playbooks declaring it, against >=1 in every other playbook that dispatches a child.
+for pb in ("playbooks/catalog/items/list.yaml", "playbooks/catalog/calendar/list.yaml"):
+    doc_all = yaml.safe_load(open(pb))
+    by_name = {s["step"]: s for s in doc_all["workflow"]}
+    body = open(pb).read()
+    kids = [s for s in doc_all["workflow"] if s["tool"].get("kind") == "playbook"]
+    check("%s dispatches at least one child" % pb.split("/")[-2], len(kids) >= 1, True)
+    for s in kids:
+        name = s["step"]
+        # is this child's output read by any later step?
+        is_read = bool(_re.search(r"\{\{\s*%s\b" % _re.escape(name), body))
+        if not is_read:
+            continue
+        tl = s["tool"]
+        check("  `%s` sets return_result" % name, tl.get("return_result"), True)
+        check("  `%s` names a result_step" % name, bool(tl.get("result_step")), True)
+        check("  `%s` sets a timeout" % name, isinstance(tl.get("timeout"), int), True)
+
 print("\n%d checks, %d failed" % (checks, len(failures)))
 if failures:
     for f in failures:
