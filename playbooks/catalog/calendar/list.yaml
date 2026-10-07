@@ -120,7 +120,7 @@ workflow:
       input:
         trip_id: "{{ resolve_collection_path.trip_id }}"
         collection_path: "{{ resolve_collection_path.collection_path }}"
-        query_result: "{{ query_calendar_events.result }}"
+        query_result: "{{ query_calendar_events | default({}) }}"
       code: |
         import json
 
@@ -145,9 +145,96 @@ workflow:
                     return []
             return []
 
-        qr = _as_dict(query_result)
-        # query_collection returns {"collection_path": ..., "count": N, "documents": [...]}
+
+        # ── the child-playbook result contract ────────────────────────────
+        # A `kind: playbook` child's output is read by the BARE STEP NAME --
+        # `{{ step }}`, never `{{ step.result }}`, which resolves to nothing and
+        # yields a silent empty. This file used `.result` and that is why it
+        # returned 0 events while the child reported count: 12.
+        #
+        # The value is then an MCP envelope `{isError, data, summary}`, and the
+        # child dispatch may wrap it once more, so `data` is unwrapped twice
+        # defensively -- the same shape hotel-cards.yaml and flights-details.yaml
+        # already handle.
+        #
+        # A large result is EXTERNALISED: the envelope carries a
+        # `noetl://execution/{id}/result/` ref that must be dereferenced, and that
+        # read path can return only a `_truncated` SAMPLE. A sample returned as
+        # though it were the payload is silently wrong, which is worse than empty,
+        # so it is refused with a reason.
+        def _find_ref(node, depth=0):
+            if depth > 8:
+                return None
+            if isinstance(node, dict):
+                r = node.get("_ref")
+                if isinstance(r, str) and r.startswith("noetl://"):
+                    return r
+                for v in node.values():
+                    got = _find_ref(v, depth + 1)
+                    if got:
+                        return got
+            elif isinstance(node, list):
+                for v in node:
+                    got = _find_ref(v, depth + 1)
+                    if got:
+                        return got
+            return None
+
+        def _server_base():
+            import os
+            for key in ("NOETL_SERVER_URL", "NOETL_SERVER_RUST_SERVICE_HOST"):
+                v = str(os.environ.get(key) or "").strip()
+                if v.startswith("http"):
+                    return v.rstrip("/")
+                if v:
+                    return "http://%s:8082" % v
+            return "http://noetl-server-rust.noetl.svc.cluster.local:8082"
+
+        def _truncated(node, depth=0):
+            if depth > 8:
+                return False
+            if isinstance(node, dict):
+                if node.get("_truncated"):
+                    return True
+                return any(_truncated(v, depth + 1) for v in node.values())
+            if isinstance(node, list):
+                return any(_truncated(v, depth + 1) for v in node)
+            return False
+
+        def _materialise(env):
+            ref = _find_ref(env)
+            if not ref:
+                return env, None
+            import re as _re
+            import urllib.request as _ur
+            m = _re.match(r"noetl://execution/(\\d+)/result/", ref)
+            if not m:
+                return env, "unparsable ref: %s" % str(ref)[:120]
+            child = m.group(1)
+            try:
+                with _ur.urlopen("%s/api/executions/%s" % (_server_base(), child),
+                                 timeout=45) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+            except Exception as exc:
+                return env, "%s: %s" % (type(exc).__name__, str(exc)[:160])
+            if _truncated(body):
+                return env, ("child %s result was externalised and this read path "
+                             "returned only a _truncated SAMPLE; refusing it rather "
+                             "than reporting a sample as the whole answer") % child
+            return body, None
+
+        def _unwrap(value):
+            """Envelope -> the tool's own data dict, unwrapped at most twice."""
+            env = _as_dict(value)
+            d1 = _as_dict(env.get("data")) if isinstance(env.get("data"), dict) else env
+            d2 = _as_dict(d1.get("data")) if isinstance(d1.get("data"), dict) else d1
+            return d2
+
+        query_result, _deref_error = _materialise(query_result)
+        qr = _unwrap(query_result)
+        # query_collection's data is {"collection_path": ..., "count": N, "documents": [...]}
         raw_docs = _as_list(qr.get("documents") or [])
+        _provider_error = _as_dict(query_result).get("isError") or qr.get("error")
 
         # ⚠ The fields are NOT at the top level of each document. query_collection
         # returns `documents` as the connector's plain-doc wrapper --
@@ -198,4 +285,10 @@ workflow:
             "envelope": envelope,
             "display_events": display_events,
             "event_count": len(display_events),
+            # Both failure channels are reported, because a zero count is otherwise
+            # indistinguishable from a provider error, a deref refusal, an empty
+            # trip and a wrong-project read -- four different causes, one symptom.
+            "deref_error": _deref_error,
+            "provider_error": _provider_error,
+            "documents_returned": int(qr.get("count") or len(raw_docs)),
         }

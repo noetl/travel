@@ -113,7 +113,13 @@ except ValueError:
 
 # --------------------------------------------------------- resolve_content_paths
 print("\nresolve_content_paths (query_collection shape: `documents`)")
-QUERY_REPLY = {
+def envelope(data):
+    """The MCP envelope a `kind: playbook` child hands back, read by the BARE STEP
+    NAME. `{{ step.result }}` resolves to nothing and silently yields an empty."""
+    return {"isError": False, "summary": "ok", "data": data}
+
+
+QUERY_REPLY = envelope({
     "collection_path": "catalog/items",
     "count": 3,
     "documents": [
@@ -125,7 +131,7 @@ QUERY_REPLY = {
         {"path": "catalog/items/itm_no_langs", "data": {
             "item_type": "tour", "default_lang": "ka", "attrs": {}}},
     ],
-}
+})
 rp = run("resolve_content_paths", lang="de", items_collection="catalog/items",
          query_result=QUERY_REPLY)
 check("reads all three documents", rp["item_count"], 3)
@@ -158,6 +164,7 @@ BATCH_REPLY = {
     ],
 }
 BATCH_REPLY["by_path"] = {r["path"]: r for r in BATCH_REPLY["results"]}
+BATCH_REPLY = envelope(BATCH_REPLY)
 
 asm = run("assemble", items=rp["items"], item_count=rp["item_count"],
           items_collection="catalog/items", category_id="cat_beach", lang="de",
@@ -172,8 +179,7 @@ check("counts the ones missing content", asm["counts"]["without_content"], 1)
 check("publishes the queried denominator", asm["counts"]["queried"], 3)
 
 # a connector revision that only fills `results` must still work
-only_results = dict(BATCH_REPLY)
-only_results.pop("by_path")
+only_results = envelope({k: v for k, v in BATCH_REPLY["data"].items() if k != "by_path"})
 asm2 = run("assemble", items=rp["items"], item_count=3, items_collection="catalog/items",
            category_id="c", lang="de", limit_was_clamped=False, content_result=only_results)
 check("falls back to `results` when by_path is absent",
@@ -185,13 +191,24 @@ check("falls back to `results` when by_path is absent",
 # control ever reports 2 translations, the test has stopped discriminating and every
 # check above is decorative.
 print("\nRED CONTROL -- the wrong response key must break the join")
-wrong = {"documents": BATCH_REPLY["results"]}
+wrong = envelope({"documents": BATCH_REPLY["data"]["results"]})
 asm3 = run("assemble", items=rp["items"], item_count=3, items_collection="catalog/items",
            category_id="c", lang="de", limit_was_clamped=False, content_result=wrong)
 joined = sum(1 for i in asm3["items"] if i["name"])
 check("wrong key joins NOTHING (control)", joined, 0)
 check("and every item is reported as missing content (control)",
       asm3["counts"]["without_content"], 3)
+
+print("\nstructural: no step may read a child playbook's output via `.result`")
+import re as _re
+for pb in ("playbooks/catalog/items/list.yaml", "playbooks/catalog/calendar/list.yaml"):
+    doc_all = yaml.safe_load(open(pb))
+    kids = [s["step"] for s in doc_all["workflow"] if s["tool"].get("kind") == "playbook"]
+    check("%s has child playbook steps" % pb.split("/")[-2], len(kids) >= 1, True)
+    body = open(pb).read()
+    for cs in kids:
+        bad = _re.findall(r"\{\{[^}]*\b%s\.result\b[^}]*\}\}" % _re.escape(cs), body)
+        check("  `%s` not read via .result" % cs, bad, [])
 
 print("\n%d checks, %d failed" % (checks, len(failures)))
 if failures:
