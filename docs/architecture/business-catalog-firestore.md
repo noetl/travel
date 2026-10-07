@@ -75,7 +75,7 @@ below is designed to stay inside these limits.
 
 These are the four gaps to close before this catalog outgrows a single page of
 results; they are specced in
-[noetl/ai-meta#449](https://github.com/noetl/ai-meta/issues/451) and none of them
+[noetl/ai-meta#451](https://github.com/noetl/ai-meta/issues/451) and none of them
 blocks the model below.
 
 ## The reference model, and why it is only a reference
