@@ -1,0 +1,291 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: catalog_items_list
+  path: travel/playbooks/catalog/items/list
+  description: |
+    BUSINESS catalog read: list published items in one category subtree, with the
+    caller's language applied.
+
+    This is the worked example for docs/architecture/business-catalog-firestore.md.
+    The business catalog is domain data (items, categories, attributes) and lives in
+    Firestore, reached through automation/agents/mcp/firestore.  None of it goes into
+    EHDB -- EHDB holds NoETL's own objects, including this playbook.
+
+    Why the query has this exact shape: the Firestore MCP connector composes `where`
+    clauses with AND and supports only = < <= > >= array-contains.  No `in`, no
+    array-contains-any, no OR.  So one category per call, and the category argument
+    is matched against the item's flattened ancestor closure (`category_ids`) rather
+    than a direct parent -- which is what makes "everything under Beach" one query
+    instead of a recursive walk Firestore cannot do.
+  version: "1.0"
+  agent: false
+  exposed_in_ui: false
+  tags: [catalog, business-catalog, firestore, items, read, travel]
+
+workload:
+  # Workload Identity / ADC.  The MCP child mints the worker's own service-account
+  # token from the GKE metadata server; there is no credential alias and nothing in
+  # the keychain for this path.
+  gcp_project: shastaratech-noetl-prod
+  firestore_database: "(default)"
+  collection_root: catalog
+  # Caller supplies these.
+  category_id: ""        # required -- matched against items.category_ids (the ancestor closure)
+  lang: en               # requested language; falls back to each item's default_lang
+  limit: 100             # connector hard-caps at 500 and offers no cursor
+
+workflow:
+  - step: validate_inputs
+    desc: Reject an empty category up front rather than returning a whole collection
+    tool:
+      kind: python
+      input:
+        category_id: "{{ workload.category_id }}"
+        lang: "{{ workload.lang }}"
+        limit: "{{ workload.limit }}"
+        collection_root: "{{ workload.collection_root }}"
+      code: |
+        cid = str(category_id or "").strip()
+        if not cid:
+            # Without this an empty category_id would match nothing and read as
+            # "the category is empty" -- a false zero, not an error.
+            raise ValueError("category_id is required")
+
+        lang_code = str(lang or "en").strip() or "en"
+
+        try:
+            cap = int(limit)
+        except (TypeError, ValueError):
+            cap = 100
+        # The connector caps at 500 and exposes no cursor, so a larger ask cannot be
+        # satisfied and must not look as though it was.
+        truncating = cap > 500
+        cap = max(1, min(cap, 500))
+
+        result = {
+            "category_id": cid,
+            "lang": lang_code,
+            "limit": cap,
+            "items_collection": "%s/items" % str(collection_root or "catalog").strip("/"),
+            "limit_was_clamped": truncating,
+        }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: query_items
+
+  - step: query_items
+    desc: One AND-composed Firestore query -- status equality plus the category closure
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/firestore
+      payload:
+        method: tools/call
+        tool: query_collection
+        gcp_project: "{{ workload.gcp_project }}"
+        firestore_database: "{{ workload.firestore_database }}"
+        arguments:
+          collection_path: "{{ validate_inputs.items_collection }}"
+          where:
+            - field: status
+              op: "="
+              value: published
+            - field: category_ids
+              op: array-contains
+              value: "{{ validate_inputs.category_id }}"
+          order_by:
+            field: sort_order
+            direction: ASCENDING
+          limit: "{{ validate_inputs.limit }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: resolve_content_paths
+
+  - step: resolve_content_paths
+    desc: Compute one content document path per item, honouring the per-item language fallback
+    tool:
+      kind: python
+      input:
+        lang: "{{ validate_inputs.lang }}"
+        items_collection: "{{ validate_inputs.items_collection }}"
+        query_result: "{{ query_items.result }}"
+      code: |
+        import json
+
+        def _as_dict(v):
+            if isinstance(v, dict):
+                return v
+            if isinstance(v, str):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    return {}
+            return {}
+
+        def _as_list(v):
+            if isinstance(v, list):
+                return v
+            if isinstance(v, str):
+                try:
+                    p = json.loads(v)
+                    return p if isinstance(p, list) else []
+                except Exception:
+                    return []
+            return []
+
+        qr = _as_dict(query_result)
+        raw = _as_list(qr.get("documents") or [])
+
+        items = []
+        paths = []
+        for doc in raw:
+            d = _as_dict(doc)
+            data = _as_dict(d.get("data")) or d
+            item_id = str(d.get("path") or "").rsplit("/", 1)[-1] or str(data.get("item_id") or "")
+            if not item_id:
+                continue
+
+            # Per-item fallback: the requested language if the item declares it,
+            # otherwise the item's own default.  `available_langs` is denormalised
+            # onto the item precisely so this decision needs no extra read -- the
+            # connector cannot run a collection-group query over content/.
+            langs = [str(x) for x in _as_list(data.get("available_langs"))]
+            default_lang = str(data.get("default_lang") or "en")
+            chosen = lang if lang in langs else default_lang
+
+            items.append({
+                "item_id": item_id,
+                "item_type": data.get("item_type"),
+                "attrs": _as_dict(data.get("attrs")),
+                "geo": _as_dict(data.get("geo")),
+                "price_from": _as_dict(data.get("price_from")),
+                "primary_category_id": data.get("primary_category_id"),
+                "content_lang": chosen,
+                "lang_is_fallback": chosen != lang,
+            })
+            paths.append({"path": "%s/%s/content/%s" % (items_collection, item_id, chosen)})
+
+        result = {
+            "items": items,
+            "content_paths": paths,
+            "item_count": len(items),
+            # query_collection returns {collection_path, count, documents} and NO
+            # `limit` echo, so the cap has to come from the step that set it rather
+            # than be inferred from the response.
+            "returned_count": int(qr.get("count") or len(raw)),
+        }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: fetch_content
+
+  - step: fetch_content
+    desc: One batched read for every item's localized content document
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/firestore
+      payload:
+        method: tools/call
+        tool: batch_get_docs
+        gcp_project: "{{ workload.gcp_project }}"
+        firestore_database: "{{ workload.firestore_database }}"
+        arguments:
+          items: "{{ resolve_content_paths.content_paths }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: assemble
+
+  - step: assemble
+    desc: Join the item documents to their localized content in memory -- Firestore has no joins
+    tool:
+      kind: python
+      input:
+        items: "{{ resolve_content_paths.items }}"
+        item_count: "{{ resolve_content_paths.item_count }}"
+        items_collection: "{{ validate_inputs.items_collection }}"
+        category_id: "{{ validate_inputs.category_id }}"
+        lang: "{{ validate_inputs.lang }}"
+        limit_was_clamped: "{{ validate_inputs.limit_was_clamped }}"
+        content_result: "{{ fetch_content.result }}"
+      code: |
+        import json
+
+        def _as_dict(v):
+            if isinstance(v, dict):
+                return v
+            if isinstance(v, str):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    return {}
+            return {}
+
+        def _as_list(v):
+            if isinstance(v, list):
+                return v
+            if isinstance(v, str):
+                try:
+                    p = json.loads(v)
+                    return p if isinstance(p, list) else []
+                except Exception:
+                    return []
+            return []
+
+        # batch_get_docs returns {count, succeeded, failed, results[], by_path{}, errors[]}
+        # -- NOT `documents`, which is query_collection's shape.  `by_path` is keyed by
+        # the cleaned document path, so the join below is a direct lookup rather than a
+        # scan.  A 404 comes back as found=false inside _ok, so a missing translation
+        # is data and does not fail the batch.
+        cr = _as_dict(content_result)
+        raw_by_path = _as_dict(cr.get("by_path"))
+        if not raw_by_path:
+            # Older connector revisions may only populate `results`.
+            for entry in _as_list(cr.get("results")):
+                e = _as_dict(entry)
+                if e.get("path"):
+                    raw_by_path[str(e["path"])] = e
+
+        by_path = {}
+        for path_key, entry in raw_by_path.items():
+            e = _as_dict(entry)
+            if not e.get("found"):
+                continue
+            by_path[str(path_key)] = _as_dict(_as_dict(e.get("document")).get("data"))
+
+        merged = []
+        missing_content = 0
+        for it in _as_list(items):
+            i = _as_dict(it)
+            iid = i.get("item_id")
+            key = "%s/%s/content/%s" % (items_collection, iid, i.get("content_lang"))
+            c = by_path.get(key, {})
+            if not c:
+                missing_content += 1
+            merged.append({
+                "item_id": iid,
+                "item_type": i.get("item_type"),
+                "name": c.get("name"),
+                "summary": c.get("summary"),
+                "attrs": i.get("attrs"),
+                "geo": i.get("geo"),
+                "price_from": i.get("price_from"),
+                "lang": i.get("content_lang"),
+                "lang_is_fallback": i.get("lang_is_fallback"),
+            })
+
+        result = {
+            "category_id": category_id,
+            "requested_lang": lang,
+            "items": merged,
+            # Every count a caller might act on, with its population, so a short
+            # page is never mistaken for an empty category.
+            "counts": {
+                "items": len(merged),
+                "queried": int(item_count or 0),
+                "without_content": missing_content,
+            },
+            "limit_was_clamped": bool(limit_was_clamped),
+        }

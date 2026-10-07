@@ -1,0 +1,73 @@
+{
+  "_comment": [
+    "Composite indexes for the travel BUSINESS catalog (docs/architecture/business-catalog-firestore.md).",
+    "Firestore auto-indexes every single field. A composite index is required when a query combines",
+    "array-contains with anything else, or multiple equality filters with an orderBy on a different field.",
+    "Measured 2026-10-07: zero composite indexes were deployed on shastaratech-noetl-prod, so every",
+    "query below fails at request time until this file is applied.",
+    "Apply with: gcloud firestore indexes composite create ... , or",
+    "  firebase deploy --only firestore:indexes --project shastaratech-noetl-prod"
+  ],
+  "indexes": [
+    {
+      "_use": "list_items_in_category — status + category subtree, ordered for display",
+      "collectionGroup": "items",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "category_ids", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "sort_order", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "_use": "items available in a given language (the substitute for a collection-group query on content/)",
+      "collectionGroup": "items",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "available_langs", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "sort_order", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "_use": "items of one type, most recently updated first (ingest/admin views)",
+      "collectionGroup": "items",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "item_type", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "updated_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "_use": "category subtree, ordered — the Firestore stand-in for a recursive CTE",
+      "collectionGroup": "categories",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "ancestor_ids", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "sort_order", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "_use": "direct children of one category",
+      "collectionGroup": "categories",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "parent_id", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "sort_order", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "_use": "one user's reservations by stay date — reads the users/{uid}/reservations mirror",
+      "collectionGroup": "reservations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "window.from", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

@@ -19,8 +19,17 @@ metadata:
   tags: [calendar, read, catalog, travel]
 
 workload:
-  gcp_auth: google_oauth
-  gcp_project: noetl-demo-19700101
+  # Firestore auth is Workload Identity / ADC -- the worker's own service-account
+  # token, minted from the GKE metadata server by the MCP child.  There is no
+  # credential alias and nothing in the keychain for this path, so the former
+  # `gcp_auth: google_oauth` field was inert and has been dropped.
+  #
+  # The project is named explicitly rather than inherited: noetl-demo-19700101 was
+  # the project this file used to pin, and its Firestore data has been frozen since
+  # 2026-08-09 while live reads and writes go to shastaratech-noetl-prod.  A read
+  # against the wrong project returns an empty collection, not an error, so the
+  # defect was invisible.
+  gcp_project: shastaratech-noetl-prod
   firestore_database: "(default)"
   # Caller must supply these three fields.
   user_uid: null        # string or null for anonymous threads
@@ -63,15 +72,19 @@ workflow:
         - step: query_calendar_events
 
   - step: query_calendar_events
-    desc: Read all calendar-event documents from Firestore via the MCP agent
+    desc: Read all calendar-event documents from Firestore via the Firestore MCP child
+    # `kind: agent` was wrong and could never have run: the server's ToolKind enum
+    # has 25 variants and `agent` is not one of them -- it sits in the explicit
+    # reject list in orchestrate-core/src/playbook.rs alongside `mcp`, `provider`
+    # and `result_fetch`.  An MCP provider is reached as an ordinary child
+    # playbook, which is what itinerary-planner.yaml's persist_all_atomically
+    # does.  See noetl/travel#134.
     tool:
-      kind: agent
-      framework: noetl
-      entrypoint: automation/agents/mcp/firestore
+      kind: playbook
+      path: automation/agents/mcp/firestore
       payload:
         method: tools/call
         tool: query_collection
-        gcp_auth: "{{ workload.gcp_auth }}"
         gcp_project: "{{ workload.gcp_project }}"
         firestore_database: "{{ workload.firestore_database }}"
         arguments:
