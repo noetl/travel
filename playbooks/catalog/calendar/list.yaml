@@ -37,6 +37,21 @@ workload:
   thread_path: ""       # required for anonymous threads; used when user_uid is null
 
 workflow:
+  # The Rust runtime REQUIRES a step named `start`; without it the playbook is
+  # rejected at parse time with "Workflow must have a step named 'start'"
+  # (server src/playbook/parser.rs:184) before any tool kind is even looked at.
+  # That is why the `kind: agent` defect went unnoticed -- this check fires
+  # first, so the playbook failed for a different reason than the obvious one.
+  # Found by actually EXECUTING it, not by reading it.
+  - step: start
+    desc: Entry point required by the runtime; routes to the first real step
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: resolve_collection_path
+
   - step: resolve_collection_path
     desc: Derive the Firestore collection path from the workload inputs
     tool:
