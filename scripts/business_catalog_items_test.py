@@ -24,6 +24,7 @@ It also pins the tool kind. ``kind: agent`` is NOT one of the server's 25 ToolKi
 variants -- it is in the explicit reject list -- so a playbook using it can never
 run. noetl/travel#134.
 """
+import glob
 import sys
 
 import yaml
@@ -55,8 +56,32 @@ def run(step_name, **inputs):
     return env["result"]
 
 
+# ------------------------------------------------- the runtime's own entry gate
+# A playbook with no step named `start` is rejected at PARSE time with
+# "Workflow must have a step named 'start'" (server src/playbook/parser.rs:184),
+# BEFORE any tool kind is looked at. Two consequences, both learned the hard way:
+#
+#   * `catalog/calendar/list`'s `kind: agent` defect was MASKED by this -- the
+#     playbook failed for the earlier reason, so fixing the tool kind alone left
+#     it just as unrunnable.
+#   * The first draft of `catalog/items/list` -- written with 29 passing checks --
+#     had the same omission. Those checks exec each step's embedded code and never
+#     ask the runtime to accept the workflow, so a guard over step BODIES cannot
+#     see a whole-WORKFLOW rule. Only an actual execution did, as a 422.
+#
+# So this covers EVERY playbook in the repo, not only the catalog ones; the
+# measured ratio when it was written was 2 of 7 missing. The count is asserted
+# because a glob matching nothing would otherwise report a clean pass.
+print("the runtime's entry gate: every playbook needs a step named `start`")
+ALL_PLAYBOOKS = sorted(glob.glob("playbooks/**/*.yaml", recursive=True))
+check("found a plausible number of playbooks to check", len(ALL_PLAYBOOKS) >= 4, True)
+for pb in ALL_PLAYBOOKS:
+    wf = yaml.safe_load(open(pb)).get("workflow") or []
+    names = [s.get("step") for s in wf if isinstance(s, dict)]
+    check("%s has a `start` step" % pb.replace("playbooks/", ""), "start" in names, True)
+
 # ------------------------------------------------------------------ tool kinds
-print("tool kinds (noetl/travel#134 -- `agent` is in the server's reject list)")
+print("\ntool kinds (noetl/travel#134 -- `agent` is in the server's reject list)")
 REJECTED = {"agent", "mcp", "provider", "result_fetch"}
 for path in (PLAYBOOK, CALENDAR):
     kinds = [s["tool"].get("kind") for s in yaml.safe_load(open(path))["workflow"]]

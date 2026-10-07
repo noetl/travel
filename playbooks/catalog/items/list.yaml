@@ -36,6 +36,20 @@ workload:
   limit: 100             # connector hard-caps at 500 and offers no cursor
 
 workflow:
+  # The Rust runtime REQUIRES a step named `start` (server
+  # src/playbook/parser.rs:184). I omitted it in the first draft of this file and
+  # the unit guard did not notice, because the guard execs each step's embedded
+  # code and never asks the runtime to accept the workflow. Only an actual
+  # execution surfaced it, as a 422 "Workflow must have a step named 'start'".
+  - step: start
+    desc: Entry point required by the runtime; routes to the first real step
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: validate_inputs
+
   - step: validate_inputs
     desc: Reject an empty category up front rather than returning a whole collection
     tool:
