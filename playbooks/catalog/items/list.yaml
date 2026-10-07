@@ -124,7 +124,7 @@ workflow:
       input:
         lang: "{{ validate_inputs.lang }}"
         items_collection: "{{ validate_inputs.items_collection }}"
-        query_result: "{{ query_items.result }}"
+        query_result: "{{ query_items | default({}) }}"
       code: |
         import json
 
@@ -149,7 +149,12 @@ workflow:
                     return []
             return []
 
-        qr = _as_dict(query_result)
+        # A `kind: playbook` child's output is read by the BARE STEP NAME --
+        # `{{ step }}`, not `{{ step.result }}`, which resolves to nothing. The
+        # value is an MCP envelope, so `data` is unwrapped (twice, defensively).
+        env = _as_dict(query_result)
+        d1 = _as_dict(env.get("data")) if isinstance(env.get("data"), dict) else env
+        qr = _as_dict(d1.get("data")) if isinstance(d1.get("data"), dict) else d1
         raw = _as_list(qr.get("documents") or [])
 
         items = []
@@ -223,7 +228,7 @@ workflow:
         category_id: "{{ validate_inputs.category_id }}"
         lang: "{{ validate_inputs.lang }}"
         limit_was_clamped: "{{ validate_inputs.limit_was_clamped }}"
-        content_result: "{{ fetch_content.result }}"
+        content_result: "{{ fetch_content | default({}) }}"
       code: |
         import json
 
@@ -253,7 +258,9 @@ workflow:
         # the cleaned document path, so the join below is a direct lookup rather than a
         # scan.  A 404 comes back as found=false inside _ok, so a missing translation
         # is data and does not fail the batch.
-        cr = _as_dict(content_result)
+        _env = _as_dict(content_result)
+        _d1 = _as_dict(_env.get("data")) if isinstance(_env.get("data"), dict) else _env
+        cr = _as_dict(_d1.get("data")) if isinstance(_d1.get("data"), dict) else _d1
         raw_by_path = _as_dict(cr.get("by_path"))
         if not raw_by_path:
             # Older connector revisions may only populate `results`.
