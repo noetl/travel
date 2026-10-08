@@ -56,7 +56,7 @@ check("`start` step exists", "start" in steps, True)
 # ------------------------------------------------------------- build_documents
 print("\nbuild_documents")
 r = run("build_documents", items=fx["items"], categories=fx["categories"],
-        collection_root="catalog")
+        collection_root="catalog/v1")
 paths = set(r["paths"])
 check("document count matches the path set", r["document_count"], len(paths))
 check("items counted", r["item_count"], 4)
@@ -65,49 +65,49 @@ check("categories counted", r["category_count"], 4)
 # 4 category docs + 7 category content docs (2+2+2+1)
 # 4 item docs + 7 item content docs (3+1+2+1) + 1 image + 1 unit
 check("every expected document is produced", r["document_count"], 4 + 7 + 4 + 7 + 1 + 1)
-check("an item doc path", "catalog/items/itm_malaga_beach" in paths, True)
-check("a localized content path", "catalog/items/itm_malaga_beach/content/ka" in paths, True)
-check("an image subcollection path", "catalog/items/itm_malaga_beach/images/img_1" in paths, True)
-check("a unit subcollection path", "catalog/items/itm_malaga_beach/units/unit_7" in paths, True)
-check("a category content path", "catalog/categories/cat_beach/content/de" in paths, True)
+check("an item doc path", "catalog/v1/items/itm_malaga_beach" in paths, True)
+check("a localized content path", "catalog/v1/items/itm_malaga_beach/content/ka" in paths, True)
+check("an image subcollection path", "catalog/v1/items/itm_malaga_beach/images/img_1" in paths, True)
+check("a unit subcollection path", "catalog/v1/items/itm_malaga_beach/units/unit_7" in paths, True)
+check("a category content path", "catalog/v1/categories/cat_beach/content/de" in paths, True)
 
 docs = {d["path"]: d["doc"] for d in r["set_docs"]}
 check("batch items use the `doc` key", all("doc" in d for d in r["set_docs"]), True)
 
 # ---------------------------------------------- THE ancestor closure assertion
 print("\nthe hierarchy closure — the one transformation Firestore cannot do at read time")
-leaf = docs["catalog/categories/cat_beach_family"]
+leaf = docs["catalog/v1/categories/cat_beach_family"]
 check("leaf category's ancestors", leaf["ancestor_ids"], ["cat_beach", "cat_root"])
 check("  and its depth", leaf["depth"], 2)
-check("root has no ancestors", docs["catalog/categories/cat_root"]["ancestor_ids"], [])
+check("root has no ancestors", docs["catalog/v1/categories/cat_root"]["ancestor_ids"], [])
 
-itm = docs["catalog/items/itm_malaga_beach"]
+itm = docs["catalog/v1/items/itm_malaga_beach"]
 check("an item on the LEAF carries the whole closure",
       itm["category_ids"], ["cat_beach", "cat_beach_family", "cat_root"])
 check("  its primary category is the DIRECT one, not an ancestor",
       itm["primary_category_id"], "cat_beach_family")
 check("an item on a mid node closes to the root",
-      docs["catalog/items/itm_malaga_tour"]["category_ids"], ["cat_beach", "cat_root"])
+      docs["catalog/v1/items/itm_malaga_tour"]["category_ids"], ["cat_beach", "cat_root"])
 check("a city item does NOT gain the beach ancestors",
-      docs["catalog/items/itm_madrid_flat"]["category_ids"], ["cat_city", "cat_root"])
+      docs["catalog/v1/items/itm_madrid_flat"]["category_ids"], ["cat_city", "cat_root"])
 
 # available_langs is what lets the read path pick a language without a second query
 check("available_langs is denormalised onto the item",
       itm["available_langs"], ["de", "en", "ka"])
 check("  and a single-language item reports just the one",
-      docs["catalog/items/itm_malaga_tour"]["available_langs"], ["en"])
+      docs["catalog/v1/items/itm_malaga_tour"]["available_langs"], ["en"])
 check("content documents carry their own lang_code",
-      docs["catalog/items/itm_malaga_beach/content/de"]["lang_code"], "de")
+      docs["catalog/v1/items/itm_malaga_beach/content/de"]["lang_code"], "de")
 check("the EAV attrs map survives", itm["attrs"]["star_rating"], 4)
 check("a draft item is still written, with its status",
-      docs["catalog/items/itm_draft_hidden"]["status"], "draft")
+      docs["catalog/v1/items/itm_draft_hidden"]["status"], "draft")
 
 # -------------------------------------------------------------------- refusals
 print("\nrefusals")
 for bad, why in (({"items": [{"item_type": "lodging"}], "categories": []}, "item with no item_id"),
                  ({"items": [], "categories": [{"parent_id": None}]}, "category with no category_id")):
     try:
-        run("build_documents", collection_root="catalog", **bad)
+        run("build_documents", collection_root="catalog/v1", **bad)
         check(why + " is refused", False, True)
     except ValueError:
         check(why + " is refused", True, True)
@@ -115,7 +115,7 @@ for bad, why in (({"items": [{"item_type": "lodging"}], "categories": []}, "item
 # the 500-write batch limit must REFUSE, not truncate
 many = [{"item_id": "i%d" % i, "content": {"en": {"name": "x"}}} for i in range(300)]
 try:
-    run("build_documents", items=many, categories=[], collection_root="catalog")
+    run("build_documents", items=many, categories=[], collection_root="catalog/v1")
     check("over 500 documents is refused, not truncated", False, True)
 except ValueError as e:
     check("over 500 documents is refused, not truncated", "500" in str(e), True)
@@ -140,6 +140,25 @@ check("  and the shortfall is visible (control)", rep2["written_documents"], 3)
 empty = run("report", expected=r["document_count"], paths=[], item_count=0, category_count=0,
             write_result={})
 check("an empty envelope is NOT agreement (control)", empty["counts_agree"], False)
+
+print("\nFirestore path arity — the defect a live write found and no fixture had")
+# ⚠⚠ Firestore paths ALTERNATE collection/document. A document path therefore has an
+# EVEN number of segments and a collection path an ODD one. Every document this playbook
+# emits must be even, or Firestore refuses it with
+#   Document name "..." lacks "/" at index N / INVALID_ARGUMENT
+# and refuses the WHOLE batch. Measured on execution 366376937288900608 against the live
+# project: all 24 writes rejected, because the root was one segment (`catalog`) and
+# `catalog/items/itm_x` is 3 segments — a COLLECTION reference, not a document.
+#
+# No fixture caught it: the step bodies build strings, and a string is a string. Only an
+# actual write to Firestore could. This check is the cheap stand-in.
+for d in r["set_docs"]:
+    segs = d["path"].split("/")
+    check("doc path %s is even-arity" % d["path"][:34],
+          len(segs) % 2 == 0, True)
+# and the collection the read path queries must be ODD
+for coll in ("catalog/v1/items", "catalog/v1/categories"):
+    check("collection %s is odd-arity" % coll, len(coll.split("/")) % 2 == 1, True)
 
 print("\n%d checks, %d failed" % (checks, len(failures)))
 if failures:

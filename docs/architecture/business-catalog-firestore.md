@@ -52,7 +52,7 @@ Called like any other child playbook:
       method: tools/call
       tool: get_doc
       arguments:
-        path: "catalog/items/{{ workload.item_id }}"
+        path: "catalog/v1/items/{{ workload.item_id }}"
 ```
 
 ⚠ **`kind: agent` is not a tool kind.** The server's `ToolKind` enum has 25 variants
@@ -99,8 +99,34 @@ construct below is restated as a Firestore one.
 
 ## Collections
 
+⚠⚠ **The root is `catalog/v1`, two segments, not `catalog`.** Firestore paths
+**alternate** collection/document, so a **document** path has an **even** number of
+segments and a **collection** path an **odd** one. With a one-segment root both shapes are
+illegal:
+
+| path | segments | what Firestore sees |
+| :-- | --: | :-- |
+| `catalog/items/itm_x` | 3 | a **collection** reference — rejected as a document |
+| `catalog/items` | 2 | a **document** path — rejected as a collection |
+| `catalog/v1/items/itm_x` | 4 | ✅ a document |
+| `catalog/v1/items` | 3 | ✅ a collection |
+
+This page specified the one-segment form, and the first live write rejected **all 24
+documents** with
+
 ```text
-catalog/
+Document name ".../documents/catalog/categories/cat_root" lacks "/" at index 90
+INVALID_ARGUMENT
+```
+
+Nothing caught it earlier because no fixture can: the step bodies build strings, and a
+string is a string. Only a write to Firestore could. `scripts/business_catalog_upsert_test.py`
+now asserts the arity of every emitted path as the cheap stand-in. The intermediate `v1`
+document need not exist — Firestore allows an implicit parent — and it gives the namespace
+a version segment for free.
+
+```text
+catalog/v1/
   items/{item_id}                      ← the polymorphic entity
     content/{lang_code}                ← localized text, one doc per language
     images/{image_id}
@@ -118,7 +144,7 @@ catalog/
     history/{effective_at}
 ```
 
-Everything sits under a single `catalog/` ancestor so the business catalog never
+Everything sits under a single `catalog/v1/` ancestor so the business catalog never
 collides with the planner's conversational state (`chat_threads/`, `users/` — see
 [data-model.md](data-model.md)).
 
@@ -276,7 +302,7 @@ the second reason `item_count` is advisory.
       method: tools/call
       tool: query_collection
       arguments:
-        collection_path: catalog/items
+        collection_path: catalog/v1/items
         where:
           - { field: status,       op: "=",              value: published }
           - { field: category_ids, op: array-contains,   value: "{{ workload.category_id }}" }

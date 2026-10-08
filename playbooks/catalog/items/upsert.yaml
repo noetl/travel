@@ -37,7 +37,19 @@ workload:
   # No credential alias, nothing in the keychain on this path.
   gcp_project: shastaratech-noetl-prod
   firestore_database: "(default)"
-  collection_root: catalog
+  # ⚠⚠ `catalog/v1`, NOT `catalog`. Firestore paths must ALTERNATE
+  # collection/document, so a document path has an EVEN number of segments and a
+  # collection path an ODD one. With a one-segment root:
+  #   catalog/items/itm_x  -> 3 segments = a COLLECTION reference, rejected as a document
+  #   catalog/items        -> 2 segments = a DOCUMENT path, rejected as a collection
+  # Firestore says so explicitly:
+  #   Document name ".../documents/catalog/categories/cat_root" lacks "/" at index 90
+  #   INVALID_ARGUMENT
+  # measured on execution 366376937288900608 against the live project, where every one of
+  # the 24 writes was refused. A two-segment root makes both shapes legal:
+  #   catalog/v1/items/itm_x -> 4 = document, catalog/v1/items -> 3 = collection.
+  # The intermediate `v1` document need not exist; Firestore allows an implicit parent.
+  collection_root: catalog/v1
   # The caller supplies these. Both may be empty; an empty upsert is a no-op, not an error.
   items: []
   categories: []
