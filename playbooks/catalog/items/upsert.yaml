@@ -1,0 +1,290 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: catalog_items_upsert
+  path: travel/playbooks/catalog/items/upsert
+  description: |
+    BUSINESS catalog WRITE path: upsert items, their localized content, their images,
+    and the category hierarchy, into Firestore in ONE batch_write dispatch.
+
+    Companion to travel/playbooks/catalog/items/list. See
+    docs/architecture/business-catalog-firestore.md for the model.
+
+    ⚠ This is BUSINESS data. It lives in Firestore and never in EHDB — EHDB holds NoETL's
+    own objects, including this playbook. The internal catalog holds the playbook that
+    writes the business data; it never holds the business data.
+
+    Why one dispatch: Firestore commits at most 500 writes per batch, and each child
+    playbook dispatch costs an orchestration round trip measured at ~11s wall clock for
+    369ms of work. The item document, every language's content document, every image and
+    every category go in a single `batch_write`.
+
+    Shapes that bite, both verified against the registered connector v11 rather than
+    assumed:
+      * `set_doc` takes `data`; `batch_set_docs`/`batch_write` items take `doc`. The
+        implementation reads `item.get("doc", item.get("data"))` so both work, but the
+        documented key for a batch is `doc`.
+      * A child playbook's result is read by the BARE step name and needs
+        `return_result` + `result_step` + `timeout`, or the dispatch is async and the next
+        step runs before anything was written.
+  version: "1.0"
+  agent: false
+  exposed_in_ui: false
+  tags: [catalog, business-catalog, firestore, items, write, travel]
+
+workload:
+  # Workload Identity / ADC — the MCP child mints the worker's own service-account token.
+  # No credential alias, nothing in the keychain on this path.
+  gcp_project: shastaratech-noetl-prod
+  firestore_database: "(default)"
+  collection_root: catalog
+  # The caller supplies these. Both may be empty; an empty upsert is a no-op, not an error.
+  items: []
+  categories: []
+
+workflow:
+  - step: start
+    desc: Entry point required by the runtime; routes to the first real step
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: build_documents
+
+  - step: build_documents
+    desc: Flatten the domain input into Firestore document paths, hierarchy closures included
+    tool:
+      kind: python
+      input:
+        items: "{{ workload.items }}"
+        categories: "{{ workload.categories }}"
+        collection_root: "{{ workload.collection_root }}"
+      code: |
+        import json
+
+        def _as_list(v):
+            if isinstance(v, list):
+                return v
+            if isinstance(v, str):
+                try:
+                    p = json.loads(v)
+                    return p if isinstance(p, list) else []
+                except Exception:
+                    return []
+            return []
+
+        def _as_dict(v):
+            if isinstance(v, dict):
+                return v
+            if isinstance(v, str):
+                try:
+                    p = json.loads(v)
+                    return p if isinstance(p, dict) else {}
+                except Exception:
+                    return {}
+            return {}
+
+        root = str(collection_root or "catalog").strip("/")
+        cats = [_as_dict(c) for c in _as_list(categories)]
+        itms = [_as_dict(i) for i in _as_list(items)]
+
+        # ---- the hierarchy closure -------------------------------------------------
+        # Firestore has no recursive query, so "everything under Beach" cannot be a
+        # traversal. The whole ancestor path is materialised at WRITE time and the read
+        # becomes one array-contains. This is the single most important transformation in
+        # the model, and it belongs here because this is the only place that knows the
+        # tree.
+        by_id = {str(c.get("category_id")): c for c in cats if c.get("category_id")}
+        def ancestors(cid, seen=None):
+            seen = seen or set()
+            out = []
+            cur = by_id.get(cid, {}).get("parent_id")
+            while cur and cur not in seen:
+                seen.add(cur)
+                out.append(cur)
+                cur = by_id.get(cur, {}).get("parent_id")
+            return out
+
+        set_docs = []
+        written = []
+
+        for c in cats:
+            cid = str(c.get("category_id") or "").strip()
+            if not cid:
+                raise ValueError("every category needs a category_id")
+            anc = ancestors(cid)
+            path = "%s/categories/%s" % (root, cid)
+            doc = {
+                "category_type_id": c.get("category_type_id"),
+                "parent_id": c.get("parent_id"),
+                "ancestor_ids": anc,
+                "depth": len(anc),
+                "sort_order": int(c.get("sort_order") or 0),
+                "status": c.get("status") or "published",
+            }
+            set_docs.append({"path": path, "doc": doc})
+            written.append(path)
+            for lang, content in _as_dict(c.get("content")).items():
+                p = "%s/content/%s" % (path, lang)
+                set_docs.append({"path": p, "doc": dict(_as_dict(content), lang_code=lang)})
+                written.append(p)
+
+        for i in itms:
+            iid = str(i.get("item_id") or "").strip()
+            if not iid:
+                raise ValueError("every item needs an item_id")
+            content = _as_dict(i.get("content"))
+            langs = sorted(content.keys())
+            direct = [str(x) for x in _as_list(i.get("category_ids"))]
+            # The item's closure is its direct categories PLUS every ancestor of each, so
+            # one array-contains answers a subtree query. Without this the read would have
+            # to walk the tree, which Firestore cannot do.
+            closure = sorted({c for d in direct for c in ([d] + ancestors(d))})
+            path = "%s/items/%s" % (root, iid)
+            doc = {
+                "item_type": i.get("item_type") or "lodging",
+                "status": i.get("status") or "published",
+                "provider": _as_dict(i.get("provider")),
+                "category_ids": closure,
+                "primary_category_id": direct[0] if direct else None,
+                "attrs": _as_dict(i.get("attrs")),
+                "geo": _as_dict(i.get("geo")),
+                "price_from": _as_dict(i.get("price_from")),
+                "bundle": i.get("bundle"),
+                "default_lang": i.get("default_lang") or (langs[0] if langs else "en"),
+                # Denormalised so the read path can decide the language fallback without
+                # a second lookup — the connector has no collection-group query, so
+                # "which languages does this item have" is not otherwise answerable.
+                "available_langs": langs,
+                "sort_order": int(i.get("sort_order") or 0),
+            }
+            set_docs.append({"path": path, "doc": doc})
+            written.append(path)
+            for lang, c in content.items():
+                p = "%s/content/%s" % (path, lang)
+                set_docs.append({"path": p, "doc": dict(_as_dict(c), lang_code=lang)})
+                written.append(p)
+            for img in _as_list(i.get("images")):
+                im = _as_dict(img)
+                imid = str(im.get("image_id") or "").strip()
+                if not imid:
+                    continue
+                p = "%s/images/%s" % (path, imid)
+                set_docs.append({"path": p, "doc": im})
+                written.append(p)
+            for unit in _as_list(i.get("units")):
+                u = _as_dict(unit)
+                uid = str(u.get("unit_id") or "").strip()
+                if not uid:
+                    continue
+                p = "%s/units/%s" % (path, uid)
+                set_docs.append({"path": p, "doc": u})
+                written.append(p)
+
+        # ⚠ Firestore commits at most 500 writes per batch. Refuse rather than silently
+        # truncate: a partial write that reports success is the shape this whole program
+        # keeps finding.
+        if len(set_docs) > 500:
+            raise ValueError(
+                "%d documents exceeds Firestore's 500-write batch limit; page the upsert"
+                % len(set_docs))
+
+        result = {
+            "set_docs": set_docs,
+            # The denominator, so a caller can tell a complete write from a short one.
+            "document_count": len(set_docs),
+            "paths": sorted(written),
+            "item_count": len(itms),
+            "category_count": len(cats),
+        }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: persist
+
+  - step: persist
+    desc: One batch_write for every document
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/firestore
+      # Without these three the dispatch is ASYNC and this step returns
+      # {"status":"started"} while nothing has been written yet.
+      return_result: true
+      result_step: firestore_dispatch
+      timeout: 120
+      payload:
+        method: tools/call
+        tool: batch_write
+        gcp_project: "{{ workload.gcp_project }}"
+        firestore_database: "{{ workload.firestore_database }}"
+        arguments:
+          set_docs: "{{ build_documents.set_docs }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: report
+
+  - step: report
+    desc: Report what was written, and whether the provider agreed with the count
+    tool:
+      kind: python
+      input:
+        expected: "{{ build_documents.document_count }}"
+        paths: "{{ build_documents.paths }}"
+        item_count: "{{ build_documents.item_count }}"
+        category_count: "{{ build_documents.category_count }}"
+        write_result: "{{ persist | default({}) }}"
+      code: |
+        import json
+
+        def _as_dict(v):
+            if isinstance(v, dict):
+                return v
+            if isinstance(v, str):
+                try:
+                    p = json.loads(v)
+                    return p if isinstance(p, dict) else {}
+                except Exception:
+                    return {}
+            return {}
+
+        def _as_list(v):
+            if isinstance(v, list):
+                return v
+            if isinstance(v, str):
+                try:
+                    p = json.loads(v)
+                    return p if isinstance(p, list) else []
+                except Exception:
+                    return []
+            return []
+
+        # A child playbook's output arrives under the BARE step name as an MCP envelope,
+        # and the dispatch can wrap it again, so `data` is unwrapped twice defensively.
+        env = _as_dict(write_result)
+        d1 = _as_dict(env.get("data")) if isinstance(env.get("data"), dict) else env
+        inner = _as_dict(d1.get("data")) if isinstance(d1.get("data"), dict) else d1
+
+        sets = _as_dict(inner.get("set_docs")) or inner
+        reported = sets.get("succeeded")
+        if reported is None:
+            reported = inner.get("succeeded")
+
+        exp = int(expected or 0)
+        try:
+            got = int(reported)
+        except (TypeError, ValueError):
+            got = None
+
+        result = {
+            "expected_documents": exp,
+            "written_documents": got,
+            # ⚠ Compared, not just reported. A write that persisted 3 of 40 documents
+            # returns a success envelope, and the count is the only thing that says so.
+            "counts_agree": (got == exp) if got is not None else False,
+            "items": int(item_count or 0),
+            "categories": int(category_count or 0),
+            "paths": _as_list(paths),
+            "provider_error": env.get("isError") or inner.get("error"),
+        }

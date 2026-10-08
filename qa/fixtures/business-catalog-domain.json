@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "An adiona-SHAPED domain fixture for the business catalog round-trip.",
+    "Structural, not schematic: one polymorphic entity with a type discriminator, an EAV",
+    "attrs map, a self-referencing taxonomy, localized content split out by language, and",
+    "M:N category membership. The adiona TABLES were never the target.",
+    "",
+    "The hierarchy is deliberately 3 deep (root -> beach -> beach_family) so the ancestor",
+    "closure has something to close over: an item on the leaf must be findable by a query",
+    "for the ROOT, which a single array-contains can only do if the closure was",
+    "materialised at write time."
+  ],
+  "categories": [
+    { "category_id": "cat_root",         "parent_id": null,        "category_type_id": "ct_destination", "sort_order": 0,
+      "content": { "en": { "name": "All stays" },            "de": { "name": "Alle Unterkünfte" } } },
+    { "category_id": "cat_beach",        "parent_id": "cat_root",  "category_type_id": "ct_destination", "sort_order": 10,
+      "content": { "en": { "name": "Beach" },                "de": { "name": "Strand" } } },
+    { "category_id": "cat_beach_family", "parent_id": "cat_beach", "category_type_id": "ct_destination", "sort_order": 20,
+      "content": { "en": { "name": "Family beach" },         "de": { "name": "Familienstrand" } } },
+    { "category_id": "cat_city",         "parent_id": "cat_root",  "category_type_id": "ct_destination", "sort_order": 30,
+      "content": { "en": { "name": "City" } } }
+  ],
+  "items": [
+    { "item_id": "itm_malaga_beach", "item_type": "lodging", "status": "published", "sort_order": 10,
+      "category_ids": ["cat_beach_family"],
+      "default_lang": "en",
+      "attrs": { "star_rating": 4, "has_pool": true, "max_occupancy": 6 },
+      "geo": { "lat": 36.71, "lng": -4.42, "country": "ES", "city": "Malaga" },
+      "price_from": { "amount": 11500, "currency": "EUR" },
+      "provider": { "source": "hotelbeds", "external_id": "TEST-12345" },
+      "content": {
+        "en": { "name": "Malaga Beach Hotel",   "summary": "By the sea" },
+        "de": { "name": "Strandhotel Malaga",   "summary": "Am Meer" },
+        "ka": { "name": "მალაგას სანაპირო",      "summary": "ზღვასთან" }
+      },
+      "images": [ { "image_id": "img_1", "url": "https://example.invalid/1.jpg", "sort_order": 0 } ],
+      "units":  [ { "unit_id": "unit_7", "unit_type": "double", "max_occupancy": 2 } ] },
+
+    { "item_id": "itm_malaga_tour", "item_type": "tour", "status": "published", "sort_order": 20,
+      "category_ids": ["cat_beach"],
+      "default_lang": "en",
+      "attrs": { "duration_hours": 3, "has_pool": false },
+      "geo": { "lat": 36.72, "lng": -4.41, "country": "ES", "city": "Malaga" },
+      "price_from": { "amount": 4500, "currency": "EUR" },
+      "content": { "en": { "name": "Old town walk", "summary": "Three hours" } } },
+
+    { "item_id": "itm_madrid_flat", "item_type": "lodging", "status": "published", "sort_order": 30,
+      "category_ids": ["cat_city"],
+      "default_lang": "en",
+      "attrs": { "star_rating": 3, "has_pool": false },
+      "geo": { "lat": 40.41, "lng": -3.70, "country": "ES", "city": "Madrid" },
+      "price_from": { "amount": 8000, "currency": "EUR" },
+      "content": { "en": { "name": "Central flat", "summary": "Madrid" },
+                   "de": { "name": "Zentrale Wohnung", "summary": "Madrid" } } },
+
+    { "item_id": "itm_draft_hidden", "item_type": "lodging", "status": "draft", "sort_order": 40,
+      "category_ids": ["cat_beach_family"],
+      "default_lang": "en",
+      "attrs": { "has_pool": true },
+      "content": { "en": { "name": "Not published yet" } } }
+  ]
+}
