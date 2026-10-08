@@ -96,17 +96,17 @@ for name, s in steps.items():
 # ------------------------------------------------------------- validate_inputs
 print("\nvalidate_inputs")
 r = run("validate_inputs", category_id=" cat_beach ", lang="", limit="100",
-        collection_root="catalog")
+        collection_root="catalog/v1")
 check("trims the category", r["category_id"], "cat_beach")
 check("defaults a blank language to en", r["lang"], "en")
-check("builds the items collection", r["items_collection"], "catalog/items")
+check("builds the items collection", r["items_collection"], "catalog/v1/items")
 
-r = run("validate_inputs", category_id="c", lang="de", limit=9999, collection_root="catalog")
+r = run("validate_inputs", category_id="c", lang="de", limit=9999, collection_root="catalog/v1")
 check("clamps limit to the connector's cap", r["limit"], 500)
 check("and says that it clamped", r["limit_was_clamped"], True)
 
 try:
-    run("validate_inputs", category_id="   ", lang="en", limit=10, collection_root="catalog")
+    run("validate_inputs", category_id="   ", lang="en", limit=10, collection_root="catalog/v1")
     check("empty category raises", False, True)
 except ValueError:
     check("empty category raises", True, True)
@@ -120,19 +120,19 @@ def envelope(data):
 
 
 QUERY_REPLY = envelope({
-    "collection_path": "catalog/items",
+    "collection_path": "catalog/v1/items",
     "count": 3,
     "documents": [
-        {"path": "catalog/items/itm_de", "data": {
+        {"path": "catalog/v1/items/itm_de", "data": {
             "item_type": "lodging", "available_langs": ["en", "de"], "default_lang": "en",
             "attrs": {"has_pool": True}, "price_from": {"amount": 11500, "currency": "EUR"}}},
-        {"path": "catalog/items/itm_en_only", "data": {
+        {"path": "catalog/v1/items/itm_en_only", "data": {
             "item_type": "tour", "available_langs": ["en"], "default_lang": "en", "attrs": {}}},
-        {"path": "catalog/items/itm_no_langs", "data": {
+        {"path": "catalog/v1/items/itm_no_langs", "data": {
             "item_type": "tour", "default_lang": "ka", "attrs": {}}},
     ],
 })
-rp = run("resolve_content_paths", lang="de", items_collection="catalog/items",
+rp = run("resolve_content_paths", lang="de", items_collection="catalog/v1/items",
          query_result=QUERY_REPLY)
 check("reads all three documents", rp["item_count"], 3)
 check("echoes the returned count", rp["returned_count"], 3)
@@ -144,22 +144,22 @@ check("  and IS marked a fallback", by_id["itm_en_only"]["lang_is_fallback"], Tr
 check("item with no available_langs uses its default", by_id["itm_no_langs"]["content_lang"], "ka")
 check("one content path per item", len(rp["content_paths"]), 3)
 check("path is parent/content/lang", rp["content_paths"][0]["path"],
-      "catalog/items/itm_de/content/de")
+      "catalog/v1/items/itm_de/content/de")
 
 # ------------------------------------------------------------------- assemble
 print("\nassemble (batch_get_docs shape: `by_path`, NOT `documents`)")
 BATCH_REPLY = {
     "count": 3, "succeeded": 3, "failed": 0, "errors": [],
     "results": [
-        {"index": 0, "path": "catalog/items/itm_de/content/de", "found": True,
-         "document": {"path": "catalog/items/itm_de/content/de",
+        {"index": 0, "path": "catalog/v1/items/itm_de/content/de", "found": True,
+         "document": {"path": "catalog/v1/items/itm_de/content/de",
                       "data": {"name": "Strandhotel", "summary": "am Meer"}}},
-        {"index": 1, "path": "catalog/items/itm_en_only/content/en", "found": True,
-         "document": {"path": "catalog/items/itm_en_only/content/en",
+        {"index": 1, "path": "catalog/v1/items/itm_en_only/content/en", "found": True,
+         "document": {"path": "catalog/v1/items/itm_en_only/content/en",
                       "data": {"name": "City Tour", "summary": "walk"}}},
         # A language that was never translated. 404 -> found=false inside _ok, so the
         # batch SUCCEEDS and the absence is data, not an error.
-        {"index": 2, "path": "catalog/items/itm_no_langs/content/ka", "found": False,
+        {"index": 2, "path": "catalog/v1/items/itm_no_langs/content/ka", "found": False,
          "document": None},
     ],
 }
@@ -167,7 +167,7 @@ BATCH_REPLY["by_path"] = {r["path"]: r for r in BATCH_REPLY["results"]}
 BATCH_REPLY = envelope(BATCH_REPLY)
 
 asm = run("assemble", items=rp["items"], item_count=rp["item_count"],
-          items_collection="catalog/items", category_id="cat_beach", lang="de",
+          items_collection="catalog/v1/items", category_id="cat_beach", lang="de",
           limit_was_clamped=False, content_result=BATCH_REPLY)
 names = {i["item_id"]: i["name"] for i in asm["items"]}
 check("joins the de translation", names["itm_de"], "Strandhotel")
@@ -180,7 +180,7 @@ check("publishes the queried denominator", asm["counts"]["queried"], 3)
 
 # a connector revision that only fills `results` must still work
 only_results = envelope({k: v for k, v in BATCH_REPLY["data"].items() if k != "by_path"})
-asm2 = run("assemble", items=rp["items"], item_count=3, items_collection="catalog/items",
+asm2 = run("assemble", items=rp["items"], item_count=3, items_collection="catalog/v1/items",
            category_id="c", lang="de", limit_was_clamped=False, content_result=only_results)
 check("falls back to `results` when by_path is absent",
       sum(1 for i in asm2["items"] if i["name"]), 2)
@@ -192,7 +192,7 @@ check("falls back to `results` when by_path is absent",
 # check above is decorative.
 print("\nRED CONTROL -- the wrong response key must break the join")
 wrong = envelope({"documents": BATCH_REPLY["data"]["results"]})
-asm3 = run("assemble", items=rp["items"], item_count=3, items_collection="catalog/items",
+asm3 = run("assemble", items=rp["items"], item_count=3, items_collection="catalog/v1/items",
            category_id="c", lang="de", limit_was_clamped=False, content_result=wrong)
 joined = sum(1 for i in asm3["items"] if i["name"])
 check("wrong key joins NOTHING (control)", joined, 0)
