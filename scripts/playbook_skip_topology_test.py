@@ -83,7 +83,11 @@ if __name__ == "__main__":
     for f in files:
         try:
             doc = yaml.safe_load(open(f))
-        except Exception:
+        except Exception as exc:
+            # Never skip silently: an unparseable playbook would otherwise shrink the
+            # denominator and read as a clean pass.
+            bad += 1
+            print(f"FAIL {f}: does not parse: {str(exc).splitlines()[0]}")
             continue
         if not isinstance(doc, dict) or "workflow" not in doc:
             continue
