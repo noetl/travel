@@ -203,11 +203,31 @@ workflow:
         # read-only arc must precede the save arc. Reversed, `validate_input.ok` matches
         # first and every read still writes — the exact defect this fixes, reintroduced by
         # an edit that looks harmless.
+        # ⚠ NOT `load_profile` directly. A step named in this arc set is marked SKIPPED
+        # when a sibling wins, and a skipped step never runs later (orchestrate-core:
+        # `is_step_done` counts Skipped; a later arc to a done step is dropped). With
+        # `load_profile` here, every SAVE skipped it at this branch and then stranded at
+        # `save_profile -> load_profile`. `begin_read` is the read branch's own entry,
+        # exactly as `skip_suggestions` is for build_response.
+        # scripts/playbook_skip_topology_test.py enforces this for every playbook.
         - when: "{{ validate_input.ok and validate_input.read_only }}"
-          step: load_profile
+          step: begin_read
         - when: "{{ validate_input.ok }}"
           step: save_profile
         - step: reject_input
+
+  - step: begin_read
+    desc: |
+      Entry of the read-only branch. Exists only so `load_profile` is not an
+      alternative in validate_input's exclusive arc set (see the arc comment
+      there): both branches converge on load_profile, so neither may name it
+      as a sibling.
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: load_profile
 
   - step: reject_input
     desc: |
