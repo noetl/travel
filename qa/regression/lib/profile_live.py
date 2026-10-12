@@ -142,6 +142,20 @@ def run_merge_case(case, call: Transport, playbook: str, uid: str,
         case.block(f"refusing to write a non-synthetic uid {uid!r}: must start with qa- or test-")
         return
 
+    # ⚠ PREFLIGHT, read-only. The gateway binds `uid` to the SESSION's identity (it does not
+    # trust the request), so with a token for a real account every write below would land on
+    # that account's profile, not on the synthetic uid asked for. Read first and compare: if
+    # the uid the playbook actually ran as differs, stop before writing anything. The fix is a
+    # dedicated QA Auth0 account whose subject IS the test_user_id.
+    preflight = run_profile(call, playbook, uid, {}, True, **run_kw)
+    ran_as = (preflight["payload"] or {}).get("uid")
+    if ran_as != uid:
+        case.block(f"the gateway ran the profile playbook as {ran_as!r}, not the requested {uid!r} "
+                   "(identity is bound to the session); refusing to write. Use a QA account whose "
+                   "Auth0 subject is test_user_id.")
+        case.add_evidence(preflight_execution_id=preflight["execution_id"])
+        return
+
     runs = {}
     for label, profile, read_only in (("write_a", {a_key: a_value}, False),
                                       ("write_b", {b_key: b_value}, False),

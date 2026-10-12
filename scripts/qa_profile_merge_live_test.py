@@ -97,7 +97,7 @@ check("it never touches the non-existent /api/profile", all("/api/profile" not i
 check("it polled past non-terminal statuses", sum(1 for m, _ in gw.calls if m == "GET") > 3)
 check("the document it wrote is users/{uid}, not users/{uid}/profile",
       list(gw.store) == ["users/qa-regression-user-0001"])
-check("three executions: write A, write B, read", len(gw.executions) == 3)
+check("four executions: preflight read, write A, write B, read", len(gw.executions) == 4)
 
 print("live tier against the regressions it exists for")
 case = run(FakeGateway("replace"))
@@ -108,6 +108,20 @@ check("a login read that WIPES the document fails the case", case.verdict() == "
 check("...on an empty read-back", "read_back_returned_a_document" in case.result()["failed_assertions"])
 
 print("safety")
+class BindingGateway(FakeGateway):
+    """A gateway that binds identity to its session, as noetl/gateway now does."""
+    def __call__(self, method, path, body=None):
+        if method == "POST" and path == "/graphql":
+            body["variables"]["vars"]["uid"] = "auth0|the-token-owner"
+        return super().__call__(method, path, body)
+
+
+gw = BindingGateway("correct")
+case = run(gw)
+check("a gateway that binds uid to the session BLOCKS the case", case.verdict() == "blocked")
+check("...before any write: nothing stored", gw.store == {} or all(v == {} for v in gw.store.values()))
+check("...and only the read-only preflight ran", len(gw.executions) == 1)
+
 gw = FakeGateway("correct")
 case = run(gw, uid="auth0|real-person")
 check("a non-synthetic uid is refused before any call", case.verdict() == "blocked" and gw.calls == [])
