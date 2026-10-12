@@ -84,7 +84,7 @@ a Firestore `PATCH` with `updateMask.fieldPaths` = **the top-level keys of
   it as a string has the same effect. Before `read_only` routing (noetl/travel#133),
   the login read sent `profile: {}` down `save_profile`. **On any registered
   version without that routing, every login wipes the profile.** This is
-  data loss, contrary to the note in #133 and in `profile_read_only_test.py`.
+  data loss, contrary to the note in [#133](https://github.com/noetl/travel/pull/133) and in `profile_read_only_test.py`.
   The empty-merge case must be fixed in the provider: an empty merge should be a
   no-op.
 
@@ -113,8 +113,8 @@ Read `createTime`/`updateTime` alongside `fields`. Here's how to interpret them:
 
 | what you see | meaning |
 | :-- | :-- |
-| 404 | the user never saved and never logged in on a pre-#133 version |
-| document with **no `fields`** | the empty-merge wipe above (or a login on a pre-#133 version) |
+| 404 | the user never saved and never logged in on a pre-[#133](https://github.com/noetl/travel/pull/133) version |
+| document with **no `fields`** | the empty-merge wipe above (or a login on a pre-[#133](https://github.com/noetl/travel/pull/133) version) |
 | fields present, camel/snake disagree | a partial write from an older client; camelCase is what the SPA shows |
 
 ### 2. "My profile is empty after I log in"
@@ -126,7 +126,11 @@ Read `createTime`/`updateTime` alongside `fields`. Here's how to interpret them:
    `noetl --context gke-prod catalog get muno/playbooks/profile`. Check for
    `read_only` in `workload` and the `validate_input.read_only` arc *before*
    the save arc (`mode: exclusive` takes the first match, so reversed arcs make
-   every read write again).
+   every read write again). That arc must target `begin_read`, **not**
+   `load_profile`. The runtime marks a losing sibling SKIPPED and never runs
+   it later, so naming `load_profile` there strands every save at
+   `save_profile → load_profile` ([#145](https://github.com/noetl/travel/pull/145); `scripts/playbook_skip_topology_test.py`
+   checks every playbook for this).
 3. Inside the 1-hour window, the previous version is readable with a
    `readTime` parameter on the GET. After it, the data is gone; tell the user.
 
@@ -172,9 +176,11 @@ on prod.
 
 ### 6. Delete a user's profile (account deletion / data request)
 
-**There is no product path.** The playbook cannot delete, and the SPA's "reset
-profile" only *overwrites* with defaults, so the document survives. Until a
-delete flow exists, this is an owner-approved operator action:
+**There is no registered product path yet.** [#147](https://github.com/noetl/travel/pull/147) adds a `delete: true` branch
+(interlocked: empty `profile` required, unknown flag spellings do not delete,
+read-back confirms) and adiona/frontend adds the button. The SPA's current
+"reset profile" only *overwrites* with defaults, so the document survives.
+Until [#147](https://github.com/noetl/travel/pull/147) is registered, this is an owner-approved operator action:
 
 1. Get written approval naming the uid.
 2. Export the document first (procedure 1 → save the JSON). With PITR off, this
@@ -197,9 +203,10 @@ validator as `test/probe` and can be ignored.
 | gap | where | status |
 | :-- | :-- | :-- |
 | empty-data merge wipes the document | provider `set_doc` | open, must be fixed in noetl/ops |
-| no delete operation (frontend#59 asked for update **and** delete) | `profile.yaml` | open |
-| suggestions never run for SPA traffic | `profile.yaml` / SPA | open, product decision |
-| `qa/regression/cases/profile-merge.yaml` live mode calls `POST {gateway}/api/profile` with `users/{id}/profile`. Neither the endpoint nor the path exists, so it can only ever report `blocked` | QA suite | open, should call `executePlaybook` against `users/{uid}` |
+| every save strands at `save_profile → load_profile` | `profile.yaml` on main | fix in [#145](https://github.com/noetl/travel/pull/145) — hold [#133](https://github.com/noetl/travel/pull/133)'s registration |
+| no delete operation (frontend#59 asked for update **and** delete) | `profile.yaml` | [#147](https://github.com/noetl/travel/pull/147) (stacked on [#146](https://github.com/noetl/travel/pull/146)) |
+| suggestions never run for SPA traffic | `profile.yaml` / SPA | [#146](https://github.com/noetl/travel/pull/146) (plan from stored profile) + adiona/frontend#75 (send coordinates) |
+| `qa/regression/cases/profile-merge.yaml` live mode calls a non-existent endpoint and path, so it can only ever report `blocked` | QA suite | [#144](https://github.com/noetl/travel/pull/144) |
 | stale top-level keys can't be removed | merge semantics | by design; needs a delete-field write if it matters |
 
 ## Related
