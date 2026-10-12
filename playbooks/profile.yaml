@@ -82,14 +82,13 @@ metadata:
     now measured, not assumed. Distinct createTime/updateTime confirm two
     separate writes to one document.
 
-    KNOWN LIMITATION, deliberate. The suggestion guard reads the INPUT
-    profile, not the merged stored one. Saving a section that carries no
-    coordinates therefore skips suggestions even when the stored profile
-    already has a home city from an earlier save (run B above reported
-    `suggestions_error: "profile has no home_lat/home_lng"` while the store
-    held Lisbon's). The save is unaffected. Reading coordinates back from
-    `load_profile` instead would fix it and is the obvious next change if
-    suggestions on partial saves turn out to matter.
+    SUGGESTIONS PLAN FROM THE REQUEST, THEN THE STORE. `plan_suggestions`
+    (after load_profile) takes coordinates and interests from the request if
+    present, else from the stored document. The old guard read the INPUT only,
+    so a login read (`profile: {}`) never got suggestions and run B above
+    reported `suggestions_error` while the store held Lisbon's coordinates.
+    On a save the store is read AFTER the write, so the plan reflects what
+    was just saved (an explicit `home_lat: null` clears suggestions).
 
   # ⚠ REQUIRED. Without `version` the runtime records playbook_started and the
   # catalog snapshot and then issues NO command — the execution sits at 2
@@ -293,7 +292,65 @@ workflow:
     next:
       spec: { mode: exclusive }
       arcs:
-        - when: "{{ validate_input.has_coords }}"
+        - step: plan_suggestions
+
+  - step: plan_suggestions
+    desc: |
+      Decide WHERE to suggest from: the request's coordinates/interests if it
+      carries them, else what the stored profile holds.
+
+      Deciding on the input alone (the old guard) meant a login read, which
+      sends `profile: {}`, never got suggestions, and neither did a save of a
+      section without coordinates even when the store already had a home city.
+      load_profile has just read the document, so using it costs nothing.
+    tool:
+      kind: python
+      input:
+        validated: "{{ validate_input | default({}) }}"
+        loaded: "{{ load_profile | default({}) }}"
+      code: |
+        def _num(v):
+            # `bool` is an int subclass; True must not read as a latitude.
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+        def _stored(step_out):
+            # Same unwrap as build_response: MCP envelope -> get_doc data -> document.
+            if not isinstance(step_out, dict):
+                return {}
+            data = step_out.get("data") or step_out.get("structuredContent") or {}
+            doc = (data.get("document") or {}) if isinstance(data, dict) else {}
+            held = doc.get("fields") or doc.get("data") or {}
+            return held if isinstance(held, dict) else {}
+
+        _v = validated if isinstance(validated, dict) else {}
+        _in = _v.get("profile") if isinstance(_v.get("profile"), dict) else {}
+        _st = _stored(loaded)
+
+        lat, lng, source = None, None, None
+        for origin, prof in (("input", _in), ("stored", _st)):
+            if _num(prof.get("home_lat")) and _num(prof.get("home_lng")):
+                lat, lng, source = prof["home_lat"], prof["home_lng"], origin
+                break
+
+        interests = []
+        for prof in (_in, _st):
+            raw = prof.get("interests")
+            if isinstance(raw, list) and raw:
+                interests = [i for i in raw if isinstance(i, str)]
+                break
+
+        result = {
+            "has_coords": source is not None,
+            "lat": lat,
+            "lng": lng,
+            "coords_source": source,
+            "interests": interests,
+            "included_type": interests[0] if interests else "",
+        }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - when: "{{ plan_suggestions.has_coords }}"
           step: suggest_pois
         - step: skip_suggestions
 
@@ -331,13 +388,13 @@ workflow:
         method: tools/call
         tool: nearby_search
         arguments:
-          lat: "{{ validate_input.lat }}"
-          lng: "{{ validate_input.lng }}"
+          lat: "{{ plan_suggestions.lat }}"
+          lng: "{{ plan_suggestions.lng }}"
           # First interest becomes the Places `includedType`; the rest are
           # applied as a post-filter in build_response, because Places takes
           # one included type per call and a second round trip per interest
           # is not worth the latency on a settings page.
-          type: "{{ validate_input.interests[0] | default('') }}"
+          type: "{{ plan_suggestions.included_type | default('') }}"
           radius: "{{ workload.poi_radius_m }}"
           maxResultCount: "{{ workload.poi_limit }}"
       spec:
@@ -365,6 +422,7 @@ workflow:
       input:
         validated: "{{ validate_input | default({}) }}"
         loaded: "{{ load_profile | default({}) }}"
+        planned: "{{ plan_suggestions | default({}) }}"
         places_raw: "{{ suggest_pois | default({}) }}"
       code: |
         def _unwrap(step_out):
@@ -387,14 +445,15 @@ workflow:
 
         suggestions = []
         suggestions_error = None
-        if not _validated.get("has_coords"):
+        _planned = planned if isinstance(planned, dict) else {}
+        if not _planned.get("has_coords"):
             suggestions_error = "profile has no home_lat/home_lng; suggestions skipped"
         else:
             places = _unwrap(places_raw)
             items = places.get("items") or places.get("places") or []
             if not isinstance(items, list):
                 items = []
-            wanted = set(_validated.get("interests") or [])
+            wanted = set(_planned.get("interests") or [])
             for pl in items:
                 if not isinstance(pl, dict):
                     continue
