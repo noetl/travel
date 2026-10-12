@@ -4,41 +4,46 @@ metadata:
   name: muno_threads
   path: muno/playbooks/threads
   description: |
-    Manage a signed-in user's chat threads through their per-user index.
+    Manage the user<->thread relation: the threads a signed-in user takes part
+    in, and the users taking part in a thread.
 
-    The planner (muno/playbooks/itinerary-planner) keeps two records beside each
-    conversation, and never changes chat_threads/** itself:
+    The relation lives beside the conversations; chat_threads/** is never
+    modified:
 
-      users/{uid}/threads/{thread_id}   the user's pointer: thread_id, thread_path,
-                                        title, created_at_ms, last_activity_ms,
-                                        turn_count, archived
-      thread_owners/{thread_id}         who owns the thread: uid, created_at_ms,
-                                        and unlinked_at_ms once deleted
+      user_thread_map/{edge_id}   one edge per (uid, thread_id), many-to-many:
+                                  uid, thread_id, thread_path, role (owner |
+                                  member), label, first_added_at_ms,
+                                  last_activity_ms, turn_count, archived.
+                                  edge_id = sha256(uid + "\n" + thread_id)
+      thread_owners/{thread_id}   who created the thread (the access anchor)
+
+    Edges are written by the planner only for callers it has authorized (the
+    owner, or an existing member), never by merely posting to a thread id.
 
     ACTIONS (workload.action)
 
-      list       the user's threads, most recent first. Archived threads only
-                 with include_archived: true.
-      rename     set the pointer's title (1..80 characters).
-      archive    hide from the default list; the thread still works.
-      unarchive  undo archive.
-      delete     SOFT-UNLINK: remove the pointer and mark the owner record
-                 unlinked. chat_threads/{thread_id}/** is kept; the planner then
-                 refuses further turns on it, so it cannot reappear by being
-                 continued. Purging the conversation itself is a separate,
-                 operator-run step and is deliberately not offered here.
+      list          the caller's threads, most recent first (archived only with
+                    include_archived: true).
+      participants  the users with an edge to `thread_id`. Caller must have one.
+      rename        set the caller's label for the thread (1..80 characters).
+                    Labels are per edge: each participant names it for themself.
+      archive       hide from the caller's default list; the thread still works.
+      unarchive     undo archive.
+      unlink        remove the caller's edge. For the owner this also marks
+                    thread_owners unlinked, so the planner refuses the thread
+                    and it cannot reappear by being continued. A thread left
+                    with no edges is NOT deleted: chat_threads/{id}/** is kept,
+                    and purging it is a separate operator step.
 
     IDENTITY. `uid` is the caller. Behind the gateway it is overwritten with the
-    session's verified Auth0 subject (noetl/gateway#56), so a client can only
-    ever name its own threads. An empty or "guest" uid is refused. Every
-    per-thread action checks that the pointer exists in this user's index AND
-    that thread_owners names this user.
+    session's verified Auth0 subject (noetl/gateway#56). An empty or "guest" uid
+    is refused.
 
 workload:
   uid: ""
   action: list
   thread_id: ""
-  title: ""
+  label: ""
   include_archived: false
   limit: 50
   request_id: ""
@@ -57,7 +62,7 @@ workflow:
         - step: run
 
   - step: run
-    desc: Perform the requested action against the caller's thread index
+    desc: Perform the requested action on the user<->thread relation
     # Inline Firestore REST (metadata-server token), like the planner's
     # load_slot_state: a kind:playbook child per call would cost a full child
     # execution for each read and write.
@@ -67,7 +72,7 @@ workflow:
         uid: "{{ workload.uid | default('') }}"
         action: "{{ workload.action | default('list') }}"
         thread_id: "{{ workload.thread_id | default('') }}"
-        title: "{{ workload.title | default('') }}"
+        label: "{{ workload.label | default('') }}"
         include_archived: "{{ workload.include_archived | default(false) }}"
         limit: "{{ workload.limit | default(50) }}"
         request_id: "{{ workload.request_id | default('') }}"
@@ -75,6 +80,7 @@ workflow:
         firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
         firestore_database: "{{ workload.firestore_database | default('(default)') }}"
       code: |
+        import hashlib
         import json
         import re
         import time
@@ -87,8 +93,8 @@ workflow:
             "service-accounts/default/token"
         )
         THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-        TITLE_MAX = 80
-        ACTIONS = ("list", "rename", "archive", "unarchive", "delete")
+        LABEL_MAX = 80
+        ACTIONS = ("list", "participants", "rename", "archive", "unarchive", "unlink")
 
         def _as_dict(value):
             return value if isinstance(value, dict) else {}
@@ -192,22 +198,41 @@ workflow:
         def _view(fields):
             return {
                 "thread_id": fields.get("thread_id"),
-                "title": fields.get("title") or "New trip",
-                "created_at_ms": _safe_int(fields.get("created_at_ms"), 0),
+                "label": fields.get("label") or "New trip",
+                "role": fields.get("role") or "member",
+                "first_added_at_ms": _safe_int(fields.get("first_added_at_ms"), 0),
                 "last_activity_ms": _safe_int(fields.get("last_activity_ms"), 0),
                 "turn_count": _safe_int(fields.get("turn_count"), 0),
                 "archived": bool(fields.get("archived")),
             }
 
-        def _owned_pointer(user, tid):
-            """The caller's pointer for `tid`, or None when it is not theirs."""
-            ptr_found, ptr = _get("users/%s/threads/%s" % (user, tid))
-            if not ptr_found:
+        def _edge_id(edge_uid, edge_thread):
+            return hashlib.sha256((edge_uid + "\n" + edge_thread).encode("utf-8")).hexdigest()
+
+        def _query(field, value, n):
+            """Edges whose `field` equals `value` (a single-field index; ordered here)."""
+            q = {"structuredQuery": {
+                "from": [{"collectionId": "user_thread_map"}],
+                "where": {"fieldFilter": {"field": {"fieldPath": field}, "op": "EQUAL",
+                                          "value": {"stringValue": value}}},
+                "limit": n,
+            }}
+            status, rows = _call("POST", root + ":runQuery", q)
+            if status != 200:
+                raise RuntimeError("query failed (HTTP %s)" % status)
+            out = []
+            for row in rows if isinstance(rows, list) else []:
+                doc = _as_dict(_as_dict(row).get("document"))
+                if doc:
+                    out.append({k: _decode(v) for k, v in _as_dict(doc.get("fields")).items()})
+            return out
+
+        def _edge(user, tid):
+            """The caller's edge for `tid`, or None."""
+            found, fields = _get("user_thread_map/" + _edge_id(user, tid))
+            if not found or fields.get("uid") != user or fields.get("thread_id") != tid:
                 return None
-            owner_found, owner = _get("thread_owners/" + tid)
-            if not owner_found or str(owner.get("uid") or "") != user or owner.get("unlinked_at_ms"):
-                return None
-            return ptr
+            return fields
 
         def _run():
             user = str(uid or "").strip()
@@ -216,55 +241,51 @@ workflow:
                 return {"status": "error", "error": "sign_in_required"}
             if act not in ACTIONS:
                 return {"status": "error", "error": "unknown_action", "actions": list(ACTIONS)}
+            n = max(1, min(_safe_int(limit, 50), 500))
 
             if act == "list":
-                n = max(1, min(_safe_int(limit, 50), 200))
-                query = {"structuredQuery": {
-                    "from": [{"collectionId": "threads"}],
-                    "orderBy": [{"field": {"fieldPath": "last_activity_ms"}, "direction": "DESCENDING"}],
-                    "limit": n,
-                }}
-                parent = root + "/users/" + urllib.parse.quote(user, safe="")
-                status, rows = _call("POST", parent + ":runQuery", query)
-                if status != 200:
-                    raise RuntimeError("list failed (HTTP %s)" % status)
-                threads = []
-                for row in rows if isinstance(rows, list) else []:
-                    doc = _as_dict(_as_dict(row).get("document"))
-                    if not doc:
-                        continue
-                    view = _view({k: _decode(v) for k, v in _as_dict(doc.get("fields")).items()})
-                    if view["archived"] and not _flag(include_archived):
-                        continue
-                    threads.append(view)
+                edges = sorted(_query("uid", user, 500),
+                               key=lambda e: -_safe_int(e.get("last_activity_ms"), 0))
+                threads = [_view(e) for e in edges
+                           if _flag(include_archived) or not e.get("archived")][:n]
                 return {"status": "ok", "action": "list", "threads": threads, "count": len(threads)}
 
             tid = str(thread_id or "").strip()
             if not THREAD_ID_RE.match(tid):
                 return {"status": "error", "error": "invalid_thread_id"}
-            ptr = _owned_pointer(user, tid)
-            if ptr is None:
-                # Not in this user's index, or owned by someone else: the same answer.
+            edge = _edge(user, tid)
+            if edge is None:
+                # Not a participant -- the same answer as "no such thread".
                 return {"status": "error", "error": "thread_not_found"}
-            pointer_path = "users/%s/threads/%s" % (user, tid)
+            edge_path = "user_thread_map/" + _edge_id(user, tid)
 
+            if act == "participants":
+                people = sorted(_query("thread_id", tid, n),
+                                key=lambda e: _safe_int(e.get("first_added_at_ms"), 0))
+                return {"status": "ok", "action": "participants", "thread_id": tid,
+                        "participants": [{"uid": e.get("uid"), "role": e.get("role") or "member",
+                                          "first_added_at_ms": _safe_int(e.get("first_added_at_ms"), 0),
+                                          "last_activity_ms": _safe_int(e.get("last_activity_ms"), 0)}
+                                         for e in people]}
             if act == "rename":
-                new_title = " ".join(str(title or "").split())
-                if not new_title:
-                    return {"status": "error", "error": "title_required"}
-                new_title = new_title[:TITLE_MAX]
-                _patch(pointer_path, {"title": new_title})
-                ptr["title"] = new_title
+                new_label = " ".join(str(label or "").split())
+                if not new_label:
+                    return {"status": "error", "error": "label_required"}
+                new_label = new_label[:LABEL_MAX]
+                _patch(edge_path, {"label": new_label})
+                edge["label"] = new_label
             elif act in ("archive", "unarchive"):
-                _patch(pointer_path, {"archived": act == "archive"})
-                ptr["archived"] = act == "archive"
-            elif act == "delete":
-                # Owner record first: once it says unlinked, the planner refuses
-                # the thread even if removing the pointer then fails.
-                _patch("thread_owners/" + tid, {"unlinked_at_ms": int(time.time() * 1000)})
-                _delete(pointer_path)
-                return {"status": "ok", "action": "delete", "thread_id": tid, "mode": "unlinked"}
-            return {"status": "ok", "action": act, "thread": _view(ptr)}
+                _patch(edge_path, {"archived": act == "archive"})
+                edge["archived"] = act == "archive"
+            elif act == "unlink":
+                if edge.get("role") == "owner":
+                    # Owner record first: once it says unlinked, the planner
+                    # refuses the thread even if removing the edge then fails.
+                    _patch("thread_owners/" + tid, {"unlinked_at_ms": int(time.time() * 1000)})
+                _delete(edge_path)
+                return {"status": "ok", "action": "unlink", "thread_id": tid,
+                        "role": edge.get("role") or "member"}
+            return {"status": "ok", "action": act, "thread": _view(edge)}
 
         try:
             result = _run()

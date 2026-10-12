@@ -100,8 +100,8 @@ workload:
   replay: false
   replay_thread_id: ""
   # Sessions with no verified user (uid empty or "guest") may only use the
-  # server-minted `_smoke-` threads unless this is true. Threads are owned by a
-  # user (thread_owners/{thread_id}); see load_slot_state.
+  # server-minted `_smoke-` threads unless this is true. Thread access is the
+  # user<->thread relation (user_thread_map, thread_owners); see load_slot_state.
   allow_guest_threads: false
   # ── SLM shadow rollout (RFC docs/rfc/travel-slm-shadow-rollout.md, Option A) ──
   # Runs the v3 travel SLM ALONGSIDE the live deterministic path for comparison.
@@ -336,22 +336,36 @@ workflow:
         except Exception as exc:
             error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
 
-        # ── Thread ownership + the per-user thread index ─────────────────────
-        # A thread belongs to the user who started it, recorded in
-        # thread_owners/{thread_id}. A turn on someone else's thread, or on a
-        # thread with history but no recorded owner, is refused (routed to
-        # refuse_thread) before anything is read into the turn or written.
-        # chat_threads/** is not modified: ownership and the index live beside it.
+        # ── Thread access + the user<->thread relation ───────────────────────
+        # Two records live beside chat_threads/** (which is never modified):
         #
-        # index_docs are the writes this turn adds to the persist batch (appended
-        # to render_widget_chat.post_docs):
-        #   users/{uid}/threads/{thread_id}  pointer, merged every turn
-        #   thread_owners/{thread_id}        only when this turn claims the thread
+        #   thread_owners/{thread_id}       who CREATED the thread: the anchor of
+        #                                   access, written once by the first turn
+        #   user_thread_map/{edge_id}       one edge per (uid, thread_id): uid,
+        #                                   thread_id, role, label, first_added_at_ms,
+        #                                   last_activity_ms, turn_count, archived.
+        #                                   edge_id = sha256(uid + "\n" + thread_id)
+        #
+        # ⚠ An edge is written ONLY for a caller this step has already
+        # authorized, so authoring an event can never create membership by
+        # itself. A turn is authorized when the caller
+        #   1. has an edge for the thread (owner or member), or
+        #   2. is the thread's recorded owner (an edge lost or never written is
+        #      repaired), or
+        #   3. starts a brand-new thread: no owner record and no history. This is
+        #      the only "first access", and it makes the caller the owner.
+        # Everything else is refused (refuse_thread). Members other than the
+        # owner can only be added by an explicit grant, which this change does
+        # not offer (see the PR).
+        #
+        # relation_docs are the writes this turn adds to the persist batch
+        # (appended to render_widget_chat.post_docs).
+        import hashlib
         import re
         import time
 
         THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-        TITLE_MAX = 80
+        LABEL_MAX = 80
         _token_cache = []
 
         def _cached_token():
@@ -379,17 +393,22 @@ workflow:
             except Exception as exc:
                 return False, {}, "%s: %s" % (type(exc).__name__, str(exc)[:200])
 
+        def _edge_id(edge_uid, edge_thread):
+            # A hash, not "{uid}__{thread_id}": both parts may contain "_", so a
+            # joined id could be the same string for two different pairs.
+            return hashlib.sha256((edge_uid + "\n" + edge_thread).encode("utf-8")).hexdigest()
+
         def _flag(value):
             if isinstance(value, bool):
                 return value
             return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
-        def _title():
+        def _label():
             payload = _as_dict(event_payload)
             if str(event_type or "") == "user_message":
                 text = " ".join(str(payload.get("text") or "").split())
                 if text:
-                    return text if len(text) <= TITLE_MAX else text[:TITLE_MAX - 1] + "\u2026"
+                    return text if len(text) <= LABEL_MAX else text[:LABEL_MAX - 1] + "\u2026"
             return "New trip"
 
         thread_key = str(thread_id or "").strip()
@@ -397,57 +416,68 @@ workflow:
         anonymous = uid in ("", "guest")
         now_ms = int(time.time() * 1000)
         access = {"ok": False, "reason": "", "thread_id": thread_key,
-                  "uid": "" if anonymous else uid, "claim": False}
-        index_docs = []
+                  "uid": "" if anonymous else uid, "role": "", "claim": False}
+        relation_docs = []
 
         if not THREAD_ID_RE.match(thread_key):
             access["reason"] = "invalid_thread_id"
         elif "/" in uid:
-            # A uid is one path segment of users/{uid}; it can never hold a slash.
             access["reason"] = "invalid_uid"
         elif anonymous:
             if thread_key.startswith("_smoke-") or _flag(allow_guest_threads):
-                access.update(ok=True, reason="anonymous_unindexed")
+                access.update(ok=True, reason="anonymous_unmapped")
             else:
                 access["reason"] = "sign_in_required"
         elif error:
             # The slot read failed: we cannot tell a new thread from an old one.
-            access["reason"] = "ownership_unverifiable"
+            access["reason"] = "access_unverifiable"
         else:
-            owner_found, owner, owner_error = _get_fields("thread_owners/" + thread_key)
-            if owner_error:
-                access["reason"] = "ownership_unverifiable"
-            elif owner_found:
-                if str(owner.get("uid") or "") != uid:
-                    access["reason"] = "not_owner"
-                elif owner.get("unlinked_at_ms"):
-                    access["reason"] = "thread_deleted"
-                else:
-                    access.update(ok=True, reason="owner")
-            elif found:
-                # History but no owner: a thread from before ownership existed
-                # that the backfill could not attribute. Fail closed.
-                access["reason"] = "unclaimed_history"
+            edge_path = "user_thread_map/" + _edge_id(uid, thread_key)
+            edge_found, edge, edge_error = _get_fields(edge_path)
+            owner = {}
+            if edge_error:
+                access["reason"] = "access_unverifiable"
+            elif edge_found and str(edge.get("uid") or "") == uid and str(edge.get("thread_id") or "") == thread_key:
+                access.update(ok=True, reason="member", role=str(edge.get("role") or "member"))
             else:
-                access.update(ok=True, reason="claimed", claim=True)
+                owner_found, owner, owner_error = _get_fields("thread_owners/" + thread_key)
+                if owner_error:
+                    access["reason"] = "access_unverifiable"
+                elif owner_found:
+                    if str(owner.get("uid") or "") != uid:
+                        access["reason"] = "not_member"
+                    elif owner.get("unlinked_at_ms"):
+                        access["reason"] = "thread_unlinked"
+                    else:
+                        access.update(ok=True, reason="owner_edge_repaired", role="owner")
+                elif found:
+                    # History but no owner: a thread from before ownership existed
+                    # that the backfill could not attribute. Fail closed.
+                    access["reason"] = "unclaimed_history"
+                else:
+                    access.update(ok=True, reason="created", role="owner", claim=True)
 
             if access["ok"]:
-                pointer_path = "users/%s/threads/%s" % (uid, thread_key)
-                ptr_found, ptr, ptr_error = _get_fields(pointer_path)
-                pointer = {
+                doc = {
+                    "uid": uid,
                     "thread_id": thread_key,
                     "thread_path": "chat_threads/" + thread_key,
                     "last_activity_ms": now_ms,
                 }
-                if not ptr_error:
-                    pointer["turn_count"] = _safe_int(ptr.get("turn_count"), 0) + 1
-                    if not ptr_found:
-                        pointer["created_at_ms"] = _safe_int(owner.get("created_at_ms"), 0) or now_ms
-                        pointer["title"] = _title()
-                        pointer["archived"] = False
-                index_docs.append({"path": pointer_path, "doc": pointer, "merge": True})
+                if edge_found:
+                    doc["turn_count"] = _safe_int(edge.get("turn_count"), 0) + 1
+                else:
+                    doc.update({
+                        "role": access["role"],
+                        "label": _label(),
+                        "first_added_at_ms": _safe_int(owner.get("created_at_ms"), 0) or now_ms,
+                        "turn_count": 1,
+                        "archived": False,
+                        "added_by": "planner",
+                    })
+                relation_docs.append({"path": edge_path, "doc": doc, "merge": True})
                 if access["claim"]:
-                    index_docs.append({
+                    relation_docs.append({
                         "path": "thread_owners/" + thread_key,
                         "doc": {"uid": uid, "thread_id": thread_key,
                                 "created_at_ms": now_ms, "claimed_by": "planner"},
@@ -460,7 +490,7 @@ workflow:
             "data": {"found": found, "path": path, "document": document},
             "load_error": error,
             "thread_access": access,
-            "index_docs": index_docs,
+            "relation_docs": relation_docs,
         }
         globals().update({"result": result})
     next:
@@ -8154,7 +8184,7 @@ workflow:
         slot_state_post_tool: "{{ normalize_tool_response.slot_state | default({}) }}"
         tool_summary: "{{ normalize_tool_response.tool_result | default({}) }}"
         user_uid: "{{ workload.user_uid | default('guest') }}"
-        index_docs: "{{ load_slot_state.index_docs | default([]) }}"
+        relation_docs: "{{ load_slot_state.relation_docs | default([]) }}"
       code: |
         import json
         import uuid
@@ -9236,17 +9266,17 @@ workflow:
                     },
                 })
 
-        # The per-user thread index (users/{uid}/threads/{id}) and, on a thread's
-        # first turn, its owner record -- computed by load_slot_state and written
-        # in this turn's single persist batch.
-        _index_docs = index_docs
-        if isinstance(_index_docs, str):
+        # The user<->thread relation edge (user_thread_map) and, on a thread's
+        # first turn, its owner record -- computed and authorized by
+        # load_slot_state and written in this turn's single persist batch.
+        _relation_docs = relation_docs
+        if isinstance(_relation_docs, str):
             try:
-                _index_docs = json.loads(_index_docs)
+                _relation_docs = json.loads(_relation_docs)
             except Exception:
-                _index_docs = []
-        if isinstance(_index_docs, list):
-            post_docs.extend(d for d in _index_docs if isinstance(d, dict) and d.get("path"))
+                _relation_docs = []
+        if isinstance(_relation_docs, list):
+            post_docs.extend(d for d in _relation_docs if isinstance(d, dict) and d.get("path"))
 
         result = {
             "thread_path": thread_path,
