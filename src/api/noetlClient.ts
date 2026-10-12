@@ -521,9 +521,14 @@ async function executeDirect(path: string, workload: Record<string, unknown>, si
 export async function executePlaybook(
   path: string,
   workload: Record<string, unknown>,
-  options: { userUid?: string; signal?: AbortSignal } = {}
+  options: { userUid?: string; signal?: AbortSignal; bindIdentity?: boolean } = {}
 ) {
-  const finalWorkload = options.userUid ? { ...workload, user_uid: options.userUid } : workload;
+  // `bindIdentity` always sends a `user_uid` key, even with no known subject: the
+  // gateway binds identity variables that are PRESENT to the verified session
+  // (noetl/gateway#56), so an omitted key would reach the playbook as its
+  // default ("guest") instead of as the signed-in user.
+  const finalWorkload =
+    options.userUid || options.bindIdentity ? { ...workload, user_uid: options.userUid ?? '' } : workload;
   const session = getStoredSession();
   if (session?.token) {
     return executeViaGatewayGraphQL(path, finalWorkload, session.token, options.signal);

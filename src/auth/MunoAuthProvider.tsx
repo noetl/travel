@@ -67,6 +67,16 @@ function base64UrlDecode(value: string): string {
   );
 }
 
+// The gateway's user payload carries the Auth0 subject as `auth0_id`
+// (noetl/server#533), not `sub`; older sessions carry neither. Every user-scoped
+// playbook keys on `sub`, so resolve it here, once.
+export function withSubject(user: MunoUser | undefined, fallbackSub?: string): MunoUser | undefined {
+  if (!user) return user;
+  const auth0Id = typeof user.auth0_id === 'string' ? user.auth0_id : undefined;
+  const sub = user.sub || auth0Id || fallbackSub;
+  return sub ? { ...user, sub } : user;
+}
+
 function userFromIdToken(idToken: string): MunoUser | undefined {
   const parts = idToken.split('.');
   if (parts.length < 2) return undefined;
@@ -149,8 +159,9 @@ export function MunoAuthProvider({ children }: { children: ReactNode }) {
           const gateway = await loginToGateway(idToken, config.domain);
           if (cancelled) return;
           const fallbackUser = userFromIdToken(idToken);
-          storeSession(gateway.sessionToken, gateway.expiresAt, gateway.user || fallbackUser);
-          setGatewayUser(gateway.user || fallbackUser);
+          const user = withSubject(gateway.user || fallbackUser, fallbackUser?.sub);
+          storeSession(gateway.sessionToken, gateway.expiresAt, user);
+          setGatewayUser(user);
           setIsGatewayLinked(true);
           clearAuthHash(getReturnTo());
         } catch (error) {
@@ -175,7 +186,7 @@ export function MunoAuthProvider({ children }: { children: ReactNode }) {
           const validUser = await validateGatewaySession(existing.token);
           if (cancelled) return;
           if (validUser) {
-            setGatewayUser(validUser);
+            setGatewayUser(withSubject(validUser, existing.user?.sub));
             setIsGatewayLinked(true);
             return;
           }

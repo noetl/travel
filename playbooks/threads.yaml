@@ -1,0 +1,294 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: muno_threads
+  path: muno/playbooks/threads
+  description: |
+    Manage a signed-in user's chat threads through their per-user index.
+
+    The planner (muno/playbooks/itinerary-planner) keeps two records beside each
+    conversation, and never changes chat_threads/** itself:
+
+      users/{uid}/threads/{thread_id}   the user's pointer: thread_id, thread_path,
+                                        title, created_at_ms, last_activity_ms,
+                                        turn_count, archived
+      thread_owners/{thread_id}         who owns the thread: uid, created_at_ms,
+                                        and unlinked_at_ms once deleted
+
+    ACTIONS (workload.action)
+
+      list       the user's threads, most recent first. Archived threads only
+                 with include_archived: true.
+      rename     set the pointer's title (1..80 characters).
+      archive    hide from the default list; the thread still works.
+      unarchive  undo archive.
+      delete     SOFT-UNLINK: remove the pointer and mark the owner record
+                 unlinked. chat_threads/{thread_id}/** is kept; the planner then
+                 refuses further turns on it, so it cannot reappear by being
+                 continued. Purging the conversation itself is a separate,
+                 operator-run step and is deliberately not offered here.
+
+    IDENTITY. `uid` is the caller. Behind the gateway it is overwritten with the
+    session's verified Auth0 subject (noetl/gateway#56), so a client can only
+    ever name its own threads. An empty or "guest" uid is refused. Every
+    per-thread action checks that the pointer exists in this user's index AND
+    that thread_owners names this user.
+
+workload:
+  uid: ""
+  action: list
+  thread_id: ""
+  title: ""
+  include_archived: false
+  limit: 50
+  request_id: ""
+  gateway_url: ""
+  firestore_project: shastaratech-noetl-prod
+  firestore_database: "(default)"
+
+workflow:
+  - step: start
+    desc: Entry point
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: run
+
+  - step: run
+    desc: Perform the requested action against the caller's thread index
+    # Inline Firestore REST (metadata-server token), like the planner's
+    # load_slot_state: a kind:playbook child per call would cost a full child
+    # execution for each read and write.
+    tool:
+      kind: python
+      input:
+        uid: "{{ workload.uid | default('') }}"
+        action: "{{ workload.action | default('list') }}"
+        thread_id: "{{ workload.thread_id | default('') }}"
+        title: "{{ workload.title | default('') }}"
+        include_archived: "{{ workload.include_archived | default(false) }}"
+        limit: "{{ workload.limit | default(50) }}"
+        request_id: "{{ workload.request_id | default('') }}"
+        gateway_url: "{{ workload.gateway_url | default('') }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
+      code: |
+        import json
+        import re
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        METADATA_TOKEN_URL = (
+            "http://metadata.google.internal/computeMetadata/v1/instance/"
+            "service-accounts/default/token"
+        )
+        THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+        TITLE_MAX = 80
+        ACTIONS = ("list", "rename", "archive", "unarchive", "delete")
+
+        def _as_dict(value):
+            return value if isinstance(value, dict) else {}
+
+        def _safe_int(value, default=0):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _flag(value):
+            if isinstance(value, bool):
+                return value
+            return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+        _token_cache = []
+
+        def _token():
+            if not _token_cache:
+                req = urllib.request.Request(
+                    METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"}, method="GET")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8") or "{}")
+                token = (payload or {}).get("access_token")
+                if not token:
+                    raise RuntimeError("metadata token endpoint returned no access_token")
+                _token_cache.append(token)
+            return _token_cache[0]
+
+        def _decode(value):
+            value = _as_dict(value)
+            if "nullValue" in value:
+                return None
+            if "booleanValue" in value:
+                return bool(value["booleanValue"])
+            if "integerValue" in value:
+                return _safe_int(value["integerValue"], 0)
+            if "doubleValue" in value:
+                return float(value["doubleValue"])
+            if "stringValue" in value:
+                return value["stringValue"]
+            if "mapValue" in value:
+                fields = _as_dict(_as_dict(value["mapValue"]).get("fields"))
+                return {k: _decode(v) for k, v in fields.items()}
+            if "arrayValue" in value:
+                return [_decode(v) for v in _as_dict(value["arrayValue"]).get("values") or []]
+            return None
+
+        def _encode(value):
+            if value is None:
+                return {"nullValue": None}
+            if isinstance(value, bool):
+                return {"booleanValue": value}
+            if isinstance(value, int):
+                return {"integerValue": str(value)}
+            if isinstance(value, float):
+                return {"doubleValue": value}
+            return {"stringValue": str(value)}
+
+        root = ("https://firestore.googleapis.com/v1/projects/%s/databases/%s/documents"
+                % (firestore_project, urllib.parse.quote(str(firestore_database or "(default)"), safe="()")))
+
+        def _call(method, url, body=None):
+            data = json.dumps(body).encode("utf-8") if body is not None else None
+            req = urllib.request.Request(
+                url, data=data, method=method,
+                headers={"Authorization": "Bearer %s" % _token(),
+                         "Content-Type": "application/json",
+                         "Accept": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                return exc.code, {}
+
+        def _doc_url(rel):
+            return root + "/" + urllib.parse.quote(rel, safe="/")
+
+        def _get(rel):
+            """(found, fields) or raises on a non-404 failure."""
+            status, body = _call("GET", _doc_url(rel))
+            if status == 404:
+                return False, {}
+            if status != 200:
+                raise RuntimeError("read failed (HTTP %s)" % status)
+            return True, {k: _decode(v) for k, v in _as_dict(body.get("fields")).items()}
+
+        def _patch(rel, fields):
+            """Merge `fields` into the document (an updateMask of their keys)."""
+            mask = "&".join("updateMask.fieldPaths=" + urllib.parse.quote(k) for k in fields)
+            status, _ = _call("PATCH", _doc_url(rel) + "?" + mask,
+                              {"fields": {k: _encode(v) for k, v in fields.items()}})
+            if status != 200:
+                raise RuntimeError("write failed (HTTP %s)" % status)
+
+        def _delete(rel):
+            status, _ = _call("DELETE", _doc_url(rel))
+            if status not in (200, 404):
+                raise RuntimeError("delete failed (HTTP %s)" % status)
+
+        def _view(fields):
+            return {
+                "thread_id": fields.get("thread_id"),
+                "title": fields.get("title") or "New trip",
+                "created_at_ms": _safe_int(fields.get("created_at_ms"), 0),
+                "last_activity_ms": _safe_int(fields.get("last_activity_ms"), 0),
+                "turn_count": _safe_int(fields.get("turn_count"), 0),
+                "archived": bool(fields.get("archived")),
+            }
+
+        def _owned_pointer(user, tid):
+            """The caller's pointer for `tid`, or None when it is not theirs."""
+            ptr_found, ptr = _get("users/%s/threads/%s" % (user, tid))
+            if not ptr_found:
+                return None
+            owner_found, owner = _get("thread_owners/" + tid)
+            if not owner_found or str(owner.get("uid") or "") != user or owner.get("unlinked_at_ms"):
+                return None
+            return ptr
+
+        def _run():
+            user = str(uid or "").strip()
+            act = str(action or "list").strip().lower()
+            if user in ("", "guest") or "/" in user:
+                return {"status": "error", "error": "sign_in_required"}
+            if act not in ACTIONS:
+                return {"status": "error", "error": "unknown_action", "actions": list(ACTIONS)}
+
+            if act == "list":
+                n = max(1, min(_safe_int(limit, 50), 200))
+                query = {"structuredQuery": {
+                    "from": [{"collectionId": "threads"}],
+                    "orderBy": [{"field": {"fieldPath": "last_activity_ms"}, "direction": "DESCENDING"}],
+                    "limit": n,
+                }}
+                parent = root + "/users/" + urllib.parse.quote(user, safe="")
+                status, rows = _call("POST", parent + ":runQuery", query)
+                if status != 200:
+                    raise RuntimeError("list failed (HTTP %s)" % status)
+                threads = []
+                for row in rows if isinstance(rows, list) else []:
+                    doc = _as_dict(_as_dict(row).get("document"))
+                    if not doc:
+                        continue
+                    view = _view({k: _decode(v) for k, v in _as_dict(doc.get("fields")).items()})
+                    if view["archived"] and not _flag(include_archived):
+                        continue
+                    threads.append(view)
+                return {"status": "ok", "action": "list", "threads": threads, "count": len(threads)}
+
+            tid = str(thread_id or "").strip()
+            if not THREAD_ID_RE.match(tid):
+                return {"status": "error", "error": "invalid_thread_id"}
+            ptr = _owned_pointer(user, tid)
+            if ptr is None:
+                # Not in this user's index, or owned by someone else: the same answer.
+                return {"status": "error", "error": "thread_not_found"}
+            pointer_path = "users/%s/threads/%s" % (user, tid)
+
+            if act == "rename":
+                new_title = " ".join(str(title or "").split())
+                if not new_title:
+                    return {"status": "error", "error": "title_required"}
+                new_title = new_title[:TITLE_MAX]
+                _patch(pointer_path, {"title": new_title})
+                ptr["title"] = new_title
+            elif act in ("archive", "unarchive"):
+                _patch(pointer_path, {"archived": act == "archive"})
+                ptr["archived"] = act == "archive"
+            elif act == "delete":
+                # Owner record first: once it says unlinked, the planner refuses
+                # the thread even if removing the pointer then fails.
+                _patch("thread_owners/" + tid, {"unlinked_at_ms": int(time.time() * 1000)})
+                _delete(pointer_path)
+                return {"status": "ok", "action": "delete", "thread_id": tid, "mode": "unlinked"}
+            return {"status": "ok", "action": act, "thread": _view(ptr)}
+
+        try:
+            result = _run()
+        except Exception as exc:
+            result = {"status": "error", "error": "store_unavailable", "detail": str(exc)[:200]}
+
+        if request_id and gateway_url:
+            try:
+                body = json.dumps({"request_id": request_id,
+                                   "status": "COMPLETED" if result.get("status") == "ok" else "FAILED",
+                                   "data": result}).encode("utf-8")
+                req = urllib.request.Request(
+                    str(gateway_url).rstrip("/") + "/api/internal/callback/async",
+                    data=body, headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result["gateway_callback"] = {"delivered": 200 <= response.status < 300}
+            except Exception as exc:
+                result["gateway_callback"] = {"delivered": False, "error": str(exc)[:300]}
+        globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: end
+    tool:
+      kind: noop

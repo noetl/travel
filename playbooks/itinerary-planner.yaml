@@ -99,6 +99,10 @@ workload:
   enrich_with_google_places: true
   replay: false
   replay_thread_id: ""
+  # Sessions with no verified user (uid empty or "guest") may only use the
+  # server-minted `_smoke-` threads unless this is true. Threads are owned by a
+  # user (thread_owners/{thread_id}); see load_slot_state.
+  allow_guest_threads: false
   # ── SLM shadow rollout (RFC docs/rfc/travel-slm-shadow-rollout.md, Option A) ──
   # Runs the v3 travel SLM ALONGSIDE the live deterministic path for comparison.
   # Default OFF → the shadow branch never fires and this playbook is byte-identical
@@ -225,6 +229,11 @@ workflow:
         doc_path: "{{ normalize_input.thread_path }}/slot_state/current"
         firestore_database: "{{ workload.firestore_database | default('(default)') }}"
         firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        thread_id: "{{ normalize_input.thread_id }}"
+        user_uid: "{{ workload.user_uid | default('guest') }}"
+        event_type: "{{ normalize_input.event_type }}"
+        event_payload: "{{ normalize_input.event_payload }}"
+        allow_guest_threads: "{{ workload.allow_guest_threads | default(false) }}"
       code: |
         import json
         import urllib.error
@@ -327,17 +336,182 @@ workflow:
         except Exception as exc:
             error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
 
+        # ── Thread ownership + the per-user thread index ─────────────────────
+        # A thread belongs to the user who started it, recorded in
+        # thread_owners/{thread_id}. A turn on someone else's thread, or on a
+        # thread with history but no recorded owner, is refused (routed to
+        # refuse_thread) before anything is read into the turn or written.
+        # chat_threads/** is not modified: ownership and the index live beside it.
+        #
+        # index_docs are the writes this turn adds to the persist batch (appended
+        # to render_widget_chat.post_docs):
+        #   users/{uid}/threads/{thread_id}  pointer, merged every turn
+        #   thread_owners/{thread_id}        only when this turn claims the thread
+        import re
+        import time
+
+        THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+        TITLE_MAX = 80
+        _token_cache = []
+
+        def _cached_token():
+            if not _token_cache:
+                _token_cache.append(_token())
+            return _token_cache[0]
+
+        def _get_fields(rel_path):
+            """(found, fields, error) for one document. 404 is (False, {}, "")."""
+            doc_url = root + "/" + urllib.parse.quote(rel_path, safe="/")
+            try:
+                req = urllib.request.Request(
+                    doc_url,
+                    headers={"Authorization": "Bearer %s" % _cached_token(),
+                             "Accept": "application/json"},
+                    method="GET")
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+                fields = _as_dict(body.get("fields"))
+                return True, {k: _decode_value(v) for k, v in fields.items()}, ""
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    return False, {}, ""
+                return False, {}, "HTTP %s" % exc.code
+            except Exception as exc:
+                return False, {}, "%s: %s" % (type(exc).__name__, str(exc)[:200])
+
+        def _flag(value):
+            if isinstance(value, bool):
+                return value
+            return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+        def _title():
+            payload = _as_dict(event_payload)
+            if str(event_type or "") == "user_message":
+                text = " ".join(str(payload.get("text") or "").split())
+                if text:
+                    return text if len(text) <= TITLE_MAX else text[:TITLE_MAX - 1] + "\u2026"
+            return "New trip"
+
+        thread_key = str(thread_id or "").strip()
+        uid = str(user_uid or "").strip()
+        anonymous = uid in ("", "guest")
+        now_ms = int(time.time() * 1000)
+        access = {"ok": False, "reason": "", "thread_id": thread_key,
+                  "uid": "" if anonymous else uid, "claim": False}
+        index_docs = []
+
+        if not THREAD_ID_RE.match(thread_key):
+            access["reason"] = "invalid_thread_id"
+        elif "/" in uid:
+            # A uid is one path segment of users/{uid}; it can never hold a slash.
+            access["reason"] = "invalid_uid"
+        elif anonymous:
+            if thread_key.startswith("_smoke-") or _flag(allow_guest_threads):
+                access.update(ok=True, reason="anonymous_unindexed")
+            else:
+                access["reason"] = "sign_in_required"
+        elif error:
+            # The slot read failed: we cannot tell a new thread from an old one.
+            access["reason"] = "ownership_unverifiable"
+        else:
+            owner_found, owner, owner_error = _get_fields("thread_owners/" + thread_key)
+            if owner_error:
+                access["reason"] = "ownership_unverifiable"
+            elif owner_found:
+                if str(owner.get("uid") or "") != uid:
+                    access["reason"] = "not_owner"
+                elif owner.get("unlinked_at_ms"):
+                    access["reason"] = "thread_deleted"
+                else:
+                    access.update(ok=True, reason="owner")
+            elif found:
+                # History but no owner: a thread from before ownership existed
+                # that the backfill could not attribute. Fail closed.
+                access["reason"] = "unclaimed_history"
+            else:
+                access.update(ok=True, reason="claimed", claim=True)
+
+            if access["ok"]:
+                pointer_path = "users/%s/threads/%s" % (uid, thread_key)
+                ptr_found, ptr, ptr_error = _get_fields(pointer_path)
+                pointer = {
+                    "thread_id": thread_key,
+                    "thread_path": "chat_threads/" + thread_key,
+                    "last_activity_ms": now_ms,
+                }
+                if not ptr_error:
+                    pointer["turn_count"] = _safe_int(ptr.get("turn_count"), 0) + 1
+                    if not ptr_found:
+                        pointer["created_at_ms"] = _safe_int(owner.get("created_at_ms"), 0) or now_ms
+                        pointer["title"] = _title()
+                        pointer["archived"] = False
+                index_docs.append({"path": pointer_path, "doc": pointer, "merge": True})
+                if access["claim"]:
+                    index_docs.append({
+                        "path": "thread_owners/" + thread_key,
+                        "doc": {"uid": uid, "thread_id": thread_key,
+                                "created_at_ms": now_ms, "claimed_by": "planner"},
+                        "merge": False,
+                    })
+
         # Same envelope the mcp/firestore child returned, so downstream
         # accessors are unchanged.
         result = {
             "data": {"found": found, "path": path, "document": document},
             "load_error": error,
+            "thread_access": access,
+            "index_docs": index_docs,
         }
         globals().update({"result": result})
     next:
       spec: { mode: exclusive }
       arcs:
-        - step: extract_turn
+        # ⚠ refuse_thread must stay a terminal leaf that nothing else routes to:
+        # a step named here is marked skipped when its sibling wins
+        # (scripts/playbook_skip_topology_test.py).
+        - when: "{{ load_slot_state.thread_access.ok }}"
+          step: extract_turn
+        - step: refuse_thread
+
+  - step: refuse_thread
+    desc: End a turn on a thread the caller does not own, without reading or writing it
+    tool:
+      kind: python
+      input:
+        access: "{{ load_slot_state.thread_access }}"
+        request_id: "{{ workload.request_id | default('') }}"
+        gateway_url: "{{ workload.gateway_url | default('') }}"
+      code: |
+        import json
+        import urllib.request
+
+        reason = str((access or {}).get("reason") or "denied") if isinstance(access, dict) else "denied"
+        if reason == "sign_in_required":
+            text = "Please sign in to continue this conversation."
+        else:
+            text = "That conversation isn't available, so I've started a new one. Please send your message again."
+        # A normal completed result, so the SPA renders bot_message and resets
+        # its stored thread id on `thread_access == "denied"`. No thread data is
+        # included, and "not yours" reads the same as "does not exist".
+        result = {
+            "status": "completed",
+            "thread_access": "denied",
+            "thread_access_reason": "sign_in_required" if reason == "sign_in_required" else "unavailable",
+            "bot_message": text,
+            "final_slot_state": {},
+            "emitted_widget_types": [],
+        }
+        if request_id and gateway_url:
+            try:
+                body = json.dumps({"request_id": request_id, "status": "COMPLETED", "data": result}).encode("utf-8")
+                req = urllib.request.Request(
+                    gateway_url.rstrip("/") + "/api/internal/callback/async",
+                    data=body, headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result["gateway_callback"] = {"delivered": 200 <= response.status < 300}
+            except Exception as exc:
+                result["gateway_callback"] = {"delivered": False, "error": str(exc)[:300]}
+        globals().update({"result": result})
 
   - step: extract_turn
     desc: JSON-mode extraction of slot updates, tool requests, and render intent
@@ -7980,6 +8154,7 @@ workflow:
         slot_state_post_tool: "{{ normalize_tool_response.slot_state | default({}) }}"
         tool_summary: "{{ normalize_tool_response.tool_result | default({}) }}"
         user_uid: "{{ workload.user_uid | default('guest') }}"
+        index_docs: "{{ load_slot_state.index_docs | default([]) }}"
       code: |
         import json
         import uuid
@@ -9060,6 +9235,18 @@ workflow:
                         "actor": {"kind": "agent", "name": "muno-itinerary-planner"},
                     },
                 })
+
+        # The per-user thread index (users/{uid}/threads/{id}) and, on a thread's
+        # first turn, its owner record -- computed by load_slot_state and written
+        # in this turn's single persist batch.
+        _index_docs = index_docs
+        if isinstance(_index_docs, str):
+            try:
+                _index_docs = json.loads(_index_docs)
+            except Exception:
+                _index_docs = []
+        if isinstance(_index_docs, list):
+            post_docs.extend(d for d in _index_docs if isinstance(d, dict) and d.get("path"))
 
         result = {
             "thread_path": thread_path,
