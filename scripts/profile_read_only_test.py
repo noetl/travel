@@ -7,7 +7,9 @@ The SPA sends ``{"uid": "...", "profile": {}, "read_only": true}`` at login to l
 profile. Before this fix the playbook routed ``validate_input -> save_profile``
 unconditionally, so every login performed a Firestore ``set_doc``.
 
-⚠ That was NOT data loss — merging ``{}`` changes no field. What it was:
+⚠ That WAS data loss. The Firestore provider only adds ``updateMask`` when ``data`` is
+non-empty, and a ``PATCH`` without a mask is a full replace — so ``set_doc(merge=true,
+data={})`` overwrote the profile with zero fields on every login. It was also:
 
   * a write on a read path, on the login critical path, behind ``timeout: 60``;
   * and because ``set`` with ``merge`` CREATES the document, after one login
@@ -92,7 +94,10 @@ check("validate_input has 3 arcs", len(arcs), 3)
 # `validate_input.ok` would match for a read too and every read would still write — the
 # original defect, reintroduced by a reordering that looks harmless.
 first = arcs[0]
-check("first arc targets load_profile", first.get("step"), "load_profile")
+# Through `begin_read`, not straight to load_profile: a sibling named here is SKIPPED when
+# the save arc wins, and save_profile -> load_profile would then be dropped (every save
+# strands). See scripts/playbook_skip_topology_test.py.
+check("first arc targets begin_read", first.get("step"), "begin_read")
 check(
     "first arc is guarded by read_only",
     "read_only" in (first.get("when") or ""),
@@ -103,8 +108,16 @@ check("fallback arc targets reject_input", arcs[-1].get("step"), "reject_input")
 check("fallback arc is unguarded", arcs[-1].get("when") is None, True)
 
 save_idx = next(i for i, a in enumerate(arcs) if a.get("step") == "save_profile")
-read_idx = next(i for i, a in enumerate(arcs) if a.get("step") == "load_profile")
+read_idx = next(i for i, a in enumerate(arcs) if a.get("step") == "begin_read")
 check("the read arc precedes the save arc", read_idx < save_idx, True)
+check("load_profile is NOT an alternative at validate_input",
+      "load_profile" in [a.get("step") for a in arcs], False)
+begin = next((s for s in doc["workflow"] if s.get("step") == "begin_read"), {})
+check("begin_read routes only to load_profile",
+      [a.get("step") for a in (begin.get("next") or {}).get("arcs", [])], ["load_profile"])
+save_step = next(s for s in doc["workflow"] if s.get("step") == "save_profile")
+check("save_profile still routes to load_profile (read-after-write)",
+      [a.get("step") for a in save_step["next"]["arcs"]], ["load_profile"])
 
 
 # ------------------------------------------------------- the write is still a merge
