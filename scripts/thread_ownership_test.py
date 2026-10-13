@@ -233,10 +233,20 @@ r = load(FakeFirestore({SLOT: {"r": 1}, "thread_owners/t1": {"uid": ALICE, "crea
 check(r["thread_access"]["reason"] == "owner_edge_repaired" and r["relation_docs"][0]["doc"]["role"] == "owner"
       and r["relation_docs"][0]["doc"]["first_added_at_ms"] == 1000, "owner without edge: edge repaired")
 
+# ── claim-on-signin: an unowned thread with history is claimed by the first signed-in caller ──
+fs = FakeFirestore({SLOT: {"region": "Paris"}})
+r = load(fs)
+check(r["thread_access"]["ok"] and r["thread_access"]["reason"] == "claimed_on_signin"
+      and paths(r) == [edge_path(ALICE, "t1"), "thread_owners/t1"], "unowned history: claimed by the signed-in caller")
+fs.docs["thread_owners/t1"] = {"uid": ALICE, "created_at_ms": 1}
+fs.docs[edge_path(ALICE, "t1")] = edge(ALICE, "t1")
+r = load(fs, uid=BOB)
+check(r["thread_access"]["reason"] == "not_member" and r["relation_docs"] == [],
+      "after the claim, another user is refused")
+check(load(FakeFirestore({SLOT: {"region": "Paris"}}), uid="guest")["thread_access"]["reason"] == "sign_in_required",
+      "an anonymous caller cannot claim")
+
 # ── fail closed ──
-r = load(FakeFirestore({SLOT: {"region": "Paris"}}))
-check(r["thread_access"]["reason"] == "unclaimed_history" and r["relation_docs"] == [],
-      "history with no owner: refused, not claimed")
 r = load(FakeFirestore({SLOT: {"r": 1}, "thread_owners/t1": {"uid": ALICE, "unlinked_at_ms": 5}}))
 check(r["thread_access"]["reason"] == "thread_unlinked", "owner who unlinked: refused")
 r = load(FakeFirestore(owned, fail_paths={edge_path(ALICE, "t1")}))
@@ -293,8 +303,10 @@ check([t["thread_id"] for t in threads(FakeFirestore(relation()), uid=BOB)["thre
       "list: many-to-many -- a member sees the shared thread too")
 
 r = threads(FakeFirestore(relation()), action="participants", thread_id="t1")
-check([(p["uid"], p["role"]) for p in r["participants"]] == [(ALICE, "owner"), (BOB, "member")],
+check([(p["role"], p["is_you"]) for p in r["participants"]] == [("owner", True), ("member", False)],
       "participants: all users of a thread")
+check(all("uid" not in p for p in r["participants"]) and ALICE not in json.dumps(r) and BOB not in json.dumps(r),
+      "participants: no Auth0 subject is returned to the client")
 check(threads(FakeFirestore(relation()), action="participants", thread_id="t3").get("error") == "thread_not_found",
       "participants: refused for a thread the caller is not in")
 

@@ -352,8 +352,12 @@ workflow:
         #   1. has an edge for the thread (owner or member), or
         #   2. is the thread's recorded owner (an edge lost or never written is
         #      repaired), or
-        #   3. starts a brand-new thread: no owner record and no history. This is
-        #      the only "first access", and it makes the caller the owner.
+        #   3. starts a brand-new thread (no owner record, no history), or
+        #   4. continues an UNOWNED thread with history -- one started anonymously
+        #      (or before ownership existed) -- after signing in: claim-on-signin,
+        #      a product decision (2026-10-13). The first signed-in caller becomes
+        #      its owner; from then on rule 1/2 applies and everyone else is
+        #      refused. Threads are single-owner: nothing here adds a member.
         # Everything else is refused (refuse_thread). Members other than the
         # owner can only be added by an explicit grant, which this change does
         # not offer (see the PR).
@@ -451,9 +455,9 @@ workflow:
                     else:
                         access.update(ok=True, reason="owner_edge_repaired", role="owner")
                 elif found:
-                    # History but no owner: a thread from before ownership existed
-                    # that the backfill could not attribute. Fail closed.
-                    access["reason"] = "unclaimed_history"
+                    # History but no owner: started anonymously, or before ownership
+                    # existed. Claim-on-signin (rule 4 above).
+                    access.update(ok=True, reason="claimed_on_signin", role="owner", claim=True)
                 else:
                     access.update(ok=True, reason="created", role="owner", claim=True)
 

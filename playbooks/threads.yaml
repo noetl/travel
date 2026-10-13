@@ -24,7 +24,9 @@ metadata:
 
       list          the caller's threads, most recent first (archived only with
                     include_archived: true).
-      participants  the users with an edge to `thread_id`. Caller must have one.
+      participants  who has an edge to `thread_id`: role, first_added_at_ms,
+                    last_activity_ms and `is_you`. Caller must have one. Auth0
+                    subjects (uid) are never returned to clients.
       rename        set the caller's label for the thread (1..80 characters).
                     Labels are per edge: each participant names it for themself.
       archive       hide from the caller's default list; the thread still works.
@@ -263,7 +265,9 @@ workflow:
                 people = sorted(_query("thread_id", tid, n),
                                 key=lambda e: _safe_int(e.get("first_added_at_ms"), 0))
                 return {"status": "ok", "action": "participants", "thread_id": tid,
-                        "participants": [{"uid": e.get("uid"), "role": e.get("role") or "member",
+                        # No uid: Auth0 subjects stay server-side (product decision).
+                        "participants": [{"role": e.get("role") or "member",
+                                          "is_you": e.get("uid") == user,
                                           "first_added_at_ms": _safe_int(e.get("first_added_at_ms"), 0),
                                           "last_activity_ms": _safe_int(e.get("last_activity_ms"), 0)}
                                          for e in people]}
