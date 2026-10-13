@@ -92,6 +92,28 @@ describe('noetlClient auth token handling', () => {
     noetlClient.defaults.adapter = originalAdapter;
   });
 
+  it('bindIdentity sends an empty user_uid for the gateway to bind when no subject is known', async () => {
+    const originalAdapter = noetlClient.defaults.adapter;
+    vi.stubEnv('VITE_ALLOW_GUEST', 'true');
+    noetlClient.defaults.adapter = async (config) => {
+      expect(JSON.parse(config.data as string).workload).toEqual({ event_type: 'user_message', user_uid: '' });
+      return { data: { ok: true }, status: 200, statusText: 'OK', headers: {}, config };
+    };
+    await executePlaybook('muno/playbooks/itinerary-planner', { event_type: 'user_message' }, { bindIdentity: true });
+    noetlClient.defaults.adapter = originalAdapter;
+  });
+
+  it('without bindIdentity or a subject, user_uid is not added', async () => {
+    const originalAdapter = noetlClient.defaults.adapter;
+    vi.stubEnv('VITE_ALLOW_GUEST', 'true');
+    noetlClient.defaults.adapter = async (config) => {
+      expect(JSON.parse(config.data as string).workload).toEqual({ event_type: 'user_message' });
+      return { data: { ok: true }, status: 200, statusText: 'OK', headers: {}, config };
+    };
+    await executePlaybook('travel/playbooks/catalog/calendar/list', { event_type: 'user_message' });
+    noetlClient.defaults.adapter = originalAdapter;
+  });
+
   it('resolves execution completion from playbook/state SSE frames', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('window', {

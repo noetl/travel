@@ -198,6 +198,13 @@ export function extractBotMessage(execution: unknown): string {
   return String(payload.bot_message || payload.text || payload.summary || 'Ready.');
 }
 
+// The planner refuses a turn on a thread the caller does not own (or one that
+// was deleted) with a normal result carrying `thread_access: "denied"`. The
+// stored thread id is then useless, so the caller starts a fresh thread.
+export function isThreadAccessDenied(execution: unknown): boolean {
+  return extractPayloadContext(execution).thread_access === 'denied';
+}
+
 export function hasFinalPayload(execution: unknown): boolean {
   const payload = extractPayloadContext(execution);
   return Boolean(extractEnvelope(execution) || extractSlotState(execution) || payload.bot_message);
@@ -462,11 +469,15 @@ export function ChatThread({
           event_type: eventType,
           event_payload: eventPayload
         },
-        { userUid: auth.user?.sub, signal: controller.signal }
+        { userUid: auth.user?.sub, bindIdentity: true, signal: controller.signal }
       );
       const executionId = extractExecutionId(start);
       activeExecutionId.current = executionId;
       const execution = hasFinalPayload(start) || !executionId ? start : await waitForExecution(executionId, controller.signal);
+      if (isThreadAccessDenied(execution)) {
+        clearStoredThreadId();
+        threadId.current = loadStoredThreadId();
+      }
       const envelope = extractEnvelope(execution);
       const slotState = extractSlotState(execution);
       if (slotState) {

@@ -1,0 +1,319 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: muno_threads
+  path: muno/playbooks/threads
+  description: |
+    Manage the user<->thread relation: the threads a signed-in user takes part
+    in, and the users taking part in a thread.
+
+    The relation lives beside the conversations; chat_threads/** is never
+    modified:
+
+      user_thread_map/{edge_id}   one edge per (uid, thread_id), many-to-many:
+                                  uid, thread_id, thread_path, role (owner |
+                                  member), label, first_added_at_ms,
+                                  last_activity_ms, turn_count, archived.
+                                  edge_id = sha256(uid + "\n" + thread_id)
+      thread_owners/{thread_id}   who created the thread (the access anchor)
+
+    Edges are written by the planner only for callers it has authorized (the
+    owner, or an existing member), never by merely posting to a thread id.
+
+    ACTIONS (workload.action)
+
+      list          the caller's threads, most recent first (archived only with
+                    include_archived: true).
+      participants  who has an edge to `thread_id`: role, first_added_at_ms,
+                    last_activity_ms and `is_you`. Caller must have one. Auth0
+                    subjects (uid) are never returned to clients.
+      rename        set the caller's label for the thread (1..80 characters).
+                    Labels are per edge: each participant names it for themself.
+      archive       hide from the caller's default list; the thread still works.
+      unarchive     undo archive.
+      unlink        remove the caller's edge. For the owner this also marks
+                    thread_owners unlinked, so the planner refuses the thread
+                    and it cannot reappear by being continued. A thread left
+                    with no edges is NOT deleted: chat_threads/{id}/** is kept,
+                    and purging it is a separate operator step.
+
+    IDENTITY. `uid` is the caller. Behind the gateway it is overwritten with the
+    session's verified Auth0 subject (noetl/gateway#56). An empty or "guest" uid
+    is refused.
+
+workload:
+  uid: ""
+  action: list
+  thread_id: ""
+  label: ""
+  include_archived: false
+  limit: 50
+  request_id: ""
+  gateway_url: ""
+  firestore_project: shastaratech-noetl-prod
+  firestore_database: "(default)"
+
+workflow:
+  - step: start
+    desc: Entry point
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: run
+
+  - step: run
+    desc: Perform the requested action on the user<->thread relation
+    # Inline Firestore REST (metadata-server token), like the planner's
+    # load_slot_state: a kind:playbook child per call would cost a full child
+    # execution for each read and write.
+    tool:
+      kind: python
+      input:
+        uid: "{{ workload.uid | default('') }}"
+        action: "{{ workload.action | default('list') }}"
+        thread_id: "{{ workload.thread_id | default('') }}"
+        label: "{{ workload.label | default('') }}"
+        include_archived: "{{ workload.include_archived | default(false) }}"
+        limit: "{{ workload.limit | default(50) }}"
+        request_id: "{{ workload.request_id | default('') }}"
+        gateway_url: "{{ workload.gateway_url | default('') }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
+      code: |
+        import hashlib
+        import json
+        import re
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        METADATA_TOKEN_URL = (
+            "http://metadata.google.internal/computeMetadata/v1/instance/"
+            "service-accounts/default/token"
+        )
+        THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+        LABEL_MAX = 80
+        ACTIONS = ("list", "participants", "rename", "archive", "unarchive", "unlink")
+
+        def _as_dict(value):
+            return value if isinstance(value, dict) else {}
+
+        def _safe_int(value, default=0):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _flag(value):
+            if isinstance(value, bool):
+                return value
+            return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+        _token_cache = []
+
+        def _token():
+            if not _token_cache:
+                req = urllib.request.Request(
+                    METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"}, method="GET")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8") or "{}")
+                token = (payload or {}).get("access_token")
+                if not token:
+                    raise RuntimeError("metadata token endpoint returned no access_token")
+                _token_cache.append(token)
+            return _token_cache[0]
+
+        def _decode(value):
+            value = _as_dict(value)
+            if "nullValue" in value:
+                return None
+            if "booleanValue" in value:
+                return bool(value["booleanValue"])
+            if "integerValue" in value:
+                return _safe_int(value["integerValue"], 0)
+            if "doubleValue" in value:
+                return float(value["doubleValue"])
+            if "stringValue" in value:
+                return value["stringValue"]
+            if "mapValue" in value:
+                fields = _as_dict(_as_dict(value["mapValue"]).get("fields"))
+                return {k: _decode(v) for k, v in fields.items()}
+            if "arrayValue" in value:
+                return [_decode(v) for v in _as_dict(value["arrayValue"]).get("values") or []]
+            return None
+
+        def _encode(value):
+            if value is None:
+                return {"nullValue": None}
+            if isinstance(value, bool):
+                return {"booleanValue": value}
+            if isinstance(value, int):
+                return {"integerValue": str(value)}
+            if isinstance(value, float):
+                return {"doubleValue": value}
+            return {"stringValue": str(value)}
+
+        root = ("https://firestore.googleapis.com/v1/projects/%s/databases/%s/documents"
+                % (firestore_project, urllib.parse.quote(str(firestore_database or "(default)"), safe="()")))
+
+        def _call(method, url, body=None):
+            data = json.dumps(body).encode("utf-8") if body is not None else None
+            req = urllib.request.Request(
+                url, data=data, method=method,
+                headers={"Authorization": "Bearer %s" % _token(),
+                         "Content-Type": "application/json",
+                         "Accept": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                return exc.code, {}
+
+        def _doc_url(rel):
+            return root + "/" + urllib.parse.quote(rel, safe="/")
+
+        def _get(rel):
+            """(found, fields) or raises on a non-404 failure."""
+            status, body = _call("GET", _doc_url(rel))
+            if status == 404:
+                return False, {}
+            if status != 200:
+                raise RuntimeError("read failed (HTTP %s)" % status)
+            return True, {k: _decode(v) for k, v in _as_dict(body.get("fields")).items()}
+
+        def _patch(rel, fields):
+            """Merge `fields` into the document (an updateMask of their keys)."""
+            mask = "&".join("updateMask.fieldPaths=" + urllib.parse.quote(k) for k in fields)
+            status, _ = _call("PATCH", _doc_url(rel) + "?" + mask,
+                              {"fields": {k: _encode(v) for k, v in fields.items()}})
+            if status != 200:
+                raise RuntimeError("write failed (HTTP %s)" % status)
+
+        def _delete(rel):
+            status, _ = _call("DELETE", _doc_url(rel))
+            if status not in (200, 404):
+                raise RuntimeError("delete failed (HTTP %s)" % status)
+
+        def _view(fields):
+            return {
+                "thread_id": fields.get("thread_id"),
+                "label": fields.get("label") or "New trip",
+                "role": fields.get("role") or "member",
+                "first_added_at_ms": _safe_int(fields.get("first_added_at_ms"), 0),
+                "last_activity_ms": _safe_int(fields.get("last_activity_ms"), 0),
+                "turn_count": _safe_int(fields.get("turn_count"), 0),
+                "archived": bool(fields.get("archived")),
+            }
+
+        def _edge_id(edge_uid, edge_thread):
+            return hashlib.sha256((edge_uid + "\n" + edge_thread).encode("utf-8")).hexdigest()
+
+        def _query(field, value, n):
+            """Edges whose `field` equals `value` (a single-field index; ordered here)."""
+            q = {"structuredQuery": {
+                "from": [{"collectionId": "user_thread_map"}],
+                "where": {"fieldFilter": {"field": {"fieldPath": field}, "op": "EQUAL",
+                                          "value": {"stringValue": value}}},
+                "limit": n,
+            }}
+            status, rows = _call("POST", root + ":runQuery", q)
+            if status != 200:
+                raise RuntimeError("query failed (HTTP %s)" % status)
+            out = []
+            for row in rows if isinstance(rows, list) else []:
+                doc = _as_dict(_as_dict(row).get("document"))
+                if doc:
+                    out.append({k: _decode(v) for k, v in _as_dict(doc.get("fields")).items()})
+            return out
+
+        def _edge(user, tid):
+            """The caller's edge for `tid`, or None."""
+            found, fields = _get("user_thread_map/" + _edge_id(user, tid))
+            if not found or fields.get("uid") != user or fields.get("thread_id") != tid:
+                return None
+            return fields
+
+        def _run():
+            user = str(uid or "").strip()
+            act = str(action or "list").strip().lower()
+            if user in ("", "guest") or "/" in user:
+                return {"status": "error", "error": "sign_in_required"}
+            if act not in ACTIONS:
+                return {"status": "error", "error": "unknown_action", "actions": list(ACTIONS)}
+            n = max(1, min(_safe_int(limit, 50), 500))
+
+            if act == "list":
+                edges = sorted(_query("uid", user, 500),
+                               key=lambda e: -_safe_int(e.get("last_activity_ms"), 0))
+                threads = [_view(e) for e in edges
+                           if _flag(include_archived) or not e.get("archived")][:n]
+                return {"status": "ok", "action": "list", "threads": threads, "count": len(threads)}
+
+            tid = str(thread_id or "").strip()
+            if not THREAD_ID_RE.match(tid):
+                return {"status": "error", "error": "invalid_thread_id"}
+            edge = _edge(user, tid)
+            if edge is None:
+                # Not a participant -- the same answer as "no such thread".
+                return {"status": "error", "error": "thread_not_found"}
+            edge_path = "user_thread_map/" + _edge_id(user, tid)
+
+            if act == "participants":
+                people = sorted(_query("thread_id", tid, n),
+                                key=lambda e: _safe_int(e.get("first_added_at_ms"), 0))
+                return {"status": "ok", "action": "participants", "thread_id": tid,
+                        # No uid: Auth0 subjects stay server-side (product decision).
+                        "participants": [{"role": e.get("role") or "member",
+                                          "is_you": e.get("uid") == user,
+                                          "first_added_at_ms": _safe_int(e.get("first_added_at_ms"), 0),
+                                          "last_activity_ms": _safe_int(e.get("last_activity_ms"), 0)}
+                                         for e in people]}
+            if act == "rename":
+                new_label = " ".join(str(label or "").split())
+                if not new_label:
+                    return {"status": "error", "error": "label_required"}
+                new_label = new_label[:LABEL_MAX]
+                _patch(edge_path, {"label": new_label})
+                edge["label"] = new_label
+            elif act in ("archive", "unarchive"):
+                _patch(edge_path, {"archived": act == "archive"})
+                edge["archived"] = act == "archive"
+            elif act == "unlink":
+                if edge.get("role") == "owner":
+                    # Owner record first: once it says unlinked, the planner
+                    # refuses the thread even if removing the edge then fails.
+                    _patch("thread_owners/" + tid, {"unlinked_at_ms": int(time.time() * 1000)})
+                _delete(edge_path)
+                return {"status": "ok", "action": "unlink", "thread_id": tid,
+                        "role": edge.get("role") or "member"}
+            return {"status": "ok", "action": act, "thread": _view(edge)}
+
+        try:
+            result = _run()
+        except Exception as exc:
+            result = {"status": "error", "error": "store_unavailable", "detail": str(exc)[:200]}
+
+        if request_id and gateway_url:
+            try:
+                body = json.dumps({"request_id": request_id,
+                                   "status": "COMPLETED" if result.get("status") == "ok" else "FAILED",
+                                   "data": result}).encode("utf-8")
+                req = urllib.request.Request(
+                    str(gateway_url).rstrip("/") + "/api/internal/callback/async",
+                    data=body, headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result["gateway_callback"] = {"delivered": 200 <= response.status < 300}
+            except Exception as exc:
+                result["gateway_callback"] = {"delivered": False, "error": str(exc)[:300]}
+        globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: end
+    tool:
+      kind: noop

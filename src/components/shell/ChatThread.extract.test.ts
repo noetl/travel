@@ -3,6 +3,7 @@ import {
   extractBotMessage,
   extractEnvelope,
   hasFinalPayload,
+  isThreadAccessDenied,
 } from './ChatThread';
 
 // Mirrors the real getExecution / poll (#82 reconcile) shape from prod exec
@@ -105,5 +106,17 @@ describe('ChatThread payload extraction (getExecution reconcile path)', () => {
     const sse = { result: { render: datePicker, bot_message: 'Pick the travel dates.' } };
     expect(extractBotMessage(sse)).toBe('Pick the travel dates.');
     expect(extractEnvelope(sse)?.widget_type).toBe('date_range_picker');
+  });
+});
+
+describe('isThreadAccessDenied', () => {
+  it('is true for the planner refusal, nested as poll delivers it', () => {
+    const exec = nestedExecution({ status: 'completed', thread_access: 'denied', bot_message: 'x', final_slot_state: {} });
+    expect(isThreadAccessDenied(exec)).toBe(true);
+    expect(extractBotMessage(exec)).toBe('x');
+  });
+
+  it('is false for a normal turn', () => {
+    expect(isThreadAccessDenied(nestedExecution({ bot_message: 'hello', final_slot_state: { region: 'Paris' } }))).toBe(false);
   });
 });
