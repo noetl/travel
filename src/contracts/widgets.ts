@@ -175,6 +175,18 @@ export interface ErrorCardPayload {
   description: string;
   retry_action_id?: string;
   contact_support?: boolean;
+  /**
+   * Machine-readable cause, e.g. no_flight_results. Not rendered.
+   */
+  reason_code?: string;
+  /**
+   * What blocked the result (shown inside description). Not rendered separately.
+   */
+  blocking_constraints?: string[];
+  /**
+   * Relaxations the user can ask for, as codes (named in description). Not rendered as buttons: the planner has no handler for them as CTA clicks.
+   */
+  alternatives?: string[];
 }
 
 
@@ -432,6 +444,12 @@ export interface FlightListPayload {
   emphasis_offer_id?: string;
   total_count: number;
   currency: string;
+  /**
+   * Ranked result groups (cheapest / fastest / best_value) from the planner, for row labels. Optional; the list renders without it.
+   */
+  groups?: {
+    [k: string]: unknown;
+  };
 }
 /**
  * Single Duffel or Amadeus flight offer card. schema_version 2 is ADDITIVE over 1: every v1 payload is still valid. v2 adds the detail the itinerary planner and muno/playbooks/flights-details already emit — airline logos, expanded segment detail, baggage/conditions (collapsed dicts AND option arrays), fare_brand, and per-offer direction (adiona/frontend#21, #22).

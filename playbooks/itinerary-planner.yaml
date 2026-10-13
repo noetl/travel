@@ -8009,6 +8009,16 @@ workflow:
         def _bot(text):
             return _env("bot_text", "default", {"text": text, "markdown": True})
 
+        def _options_text(codes):
+            """`alternatives` codes as words for an error_card description:
+            ["flexible_dates", "nearby_airports"] -> "flexible dates or nearby airports".
+            The card renders title + description only (error_card.schema.json),
+            so the suggestions have to be readable in the text itself."""
+            words = [str(c).replace("_", " ") for c in (codes or []) if c]
+            if len(words) <= 1:
+                return "".join(words)
+            return ", ".join(words[:-1]) + " or " + words[-1]
+
         globals().update({
             "json": json,
             "uuid": uuid,
@@ -8019,6 +8029,7 @@ workflow:
             "_as_dict": _as_dict,
             "_env": _env,
             "_bot": _bot,
+            "_options_text": _options_text,
         })
 
         extraction_context = _as_dict(extraction_context)
@@ -8470,15 +8481,14 @@ workflow:
                 _label = (slot_state.get("region") or {}).get("label") or "that destination"
                 widgets.append(_env("error_card", "default", {
                     "title": "No destination results",
-                    "message": "I could not find %s with the places provider. "
-                               "Nothing was changed — pick one of these and I "
-                               "will search again." % _label,
+                    "description": "I could not find %s with the places provider. "
+                                   "Nothing was changed — you can %s, and I will "
+                                   "search again." % (_label, _options_text(
+                                       ["try_another_city", "check_spelling", "search_by_region"])),
                     "reason_code": "no_place_results",
                     "blocking_constraints": ["destination %s" % _label],
                     "alternatives": ["try_another_city", "check_spelling",
                                      "search_by_region"],
-                    "ctas": ["try_another_city", "check_spelling",
-                             "search_by_region"],
                     "retry_action_id": "retry:mcp/google-places.search_text",
                     "contact_support": False,
                 }))
@@ -8505,15 +8515,15 @@ workflow:
                 _blocking = ["%s %s to %s" % (_label, _ci, _co)] if _ci and _co else [_label]
                 widgets.append(_env("error_card", "default", {
                     "title": "No hotels available",
-                    "message": "HotelBeds returned no availability for %s. "
-                               "I have kept your dates and travellers — pick one "
-                               "of these and I will search again." % _blocking[0],
+                    "description": "HotelBeds returned no availability for %s. "
+                                   "I have kept your dates and travellers — tell me "
+                                   "if you want %s, and I will search again." % (
+                                       _blocking[0], _options_text(
+                                           ["flexible_dates", "widen_area", "fewer_rooms", "another_city"])),
                     "reason_code": "no_hotel_results",
                     "blocking_constraints": _blocking,
                     "alternatives": ["flexible_dates", "widen_area",
                                      "fewer_rooms", "another_city"],
-                    "ctas": ["flexible_dates", "widen_area",
-                             "fewer_rooms", "another_city"],
                     "retry_action_id": "retry:mcp/hotelbeds.search_hotels",
                     "contact_support": False,
                 }))
@@ -8538,13 +8548,12 @@ workflow:
                 _blocking = ["%s %s to %s" % (_label, _ci, _co)] if _ci and _co else [_label]
                 widgets.append(_env("error_card", "default", {
                     "title": "No activities available",
-                    "message": "HotelBeds returned no activities for %s. "
-                               "Your dates and travellers are unchanged." % _blocking[0],
+                    "description": "HotelBeds returned no activities for %s. "
+                                   "Your dates and travellers are unchanged." % _blocking[0],
                     "reason_code": "no_activity_results",
                     "blocking_constraints": _blocking,
                     "alternatives": ["flexible_dates", "another_city",
                                      "skip_activities"],
-                    "ctas": ["flexible_dates", "another_city", "skip_activities"],
                     "retry_action_id": "retry:mcp/hotelbeds-activities.search_activities",
                     "contact_support": False,
                 }))
@@ -8567,13 +8576,12 @@ workflow:
                 _blocking = ["%s on %s" % (_label, _out)] if _out else [_label]
                 widgets.append(_env("error_card", "default", {
                     "title": "No transfers available",
-                    "message": "HotelBeds returned no transfers for %s. "
-                               "Nothing was changed automatically." % _blocking[0],
+                    "description": "HotelBeds returned no transfers for %s. "
+                                   "Nothing was changed automatically." % _blocking[0],
                     "reason_code": "no_transfer_results",
                     "blocking_constraints": _blocking,
                     "alternatives": ["flexible_dates", "another_airport",
                                      "skip_transfers"],
-                    "ctas": ["flexible_dates", "another_airport", "skip_transfers"],
                     "retry_action_id": "retry:mcp/hotelbeds-transfers.search_transfers",
                     "contact_support": False,
                 }))
@@ -8635,12 +8643,12 @@ workflow:
                            "The airline search returned no flights for this route and date.")
                 widgets.append(_env("error_card", "default", {
                     "title": "No matching flights",
-                    "message": _reason + " I have kept your route, dates and travellers — "
-                               "pick one of these and I will re-run the search.",
+                    "description": _reason + " I have kept your route, dates and travellers "
+                                   "— tell me if you want %s, and I will re-run the "
+                                   "search." % _options_text(_alts),
                     "reason_code": "no_flight_results",
                     "blocking_constraints": _blocking,
                     "alternatives": _alts,
-                    "ctas": _alts,
                 }))
                 bot_message = _reason + " Nothing was changed automatically."
             else:
@@ -8742,14 +8750,13 @@ workflow:
             if not _ref or _bstatus in ("FAILED", "ERROR", "CANCELLED"):
                 widgets.append(_env("error_card", "default", {
                     "title": "The booking did not go through",
-                    "message": "HotelBeds did not return a confirmation, so nothing "
-                               "was booked. Your dates, travellers and the selected "
-                               "hotel are unchanged — you can retry or pick another "
-                               "property.",
+                    "description": "HotelBeds did not return a confirmation, so nothing "
+                                   "was booked. Your dates, travellers and the selected "
+                                   "hotel are unchanged — you can retry or pick another "
+                                   "property.",
                     "reason_code": "hotel_booking_not_confirmed",
                     "blocking_constraints": ["no booking reference returned"],
                     "alternatives": ["retry_booking", "another_hotel", "flexible_dates"],
-                    "ctas": ["retry_booking", "another_hotel", "flexible_dates"],
                     "retry_action_id": "retry:mcp/hotelbeds.book_hotel",
                     "contact_support": False,
                 }))
@@ -8947,16 +8954,14 @@ workflow:
                 _xl = (slot_state.get("region") or {}).get("label") or "that city"
                 widgets.append(_env("error_card", "default", {
                     "title": "I need the airport and drop-off",
-                    "message": "I do not have a pickup airport or a drop-off point "
-                               "for %s, and I will not guess one — the quote would "
-                               "be for the wrong journey. Tell me the airport code "
-                               "and your hotel address and I will search." % _xl,
+                    "description": "I do not have a pickup airport or a drop-off point "
+                                   "for %s, and I will not guess one — the quote would "
+                                   "be for the wrong journey. Tell me the airport code "
+                                   "and your hotel address and I will search." % _xl,
                     "reason_code": "transfer_endpoints_unknown",
                     "blocking_constraints": ["pickup airport", "drop-off address"],
                     "alternatives": ["provide_airport", "provide_hotel_address",
                                      "skip_transfers"],
-                    "ctas": ["provide_airport", "provide_hotel_address",
-                             "skip_transfers"],
                     "contact_support": False,
                 }))
                 bot_message = ("I need the pickup airport and a drop-off address for "
