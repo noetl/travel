@@ -66,4 +66,69 @@ describe('WidgetRenderer', () => {
     expect(html).toContain('Shared shuttle');
     expect(html).not.toContain('unknown widget_type');
   });
+
+  // Prod execution 368219441512587264 (2026-10-13): the "No matching flights"
+  // card carried `message`/`ctas` and no `description`, so the booking flow
+  // showed this fallback instead of the card.
+  const noFlights = {
+    title: 'No matching flights',
+    reason_code: 'no_flight_results',
+    blocking_constraints: [],
+    alternatives: ['flexible_dates', 'nearby_airports'],
+  };
+
+  it('rejects the error_card shape prod emitted (message/ctas, no description)', () => {
+    const html = renderToStaticMarkup(
+      <WidgetRenderer
+        envelope={{
+          widget_type: 'error_card',
+          variant: 'default',
+          schema_version: 1,
+          payload: { ...noFlights, message: 'The airline search returned no flights.', ctas: ['flexible_dates'] }
+        }}
+      />
+    );
+    expect(html).toContain('template mismatch');
+  });
+
+  it('renders the planner error_card with description and its machine-readable fields', () => {
+    const html = renderToStaticMarkup(
+      <WidgetRenderer
+        envelope={{
+          widget_type: 'error_card',
+          variant: 'default',
+          schema_version: 1,
+          payload: {
+            ...noFlights,
+            description: 'The airline search returned no flights for this route and date.',
+            retry_action_id: 'retry:mcp/duffel.search_offers',
+            contact_support: false
+          }
+        }}
+      />
+    );
+    expect(html).not.toContain('template mismatch');
+    expect(html).toContain('No matching flights');
+    expect(html).toContain('returned no flights');
+  });
+
+  it('renders a flight_list that carries the ranked groups', () => {
+    const html = renderToStaticMarkup(
+      <WidgetRenderer
+        envelope={{
+          widget_type: 'flight_list',
+          variant: 'default',
+          schema_version: 1,
+          payload: {
+            title: 'Flight options',
+            items: [],
+            total_count: 0,
+            currency: 'USD',
+            groups: { best_value: { offer_id: 'off_1' } }
+          }
+        }}
+      />
+    );
+    expect(html).not.toContain('template mismatch');
+  });
 });

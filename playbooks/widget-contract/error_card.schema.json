@@ -21,6 +21,24 @@
     },
     "contact_support": {
       "type": "boolean"
+    },
+    "reason_code": {
+      "type": "string",
+      "description": "Machine-readable cause, e.g. no_flight_results. Not rendered."
+    },
+    "blocking_constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "What blocked the result (shown inside description). Not rendered separately."
+    },
+    "alternatives": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Relaxations the user can ask for, as codes (named in description). Not rendered as buttons: the planner has no handler for them as CTA clicks."
     }
   }
 }

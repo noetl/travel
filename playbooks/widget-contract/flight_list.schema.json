@@ -30,6 +30,10 @@
     },
     "currency": {
       "type": "string"
+    },
+    "groups": {
+      "type": "object",
+      "description": "Ranked result groups (cheapest / fastest / best_value) from the planner, for row labels. Optional; the list renders without it."
     }
   }
 }
