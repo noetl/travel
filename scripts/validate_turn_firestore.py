@@ -259,12 +259,28 @@ def validate(noetl, fs, eid, thread_events_cache, prior_turns):
         + ("" if block == exp_events else f"; missing {exp_events[len(block):]}"))
 
     slot = fs.doc(f"chat_threads/{tid}/slot_state/current")
+    # Every tool turn has an api_calls/{call_id} document. Since noetl/travel#156 the
+    # render step writes it inline (with the search's offers) rather than through the
+    # save batch, so it is expected from the tool call, not only from post_docs.
     calls = [p for p in exp_docs if "/api_calls/" in (p or "")]
-    missing = [p for p in calls if fs.doc(p) is None]
+    if ext.get("first_tool") and ext.get("call_id"):
+        calls.append(f"chat_threads/{tid}/api_calls/{ext['call_id']}")
+    calls = sorted(set(calls))
+    stored = {p: fs.doc(p) for p in calls}
+    missing = [p for p, d in stored.items() if d is None]
+    offers_note = ""
+    tool_ev = next((e.get("event", {}).get("payload") or {} for e in (ren.get("post_events") or [])
+                    if e.get("event", {}).get("type") == "agent_tool_response"), {})
+    if tool_ev.get("offers_ref"):
+        doc = stored.get(tool_ev["offers_ref"]) or {}
+        n = len(doc.get("offers") or [])
+        offers_note = f"; saved offers {n}/{tool_ev.get('offers_count')}"
+        if n != tool_ev.get("offers_count"):
+            missing.append(tool_ev["offers_ref"] + " (offers)")
     R["retrieved"]["slot_state_keys"] = sorted(slot.keys())[:8] if slot else None
     put("docs", slot is not None and not missing,
         f"slot_state/current {'present' if slot else 'MISSING'}; api_calls {len(calls) - len(missing)}/{len(calls)}"
-        + (f" missing {missing}" if missing else ""))
+        + offers_note + (f" missing {missing}" if missing else ""))
 
     owner = fs.doc(f"thread_owners/{tid}")
     put("owner", bool(owner) and owner.get("uid") == uid, "thread_owners uid " +
