@@ -33,6 +33,8 @@ const SSE_DROP_GRACE_MS = 15_000;
 // this gate synchronously (noetl/ai-meta#168), so it returns in ms; this
 // timeout + one retry is defense-in-depth for a one-off network hiccup so a
 // legitimate tap is never lost to a transient gate blip.
+const ACCESS_CHECK_TIMEOUT_MS = 20_000;
+const ACCESS_CHECK_MAX_ATTEMPTS = 2;
 // Absolute ceiling on waiting for a turn's terminal lifecycle frame. The
 // gateway routes `playbook/state` / `playbook/result` frames to a specific
 // SSE `client_id`; if the connection that turn's callback was bound to closes
@@ -93,17 +95,58 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
-// The gateway authorizes every execution server-side (noetl/gateway#57): a
-// regular user may run the allowlisted app playbooks, an admin anything. A
-// refusal comes back as a GraphQL error "not authorized"; show it as the
-// permission message users already know. There is no client-side pre-check:
-// the gateway's check-access endpoint grants only through role rows, which regular users
-// do not have, so it blocked them from playbooks the gateway allows.
-export const PERMISSION_DENIED_MESSAGE = 'You do not have permission to execute this playbook';
+// Run one access-gate request with its own per-attempt timeout, aborting if the
+// caller's turn signal aborts. Returns the raw Response so the caller can read
+// the grant decision; throws AbortError on caller-abort and a plain Error on a
+// per-attempt timeout (so the retry loop can tell the two apart).
+async function checkAccessOnce(
+  playbookPath: string,
+  token: string,
+  signal?: AbortSignal
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), ACCESS_CHECK_TIMEOUT_MS);
+  const onCallerAbort = () => controller.abort();
+  signal?.addEventListener('abort', onCallerAbort, { once: true });
+  try {
+    return await fetch(`${getGatewayBaseUrl()}/api/auth/check-access`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        session_token: token,
+        playbook_path: playbookPath,
+        permission_type: 'execute'
+      })
+    });
+  } finally {
+    window.clearTimeout(timeout);
+    signal?.removeEventListener('abort', onCallerAbort);
+  }
+}
 
-export function graphqlErrorMessage(errors: Array<{ message?: string }> | undefined): string {
-  const message = errors?.[0]?.message || 'GraphQL error';
-  return /^not authorized$/i.test(message.trim()) ? PERMISSION_DENIED_MESSAGE : message;
+async function checkPlaybookAccess(playbookPath: string, token: string, signal?: AbortSignal): Promise<boolean> {
+  // Retry a transient network failure / per-attempt timeout once; a genuine
+  // deny (HTTP 200 with allowed=false) or a caller-abort is NOT retried. On a
+  // definitive transport failure we throw a clear, retryable error instead of
+  // letting a raw "Load failed"/"Failed to fetch" TypeError leak to the UI.
+  for (let attempt = 1; attempt <= ACCESS_CHECK_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await checkAccessOnce(playbookPath, token, signal);
+      if (!response.ok) return false;
+      const data = (await response.json()) as { allowed?: boolean };
+      return Boolean(data.allowed);
+    } catch (error) {
+      // A caller-initiated abort (new turn / cancel) must propagate untouched.
+      if (isAbortError(error) && signal?.aborted) throw error;
+      if (attempt === ACCESS_CHECK_MAX_ATTEMPTS) {
+        throw new Error('Access check is temporarily unavailable. Please try again.');
+      }
+      // Otherwise: per-attempt timeout or transient transport error → retry.
+    }
+  }
+  // Unreachable: the loop always returns or throws above.
+  throw new Error('Access check is temporarily unavailable. Please try again.');
 }
 
 function handlePlaybookResult(message: unknown) {
@@ -396,6 +439,11 @@ function callbackFallback(execution: Record<string, unknown>, requestId: string)
 }
 
 async function executeViaGatewayGraphQL(path: string, workload: Record<string, unknown>, token: string, signal?: AbortSignal) {
+  const hasAccess = await checkPlaybookAccess(path, token, signal);
+  if (!hasAccess) {
+    throw new Error('You do not have permission to execute this playbook');
+  }
+
   try {
     await waitForSSEConnection(token, signal);
   } catch (error) {
@@ -446,7 +494,7 @@ async function executeViaGatewayGraphQL(path: string, workload: Record<string, u
 
   const body = await response.json();
   if (body.errors?.length) {
-    throw new Error(graphqlErrorMessage(body.errors));
+    throw new Error(body.errors[0].message || 'GraphQL error');
   }
   const execution = body.data?.executePlaybook || {};
   if (execution.requestId) {
