@@ -119,7 +119,13 @@ jobs:
   deploy:
     name: Deploy to Cloudflare Pages
     needs: build
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    # RETIRED 2026-10-16: travel.mestumre.dev and mestumre.dev now serve the Adiona
+    # frontend (adiona/frontend, Cloudflare Pages project `adiona`). The `travel`
+    # project holds no custom domains and is kept only as Muno's rollback, so this
+    # job must not keep publishing Muno. The `build` job above still runs as CI.
+    # Original condition, to re-enable:
+    #   ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: false
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
