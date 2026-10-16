@@ -1777,7 +1777,7 @@ workflow:
                        "check_in_date", "check_out_date", "party", "budget",
                        "flight_filters")
         if any(k in updates for k in _STALE_KEYS):
-            for _k in ("flight_search_results", "flight_offers", "flight_groups",
+            for _k in ("flight_search_results", "flight_offers", "flight_offers_ref", "flight_groups",
                        "picked_flight_offer_id", "order_id"):
                 if next_state.get(_k) is not None:
                     next_state[_k] = None
@@ -3002,7 +3002,12 @@ workflow:
                 "isError": False,
                 "_meta": {"backend": "duffel", "tool": tool_name, "duffel_env": duffel_env, **meta},
                 "data": payload,
-                "control_data": payload,
+                # Status only, not a second copy of `data`: two copies of a ~60 KB
+                # offer search pushed this step's result past the 100 KB offload
+                # line, normalize_tool_response received nothing, and the traveller
+                # was told the search returned no flights. Nothing reads the offers
+                # from control_data.
+                "control_data": {k: payload[k] for k in ("ok", "status", "status_code", "error", "code") if k in payload},
                 "summary": text or f"Duffel {tool_name} ok",
                 "text": text or f"Duffel {tool_name} ok",
             }
@@ -8029,7 +8034,17 @@ workflow:
 
             groups = _rank_offer_groups(normalised_offers, slot_state)
             next_state["flight_search_results"] = offer_ids
-            next_state["flight_offers"] = normalised_offers
+            # The offers are saved once, in this search's api_calls document
+            # (render_widget_chat writes it), and slot state keeps only a pointer.
+            # Carried in slot state, 50 offers (~40 KB) were copied into every later
+            # step's result -- render's reached ~250 KB, past the 100 KB offload
+            # line, and the turn's save silently lost everything after the tool call.
+            next_state.pop("flight_offers", None)
+            next_state["flight_offers_ref"] = {
+                "path": "%s/api_calls/%s" % (thread_path, call_id),
+                "call_id": call_id,
+                "count": len(normalised_offers),
+            }
             next_state["flight_groups"] = groups
             next_state["flight_over_budget_count"] = _over_budget
             next_state["total_results_seen"] = len(offers)
@@ -8189,6 +8204,8 @@ workflow:
         tool_summary: "{{ normalize_tool_response.tool_result | default({}) }}"
         user_uid: "{{ workload.user_uid | default('guest') }}"
         relation_docs: "{{ load_slot_state.relation_docs | default([]) }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
       code: |
         import json
         import uuid
@@ -8217,6 +8234,113 @@ workflow:
 
         def _bot(text):
             return _env("bot_text", "default", {"text": text, "markdown": True})
+
+        # ── A search's offers: one Firestore document, never a step result ──
+        # chat_threads/{t}/api_calls/{call_id} holds the offers (written below,
+        # on the search turn); slot state holds only flight_offers_ref. Inline
+        # REST with the pod's metadata token, like load_slot_state, so the offers
+        # never ride a step result (the 100 KB offload line). The encoding and the
+        # full-replace PATCH are mcp/firestore set_doc's.
+        import urllib.error as _fs_error
+        import urllib.parse as _fs_parse
+        import urllib.request as _fs_request
+
+        _FS_ROOT = ("https://firestore.googleapis.com/v1/projects/%s/databases/%s/documents" % (
+            str(firestore_project or "shastaratech-noetl-prod"),
+            _fs_parse.quote(str(firestore_database or "(default)"), safe="()")))
+        _fs_token_cache = []
+
+        def _fs_token():
+            if not _fs_token_cache:
+                req = _fs_request.Request(
+                    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+                    headers={"Metadata-Flavor": "Google"})
+                with _fs_request.urlopen(req, timeout=10) as resp:
+                    _fs_token_cache.append(json.loads(resp.read().decode("utf-8"))["access_token"])
+            return _fs_token_cache[0]
+
+        def _fs_encode(value):
+            if value is None:
+                return {"nullValue": None}
+            if isinstance(value, bool):
+                return {"booleanValue": value}
+            if isinstance(value, int):
+                return {"integerValue": str(value)}
+            if isinstance(value, float):
+                return {"doubleValue": value}
+            if isinstance(value, list):
+                encoded = [_fs_encode(item) for item in value]
+                return {"arrayValue": {"values": encoded} if encoded else {}}
+            if isinstance(value, dict):
+                return {"mapValue": {"fields": {str(k): _fs_encode(v) for k, v in value.items()}}}
+            return {"stringValue": str(value)}
+
+        def _fs_decode(value):
+            value = value if isinstance(value, dict) else {}
+            if "nullValue" in value:
+                return None
+            if "booleanValue" in value:
+                return bool(value["booleanValue"])
+            if "integerValue" in value:
+                try:
+                    return int(value["integerValue"])
+                except (TypeError, ValueError):
+                    return 0
+            if "doubleValue" in value:
+                try:
+                    return float(value["doubleValue"])
+                except (TypeError, ValueError):
+                    return 0.0
+            if "arrayValue" in value:
+                return [_fs_decode(v) for v in (value["arrayValue"] or {}).get("values") or []]
+            if "mapValue" in value:
+                return {k: _fs_decode(v) for k, v in ((value["mapValue"] or {}).get("fields") or {}).items()}
+            for key in ("stringValue", "timestampValue", "referenceValue", "bytesValue", "geoPointValue"):
+                if key in value:
+                    return value[key]
+            return None
+
+        def _fs_url(path):
+            return _FS_ROOT + "/" + _fs_parse.quote(str(path).strip("/"), safe="/")
+
+        def _fs_set_doc(path, data):
+            body = json.dumps({"fields": {str(k): _fs_encode(v) for k, v in data.items()}}).encode("utf-8")
+            req = _fs_request.Request(_fs_url(path), data=body, method="PATCH", headers={
+                "Authorization": "Bearer %s" % _fs_token(), "Content-Type": "application/json"})
+            with _fs_request.urlopen(req, timeout=30) as resp:
+                resp.read()
+
+        def _fs_get_doc(path):
+            req = _fs_request.Request(_fs_url(path), method="GET", headers={
+                "Authorization": "Bearer %s" % _fs_token(), "Accept": "application/json"})
+            try:
+                with _fs_request.urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+            except _fs_error.HTTPError as exc:
+                if exc.code == 404:
+                    return None
+                raise
+            return {k: _fs_decode(v) for k, v in (body.get("fields") or {}).items()}
+
+        _offers_cache = []
+
+        def _flight_offers():
+            """The thread's latest search offers: from slot state on threads saved
+            before flight_offers_ref existed, otherwise from the search's saved
+            api_calls document (read once per turn, only when a view needs it)."""
+            if isinstance(slot_state.get("flight_offers"), list):
+                return slot_state["flight_offers"]
+            if not _offers_cache:
+                ref = slot_state.get("flight_offers_ref") if isinstance(slot_state.get("flight_offers_ref"), dict) else {}
+                offers = []
+                if ref.get("path"):
+                    try:
+                        doc = _fs_get_doc(ref["path"]) or {}
+                        offers = doc.get("offers") if isinstance(doc.get("offers"), list) else []
+                    except Exception:
+                        offers = []
+                _offers_cache.append(offers)
+            return _offers_cache[0]
 
         def _options_text(codes):
             """`alternatives` codes as words for an error_card description:
@@ -8308,7 +8432,7 @@ workflow:
             # The picked Duffel offer (flight_card-shaped, built by _offer_card
             # at search time) matched by picked_flight_offer_id. CTAs are dropped
             # so the embedded summary card does not re-offer "Book this".
-            offers = slot_state.get("flight_offers") if isinstance(slot_state.get("flight_offers"), list) else []
+            offers = _flight_offers()
             pid = str(slot_state.get("picked_flight_offer_id") or "")
             if not pid:
                 return None
@@ -8910,7 +9034,7 @@ workflow:
                                     "and I will filter." % (
                                         _na.get("cap"), _na.get("cap_currency"), _fc, _fc))
         elif intent == "flight_detail":
-            offers = slot_state.get("flight_offers") if isinstance(slot_state.get("flight_offers"), list) else []
+            offers = _flight_offers()
             picked_offer_id = str(slot_state.get("picked_flight_offer_id") or "")
             offer = None
             for item in offers:
@@ -9190,20 +9314,35 @@ workflow:
                 safe_widgets.append(item)
         calendar_events = _calendar_events()
         post_docs = []
+        offers_saved = None
+        tool_event_payload = tool_summary
         if isinstance(tool_summary, dict) and tool_summary.get("tool"):
-            post_docs.extend([
-                {"path": f"{thread_path}/slot_state/current", "doc": slot_state, "merge": False},
-                {
-                    "path": f"{thread_path}/api_calls/{tool_summary.get('call_id')}",
-                    "doc": {
-                        "call_id": tool_summary.get("call_id"),
-                        "tool": tool_summary.get("tool"),
-                        "arguments": extraction_context.get("first_tool_arguments") if isinstance(extraction_context, dict) else {},
-                        "response": tool_summary.get("raw_response", {}),
-                    },
-                    "merge": False,
-                },
-            ])
+            api_call_path = f"{thread_path}/api_calls/{tool_summary.get('call_id')}"
+            api_call_doc = {
+                "call_id": tool_summary.get("call_id"),
+                "tool": tool_summary.get("tool"),
+                "arguments": extraction_context.get("first_tool_arguments") if isinstance(extraction_context, dict) else {},
+                "response": tool_summary.get("raw_response", {}),
+            }
+            post_docs.append({"path": f"{thread_path}/slot_state/current", "doc": slot_state, "merge": False})
+            _offers = tool_summary.get("offers") if isinstance(tool_summary.get("offers"), list) else []
+            if _offers:
+                # The offers are saved here, once, and referenced from the tool
+                # event and slot state (flight_offers_ref). Through this step's
+                # result they would go past the 100 KB offload line.
+                try:
+                    _fs_set_doc(api_call_path, dict(api_call_doc, offers=_offers))
+                    offers_saved = True
+                except Exception as exc:
+                    # Degrade to the old document (without offers) through the
+                    # persist batch; a later "pick" then shows a placeholder card.
+                    offers_saved = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+                    post_docs.append({"path": api_call_path, "doc": api_call_doc, "merge": False})
+                tool_event_payload = {k: v for k, v in tool_summary.items() if k != "offers"}
+                tool_event_payload["offers_count"] = len(_offers)
+                tool_event_payload["offers_ref"] = api_call_path
+            else:
+                post_docs.append({"path": api_call_path, "doc": api_call_doc, "merge": False})
         for event in calendar_events:
             if isinstance(event, dict) and event.get("event_id"):
                 post_docs.append({
@@ -9218,7 +9357,7 @@ workflow:
                 "thread_path": thread_path,
                 "event": {
                     "type": "agent_tool_response",
-                    "payload": tool_summary,
+                    "payload": tool_event_payload,
                     "actor": {"kind": "agent", "name": "muno-itinerary-planner"},
                 },
             })
@@ -9282,12 +9421,19 @@ workflow:
         if isinstance(_relation_docs, list):
             post_docs.extend(d for d in _relation_docs if isinstance(d, dict) and d.get("path"))
 
+        # A large widget (a 50-offer flight_list is ~40 KB) is carried ONCE: in
+        # post_events, which saves it, and final_result reads it from there.
+        # Three copies of it (widgets, first_widget, post_events) were part of what
+        # pushed this result past the 100 KB offload line.
+        _large_widget = bool(safe_widgets) and len(json.dumps(safe_widgets[0], default=str)) > 16000
         result = {
             "thread_path": thread_path,
             "bot_message": bot_message,
             "final_slot_state": slot_state,
-            "widgets": safe_widgets,
-            "first_widget": safe_widgets[0] if safe_widgets else _bot(bot_message or "Ready."),
+            "widgets": [] if _large_widget else safe_widgets,
+            "first_widget": None if _large_widget else (safe_widgets[0] if safe_widgets else _bot(bot_message or "Ready.")),
+            "first_widget_in_post_events": _large_widget,
+            "offers_saved": offers_saved,
             "second_widget": safe_widgets[1] if len(safe_widgets) > 1 else {},
             "has_second_widget": len(safe_widgets) > 1,
             "calendar_events_path": events_path,
@@ -9299,6 +9445,8 @@ workflow:
             "post_docs": post_docs,
             "post_events": post_events,
         }
+        # Observable headroom under the 100 KB offload line.
+        result["result_bytes"] = len(json.dumps(result, default=str))
         globals().update({"result": result})
     next:
       # inclusive: the two main arcs below are mutually exclusive (post_docs >0 vs
@@ -9360,12 +9508,23 @@ workflow:
         slot_state: "{{ render_widget_chat.final_slot_state }}"
         extraction: "{{ extract_turn }}"
         widget: "{{ render_widget_chat.first_widget }}"
+        post_events: "{{ render_widget_chat.post_events | default([]) }}"
         bot_message: "{{ render_widget_chat.bot_message }}"
         request_id: "{{ workload.request_id | default('') }}"
         gateway_url: "{{ workload.gateway_url | default('') }}"
       code: |
         import json
         import urllib.request
+
+        # render_widget_chat carries a large widget only in post_events.
+        if not isinstance(widget, dict) or not widget:
+            widget = None
+            for _item in (post_events if isinstance(post_events, list) else []):
+                _ev = (_item or {}).get("event") if isinstance(_item, dict) else None
+                _env = (_ev or {}).get("payload", {}).get("envelope") if isinstance(_ev, dict) else None
+                if (_ev or {}).get("type") == "agent_widget_emit" and isinstance(_env, dict):
+                    widget = _env
+                    break
 
         result = {
             "status": "completed",
