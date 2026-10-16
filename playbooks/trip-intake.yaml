@@ -1,0 +1,1552 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: muno_trip_intake
+  path: muno/playbooks/trip-intake
+  description: |
+    Trip intake (adiona/frontend#55): talk with the traveller until every
+    required field of FlightSearchForm and/or HotelSearchForm is known, then
+    return the form JSON exactly as those forms take it. It does NOT search:
+    no flight, hotel or places provider is called, and no results are returned.
+
+    One chat turn per invocation, like the itinerary planner, and the same
+    thread rules: the caller must own the thread (load_state is the planner's
+    load_slot_state verbatim, guarded by scripts/trip_intake_test.py), and the
+    turn is saved to chat_threads/{thread_id} through mcp/firestore.
+
+    REQUIRED (asked until known, one or two questions at a time, never asked
+    again once given; the latest answer wins, so corrections just work):
+      hotel   destination (a city, or a named hotel), checkIn, checkOut, rooms,
+              adults (+ each child's age, if they mentioned children)
+      flight  origin, destination (airport codes), departDate, tripType,
+              returnDate for a round trip, adults (+ children's ages)
+      both    the shared details (destination, dates, travellers) once
+
+    OPTIONAL (only when the user gave them; nothing is defaulted or invented)
+      latitude/longitude (coordinates sent with a turn), radius (km),
+      defaultDestination (see _default_destination). `children` is [] when
+      there are none.
+
+    OUTPUT. result.render is the first form; result.forms holds every form of
+    the trip (hotel first); result.bot_message is the question or the hand-off
+    line. Each form is exactly:
+      {"widget_type": "hotel_search_form" | "flight_search_form",
+       "payload": {"criteria": {...}, "defaultDestination"?: "..."}}
+
+    VALIDATION. Dates are YYYY-MM-DD and not in the past; return >= departure;
+    check-out after check-in; counts within the forms' own limits. Airport codes
+    are only those FlightSearchForm can prefill (its airports.ts); a city with
+    several airports is a question, never a pick.
+  version: "1"
+  agent: true
+  tags: [muno, intake, forms, event-sourced]
+  terminal:
+    visible: true
+    workspace: muno
+    scopes: [/muno/intake, /mcp/firestore]
+  capabilities: [mcp:firestore, ai:vertex-ai]
+
+workload:
+  thread_id: ""
+  user_uid: guest
+  request_id: ""
+  gateway_url: ""
+  event_type: user_message
+  event_payload: {}
+  firestore_database: "(default)"
+  firestore_project: shastaratech-noetl-prod
+  allow_guest_threads: false
+  # The model only reads the user's words into fields; every rule is code.
+  # false = the deterministic reader alone (also the fallback on any model error).
+  llm_enabled: true
+  llm_model: gemini-3.8-flash
+  vertex_project: shastaratech-noetl-prod
+  vertex_region: global
+  # YYYY-MM-DD; empty = today. For replays and tests only.
+  today: ""
+
+workflow:
+  - step: start
+    desc: Entry point — the Rust runtime requires a step named `start`
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: normalize_input
+
+  - step: normalize_input
+    desc: Normalize caller input and generate a thread id when needed
+    tool:
+      kind: python
+      input:
+        thread_id: "{{ workload.thread_id }}"
+        user_uid: "{{ workload.user_uid | default('guest') }}"
+        event_type: "{{ workload.event_type | default('user_message') }}"
+        event_payload: "{{ workload.event_payload | default({}) }}"
+        replay: "{{ workload.replay | default(false) }}"
+        replay_thread_id: "{{ workload.replay_thread_id | default('') }}"
+      code: |
+        import json
+        import time
+        import uuid
+
+        def _as_dict(value):
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    try:
+                        import ast
+                        parsed = ast.literal_eval(value)
+                        return parsed if isinstance(parsed, dict) else {}
+                    except Exception:
+                        return {}
+            return {}
+
+        tid = str(replay_thread_id or thread_id or "").strip()
+        if not tid:
+            tid = f"chat_threads/_smoke-{uuid.uuid4().hex[:10]}"
+        elif not tid.startswith("chat_threads/"):
+            tid = f"chat_threads/{tid.strip('/')}"
+
+        payload = _as_dict(event_payload)
+        event = {
+            "type": str(event_type or "user_message"),
+            "payload": payload,
+            "actor": {"kind": "user", "uid": user_uid or "guest"},
+            "created_at_ms": int(time.time() * 1000),
+            "source": "muno.trip_intake",
+        }
+        result = {
+            "thread_path": tid,
+            "thread_id": tid.split("/", 1)[1] if "/" in tid else tid,
+            "event_type": event["type"],
+            "event_payload": payload,
+            "input_event": event,
+            "replay": bool(replay),
+        }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: load_state
+
+  - step: load_state
+    desc: Load the intake state and decide thread access (the planner's load_slot_state, verbatim)
+    # The code is byte-identical to itinerary-planner's load_slot_state, so
+    # both playbooks enforce the same thread ownership and write the same
+    # user<->thread relation (scripts/trip_intake_test.py fails on any drift).
+    # Only doc_path differs: the intake keeps its own slot document.
+    tool:
+      kind: python
+      input:
+        doc_path: "{{ normalize_input.thread_path }}/slot_state/intake"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        thread_id: "{{ normalize_input.thread_id }}"
+        user_uid: "{{ workload.user_uid | default('guest') }}"
+        event_type: "{{ normalize_input.event_type }}"
+        event_payload: "{{ normalize_input.event_payload }}"
+        allow_guest_threads: "{{ workload.allow_guest_threads | default(false) }}"
+      code: |
+        import json
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        METADATA_TOKEN_URL = (
+            "http://metadata.google.internal/computeMetadata/v1/instance/"
+            "service-accounts/default/token"
+        )
+
+        def _as_dict(value):
+            return value if isinstance(value, dict) else {}
+
+        def _as_list(value):
+            return value if isinstance(value, list) else []
+
+        def _safe_int(value, default=0):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _token():
+            req = urllib.request.Request(
+                METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"}, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode("utf-8") or "{}")
+            token = (payload or {}).get("access_token")
+            if not token:
+                raise RuntimeError("metadata token endpoint returned no access_token")
+            return token
+
+        def _decode_value(value):
+            value = _as_dict(value)
+            if "nullValue" in value:
+                return None
+            if "booleanValue" in value:
+                return bool(value.get("booleanValue"))
+            if "integerValue" in value:
+                return _safe_int(value.get("integerValue"), 0)
+            if "doubleValue" in value:
+                try:
+                    return float(value.get("doubleValue"))
+                except (TypeError, ValueError):
+                    return 0.0
+            for key in ("timestampValue", "stringValue", "bytesValue",
+                        "referenceValue", "geoPointValue"):
+                if key in value:
+                    return value.get(key)
+            if "arrayValue" in value:
+                return [_decode_value(i)
+                        for i in _as_list(_as_dict(value.get("arrayValue")).get("values"))]
+            if "mapValue" in value:
+                fields = _as_dict(_as_dict(value.get("mapValue")).get("fields"))
+                return {k: _decode_value(v) for k, v in fields.items()}
+            return value
+
+        def _relative_from_name(name):
+            marker = "/documents/"
+            name = str(name or "")
+            return name.split(marker, 1)[1] if marker in name else name
+
+        path = str(doc_path or "").strip().strip("/")
+        db = str(firestore_database or "(default)")
+        root = ("https://firestore.googleapis.com/v1/projects/"
+                + str(firestore_project)
+                + "/databases/" + urllib.parse.quote(db, safe="()")
+                + "/documents")
+        url = root + "/" + urllib.parse.quote(path, safe="/")
+
+        found = False
+        document = None
+        error = ""
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"Authorization": "Bearer %s" % _token(),
+                         "Accept": "application/json"},
+                method="GET")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = json.loads(resp.read().decode("utf-8") or "{}")
+            fields = _as_dict(body.get("fields"))
+            document = {
+                "name": body.get("name"),
+                "path": _relative_from_name(body.get("name")),
+                "createTime": body.get("createTime"),
+                "updateTime": body.get("updateTime"),
+                "data": {k: _decode_value(v) for k, v in fields.items()},
+            }
+            found = True
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                # A brand-new thread has no projection yet.  Not an error --
+                # the turn starts from an empty slot state.
+                found = False
+            else:
+                error = "HTTP %s: %s" % (
+                    exc.code, exc.read().decode("utf-8", "replace")[:300])
+        except Exception as exc:
+            error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+
+        # ── Thread access + the user<->thread relation ───────────────────────
+        # Two records live beside chat_threads/** (which is never modified):
+        #
+        #   thread_owners/{thread_id}       who CREATED the thread: the anchor of
+        #                                   access, written once by the first turn
+        #   user_thread_map/{edge_id}       one edge per (uid, thread_id): uid,
+        #                                   thread_id, role, label, first_added_at_ms,
+        #                                   last_activity_ms, turn_count, archived.
+        #                                   edge_id = sha256(uid + "\n" + thread_id)
+        #
+        # ⚠ An edge is written ONLY for a caller this step has already
+        # authorized, so authoring an event can never create membership by
+        # itself. A turn is authorized when the caller
+        #   1. has an edge for the thread (owner or member), or
+        #   2. is the thread's recorded owner (an edge lost or never written is
+        #      repaired), or
+        #   3. starts a brand-new thread (no owner record, no history), or
+        #   4. continues an UNOWNED thread with history -- one started anonymously
+        #      (or before ownership existed) -- after signing in: claim-on-signin,
+        #      a product decision (2026-10-13). The first signed-in caller becomes
+        #      its owner; from then on rule 1/2 applies and everyone else is
+        #      refused. Threads are single-owner: nothing here adds a member.
+        # Everything else is refused (refuse_thread). Members other than the
+        # owner can only be added by an explicit grant, which this change does
+        # not offer (see the PR).
+        #
+        # relation_docs are the writes this turn adds to the persist batch
+        # (appended to render_widget_chat.post_docs).
+        import hashlib
+        import re
+        import time
+
+        THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+        LABEL_MAX = 80
+        _token_cache = []
+
+        def _cached_token():
+            if not _token_cache:
+                _token_cache.append(_token())
+            return _token_cache[0]
+
+        def _get_fields(rel_path):
+            """(found, fields, error) for one document. 404 is (False, {}, "")."""
+            doc_url = root + "/" + urllib.parse.quote(rel_path, safe="/")
+            try:
+                req = urllib.request.Request(
+                    doc_url,
+                    headers={"Authorization": "Bearer %s" % _cached_token(),
+                             "Accept": "application/json"},
+                    method="GET")
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+                fields = _as_dict(body.get("fields"))
+                return True, {k: _decode_value(v) for k, v in fields.items()}, ""
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    return False, {}, ""
+                return False, {}, "HTTP %s" % exc.code
+            except Exception as exc:
+                return False, {}, "%s: %s" % (type(exc).__name__, str(exc)[:200])
+
+        def _edge_id(edge_uid, edge_thread):
+            # A hash, not "{uid}__{thread_id}": both parts may contain "_", so a
+            # joined id could be the same string for two different pairs.
+            return hashlib.sha256((edge_uid + "\n" + edge_thread).encode("utf-8")).hexdigest()
+
+        def _flag(value):
+            if isinstance(value, bool):
+                return value
+            return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+        def _label():
+            payload = _as_dict(event_payload)
+            if str(event_type or "") == "user_message":
+                text = " ".join(str(payload.get("text") or "").split())
+                if text:
+                    return text if len(text) <= LABEL_MAX else text[:LABEL_MAX - 1] + "\u2026"
+            return "New trip"
+
+        thread_key = str(thread_id or "").strip()
+        uid = str(user_uid or "").strip()
+        anonymous = uid in ("", "guest")
+        now_ms = int(time.time() * 1000)
+        access = {"ok": False, "reason": "", "thread_id": thread_key,
+                  "uid": "" if anonymous else uid, "role": "", "claim": False}
+        relation_docs = []
+
+        if not THREAD_ID_RE.match(thread_key):
+            access["reason"] = "invalid_thread_id"
+        elif "/" in uid:
+            access["reason"] = "invalid_uid"
+        elif anonymous:
+            if thread_key.startswith("_smoke-") or _flag(allow_guest_threads):
+                access.update(ok=True, reason="anonymous_unmapped")
+            else:
+                access["reason"] = "sign_in_required"
+        elif error:
+            # The slot read failed: we cannot tell a new thread from an old one.
+            access["reason"] = "access_unverifiable"
+        else:
+            edge_path = "user_thread_map/" + _edge_id(uid, thread_key)
+            edge_found, edge, edge_error = _get_fields(edge_path)
+            owner = {}
+            if edge_error:
+                access["reason"] = "access_unverifiable"
+            elif edge_found and str(edge.get("uid") or "") == uid and str(edge.get("thread_id") or "") == thread_key:
+                access.update(ok=True, reason="member", role=str(edge.get("role") or "member"))
+            else:
+                owner_found, owner, owner_error = _get_fields("thread_owners/" + thread_key)
+                if owner_error:
+                    access["reason"] = "access_unverifiable"
+                elif owner_found:
+                    if str(owner.get("uid") or "") != uid:
+                        access["reason"] = "not_member"
+                    elif owner.get("unlinked_at_ms"):
+                        access["reason"] = "thread_unlinked"
+                    else:
+                        access.update(ok=True, reason="owner_edge_repaired", role="owner")
+                elif found:
+                    # History but no owner: started anonymously, or before ownership
+                    # existed. Claim-on-signin (rule 4 above).
+                    access.update(ok=True, reason="claimed_on_signin", role="owner", claim=True)
+                else:
+                    access.update(ok=True, reason="created", role="owner", claim=True)
+
+            if access["ok"]:
+                doc = {
+                    "uid": uid,
+                    "thread_id": thread_key,
+                    "thread_path": "chat_threads/" + thread_key,
+                    "last_activity_ms": now_ms,
+                }
+                if edge_found:
+                    doc["turn_count"] = _safe_int(edge.get("turn_count"), 0) + 1
+                else:
+                    doc.update({
+                        "role": access["role"],
+                        "label": _label(),
+                        "first_added_at_ms": _safe_int(owner.get("created_at_ms"), 0) or now_ms,
+                        "turn_count": 1,
+                        "archived": False,
+                        "added_by": "planner",
+                    })
+                relation_docs.append({"path": edge_path, "doc": doc, "merge": True})
+                if access["claim"]:
+                    relation_docs.append({
+                        "path": "thread_owners/" + thread_key,
+                        "doc": {"uid": uid, "thread_id": thread_key,
+                                "created_at_ms": now_ms, "claimed_by": "planner"},
+                        "merge": False,
+                    })
+
+        # Same envelope the mcp/firestore child returned, so downstream
+        # accessors are unchanged.
+        result = {
+            "data": {"found": found, "path": path, "document": document},
+            "load_error": error,
+            "thread_access": access,
+            "relation_docs": relation_docs,
+        }
+        globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        # refuse_thread is a terminal leaf nothing else routes to
+        # (scripts/playbook_skip_topology_test.py).
+        - when: "{{ load_state.thread_access.ok }}"
+          step: intake_turn
+        - step: refuse_thread
+
+  - step: refuse_thread
+    desc: End a turn on a thread the caller does not own, without reading or writing it
+    tool:
+      kind: python
+      input:
+        access: "{{ load_state.thread_access }}"
+        request_id: "{{ workload.request_id | default('') }}"
+        gateway_url: "{{ workload.gateway_url | default('') }}"
+      code: |
+        import json
+        import urllib.request
+
+        reason = str((access or {}).get("reason") or "denied") if isinstance(access, dict) else "denied"
+        if reason == "sign_in_required":
+            text = "Please sign in to continue this conversation."
+        else:
+            text = "That conversation isn't available, so I've started a new one. Please send your message again."
+        # A normal completed result, so the SPA renders bot_message and resets
+        # its stored thread id on `thread_access == "denied"`. No thread data is
+        # included, and "not yours" reads the same as "does not exist".
+        result = {
+            "status": "completed",
+            "thread_access": "denied",
+            "thread_access_reason": "sign_in_required" if reason == "sign_in_required" else "unavailable",
+            "bot_message": text,
+            "final_slot_state": {},
+            "emitted_widget_types": [],
+        }
+        if request_id and gateway_url:
+            try:
+                body = json.dumps({"request_id": request_id, "status": "COMPLETED", "data": result}).encode("utf-8")
+                req = urllib.request.Request(
+                    gateway_url.rstrip("/") + "/api/internal/callback/async",
+                    data=body, headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result["gateway_callback"] = {"delivered": 200 <= response.status < 300}
+            except Exception as exc:
+                result["gateway_callback"] = {"delivered": False, "error": str(exc)[:300]}
+        globals().update({"result": result})
+
+  - step: intake_turn
+    desc: Read the turn, merge and validate it, then ask for what is missing or return the form JSON
+    tool:
+      kind: python
+      input:
+        thread_path: "{{ normalize_input.thread_path }}"
+        event_payload: "{{ normalize_input.event_payload }}"
+        input_event: "{{ normalize_input.input_event }}"
+        loaded_state: "{{ load_state.data | default({}) }}"
+        relation_docs: "{{ load_state.relation_docs | default([]) }}"
+        llm_enabled: "{{ workload.llm_enabled | default(true) }}"
+        llm_model: "{{ workload.llm_model | default('gemini-3.8-flash') }}"
+        vertex_project: "{{ workload.vertex_project | default('shastaratech-noetl-prod') }}"
+        vertex_region: "{{ workload.vertex_region | default('global') }}"
+        today_override: "{{ workload.today | default('') }}"
+      code: |
+        import json
+        import math
+        import re
+        import urllib.parse
+        import urllib.request
+        from datetime import date, timedelta
+
+        # ── What this step does ──────────────────────────────────────────────────
+        # One chat turn of trip intake (adiona/frontend#55). It reads the user's
+        # message, merges what they said into the intake state, and either asks for
+        # what is still missing (one or two questions) or, once every required field
+        # of the form(s) is known, returns the form JSON exactly as FlightSearchForm /
+        # HotelSearchForm take it.
+        #
+        #   * No flight or hotel search: nothing here calls a provider. The only
+        #     network call is the optional Gemini extraction of the user's words.
+        #   * Nothing is invented: a value is only ever what the user said in this
+        #     thread. Optional fields (latitude/longitude/radius, defaultDestination)
+        #     appear only when the user gave them; `children` is [] when there are none.
+        #   * The model only READS the message. Every rule (required fields, dates,
+        #     airports, the output shape) is plain code below, so the output cannot
+        #     drift with the model.
+
+        # The airports FlightSearchForm can prefill (adiona/frontend src/data/airports.ts,
+        # generated by scripts/gen_intake_airports.py). A code outside this table would
+        # leave the form's field empty, so the intake never returns one.
+        AIRPORTS_TABLE = """
+                    JFK|John F. Kennedy International Airport|New York|United States|40.6413|-73.7781
+                    EWR|Newark Liberty International Airport|New York|United States|40.6895|-74.1745
+                    LAX|Los Angeles International Airport|Los Angeles|United States|33.9425|-118.4081
+                    ORD|O'Hare International Airport|Chicago|United States|41.9742|-87.9073
+                    MIA|Miami International Airport|Miami|United States|25.7959|-80.2870
+                    SFO|San Francisco International Airport|San Francisco|United States|37.6213|-122.3790
+                    SEA|Seattle-Tacoma International Airport|Seattle|United States|47.4502|-122.3088
+                    BOS|Logan International Airport|Boston|United States|42.3656|-71.0096
+                    DFW|Dallas/Fort Worth International Airport|Dallas|United States|32.8998|-97.0403
+                    ATL|Hartsfield-Jackson Atlanta International Airport|Atlanta|United States|33.6407|-84.4277
+                    DEN|Denver International Airport|Denver|United States|39.8561|-104.6737
+                    LHR|Heathrow Airport|London|United Kingdom|51.4700|-0.4543
+                    LGW|Gatwick Airport|London|United Kingdom|51.1481|-0.1903
+                    STN|London Stansted Airport|London|United Kingdom|51.8860|0.2389
+                    CDG|Charles de Gaulle Airport|Paris|France|49.0097|2.5479
+                    NRT|Narita International Airport|Tokyo|Japan|35.7720|140.3929
+                    HND|Haneda Airport|Tokyo|Japan|35.5494|139.7798
+                    DXB|Dubai International Airport|Dubai|United Arab Emirates|25.2532|55.3657
+                    SIN|Singapore Changi Airport|Singapore|Singapore|1.3644|103.9915
+                    BCN|Barcelona–El Prat Airport|Barcelona|Spain|41.2974|2.0833
+                    FCO|Leonardo da Vinci–Fiumicino Airport|Rome|Italy|41.8003|12.2389
+                    AMS|Amsterdam Airport Schiphol|Amsterdam|Netherlands|52.3105|4.7683
+                    FRA|Frankfurt Airport|Frankfurt|Germany|50.0379|8.5622
+                    IST|Istanbul Airport|Istanbul|Turkey|41.2753|28.7519
+                    BKK|Suvarnabhumi Airport|Bangkok|Thailand|13.6900|100.7501
+                    SYD|Sydney Kingsford Smith Airport|Sydney|Australia|-33.9461|151.1772
+                    YYZ|Toronto Pearson International Airport|Toronto|Canada|43.6777|-79.6248
+                    ICN|Incheon International Airport|Seoul|South Korea|37.4602|126.4407
+                    HKG|Hong Kong International Airport|Hong Kong|Hong Kong|22.3080|113.9185
+                    MAD|Adolfo Suárez Madrid–Barajas Airport|Madrid|Spain|40.4983|-3.5676
+                    BER|Berlin Brandenburg Airport|Berlin|Germany|52.3667|13.5033
+                    MUC|Munich Airport|Munich|Germany|48.3537|11.7750
+                    LIS|Humberto Delgado Airport|Lisbon|Portugal|38.7756|-9.1354
+                    ATH|Athens International Airport|Athens|Greece|37.9364|23.9445
+                    ZRH|Zurich Airport|Zurich|Switzerland|47.4647|8.5492
+                    VIE|Vienna International Airport|Vienna|Austria|48.1103|16.5697
+                    SOF|Sofia Airport|Sofia|Bulgaria|42.6952|23.4062
+                    TBS|Tbilisi International Airport|Tbilisi|Georgia|41.6692|44.9547
+                    TLV|Ben Gurion Airport|Tel Aviv|Israel|32.0055|34.8854
+                    CUN|Cancún International Airport|Cancun|Mexico|21.0365|-86.8771
+                    MEX|Mexico City International Airport|Mexico City|Mexico|19.4361|-99.0719
+                    GRU|São Paulo/Guarulhos International Airport|São Paulo|Brazil|-23.4356|-46.4731
+                    EZE|Ministro Pistarini International Airport|Buenos Aires|Argentina|-34.8222|-58.5358
+                    DEL|Indira Gandhi International Airport|Delhi|India|28.5562|77.1000
+                    BOM|Chhatrapati Shivaji Maharaj International Airport|Mumbai|India|19.0896|72.8656
+                    LGA|LaGuardia Airport|New York|United States|40.7769|-73.8740
+                    IAD|Washington Dulles International Airport|Washington|United States|38.9531|-77.4565
+                    DCA|Ronald Reagan Washington National Airport|Washington|United States|38.8512|-77.0402
+                    PHL|Philadelphia International Airport|Philadelphia|United States|39.8744|-75.2424
+                    IAH|George Bush Intercontinental Airport|Houston|United States|29.9902|-95.3368
+                    PHX|Phoenix Sky Harbor International Airport|Phoenix|United States|33.4342|-112.0116
+                    LAS|Harry Reid International Airport|Las Vegas|United States|36.0840|-115.1537
+                    MCO|Orlando International Airport|Orlando|United States|28.4312|-81.3081
+                    MSP|Minneapolis–Saint Paul International Airport|Minneapolis|United States|44.8848|-93.2223
+                    DTW|Detroit Metropolitan Airport|Detroit|United States|42.2162|-83.3554
+                    CLT|Charlotte Douglas International Airport|Charlotte|United States|35.2144|-80.9473
+                    SAN|San Diego International Airport|San Diego|United States|32.7338|-117.1933
+                    PDX|Portland International Airport|Portland|United States|45.5898|-122.5951
+                    SLC|Salt Lake City International Airport|Salt Lake City|United States|40.7899|-111.9791
+                    AUS|Austin–Bergstrom International Airport|Austin|United States|30.1975|-97.6664
+                    MSY|Louis Armstrong New Orleans International Airport|New Orleans|United States|29.9934|-90.2580
+                    BNA|Nashville International Airport|Nashville|United States|36.1263|-86.6774
+                    HNL|Daniel K. Inouye International Airport|Honolulu|United States|21.3187|-157.9225
+                    YVR|Vancouver International Airport|Vancouver|Canada|49.1967|-123.1815
+                    YUL|Montréal–Trudeau International Airport|Montreal|Canada|45.4706|-73.7408
+                    YYC|Calgary International Airport|Calgary|Canada|51.1215|-114.0076
+                    GDL|Guadalajara International Airport|Guadalajara|Mexico|20.5218|-103.3112
+                    HAV|José Martí International Airport|Havana|Cuba|22.9892|-82.4091
+                    PUJ|Punta Cana International Airport|Punta Cana|Dominican Republic|18.5674|-68.3634
+                    SJO|Juan Santamaría International Airport|San José|Costa Rica|9.9939|-84.2088
+                    PTY|Tocumen International Airport|Panama City|Panama|9.0714|-79.3835
+                    BOG|El Dorado International Airport|Bogotá|Colombia|4.7016|-74.1469
+                    MDE|José María Córdova International Airport|Medellín|Colombia|6.1645|-75.4231
+                    LIM|Jorge Chávez International Airport|Lima|Peru|-12.0219|-77.1143
+                    SCL|Arturo Merino Benítez International Airport|Santiago|Chile|-33.3930|-70.7858
+                    GIG|Rio de Janeiro/Galeão International Airport|Rio de Janeiro|Brazil|-22.8090|-43.2506
+                    ORY|Paris Orly Airport|Paris|France|48.7262|2.3652
+                    LYS|Lyon–Saint-Exupéry Airport|Lyon|France|45.7256|5.0811
+                    MXP|Milan Malpensa Airport|Milan|Italy|45.6306|8.7281
+                    VCE|Venice Marco Polo Airport|Venice|Italy|45.5053|12.3519
+                    FLR|Florence Airport, Peretola|Florence|Italy|43.8100|11.2051
+                    NAP|Naples International Airport|Naples|Italy|40.8860|14.2908
+                    DUB|Dublin Airport|Dublin|Ireland|53.4213|-6.2701
+                    EDI|Edinburgh Airport|Edinburgh|United Kingdom|55.9500|-3.3725
+                    MAN|Manchester Airport|Manchester|United Kingdom|53.3537|-2.2750
+                    BRU|Brussels Airport|Brussels|Belgium|50.9014|4.4844
+                    GVA|Geneva Airport|Geneva|Switzerland|46.2381|6.1090
+                    HAM|Hamburg Airport|Hamburg|Germany|53.6304|9.9882
+                    DUS|Düsseldorf Airport|Düsseldorf|Germany|51.2895|6.7668
+                    OPO|Francisco Sá Carneiro Airport|Porto|Portugal|41.2481|-8.6814
+                    AGP|Málaga–Costa del Sol Airport|Málaga|Spain|36.6749|-4.4991
+                    SVQ|Seville Airport|Seville|Spain|37.4180|-5.8931
+                    PMI|Palma de Mallorca Airport|Palma de Mallorca|Spain|39.5517|2.7388
+                    CPH|Copenhagen Airport|Copenhagen|Denmark|55.6180|12.6508
+                    ARN|Stockholm Arlanda Airport|Stockholm|Sweden|59.6519|17.9186
+                    OSL|Oslo Gardermoen Airport|Oslo|Norway|60.1976|11.1004
+                    BGO|Bergen Flesland Airport|Bergen|Norway|60.2934|5.2181
+                    HEL|Helsinki Airport|Helsinki|Finland|60.3172|24.9633
+                    KEF|Keflavík International Airport|Reykjavik|Iceland|63.9850|-22.6056
+                    TLL|Tallinn Airport|Tallinn|Estonia|59.4133|24.8328
+                    RIX|Riga International Airport|Riga|Latvia|56.9236|23.9711
+                    VNO|Vilnius International Airport|Vilnius|Lithuania|54.6341|25.2858
+                    WAW|Warsaw Chopin Airport|Warsaw|Poland|52.1657|20.9671
+                    KRK|Kraków John Paul II International Airport|Kraków|Poland|50.0777|19.7848
+                    PRG|Václav Havel Airport Prague|Prague|Czech Republic|50.1008|14.2600
+                    BUD|Budapest Ferenc Liszt International Airport|Budapest|Hungary|47.4298|19.2611
+                    OTP|Henri Coandă International Airport|Bucharest|Romania|44.5711|26.0850
+                    BEG|Belgrade Nikola Tesla Airport|Belgrade|Serbia|44.8184|20.3091
+                    ZAG|Zagreb Airport|Zagreb|Croatia|45.7429|16.0688
+                    DBV|Dubrovnik Airport|Dubrovnik|Croatia|42.5614|18.2682
+                    SKG|Thessaloniki Airport Makedonia|Thessaloniki|Greece|40.5197|22.9709
+                    HER|Heraklion International Airport|Heraklion|Greece|35.3397|25.1803
+                    JTR|Santorini International Airport|Santorini|Greece|36.3992|25.4793
+                    JMK|Mykonos Airport|Mykonos|Greece|37.4351|25.3481
+                    MLA|Malta International Airport|Valletta|Malta|35.8575|14.4775
+                    LCA|Larnaca International Airport|Larnaca|Cyprus|34.8751|33.6249
+                    SAW|Sabiha Gökçen International Airport|Istanbul|Turkey|40.8986|29.3092
+                    AYT|Antalya Airport|Antalya|Turkey|36.8987|30.8005
+                    EVN|Zvartnots International Airport|Yerevan|Armenia|40.1473|44.3959
+                    GYD|Heydar Aliyev International Airport|Baku|Azerbaijan|40.4675|50.0467
+                    SVO|Sheremetyevo International Airport|Moscow|Russia|55.9726|37.4146
+                    DOH|Hamad International Airport|Doha|Qatar|25.2731|51.6081
+                    AUH|Zayed International Airport|Abu Dhabi|United Arab Emirates|24.4330|54.6511
+                    RUH|King Khalid International Airport|Riyadh|Saudi Arabia|24.9576|46.6988
+                    JED|King Abdulaziz International Airport|Jeddah|Saudi Arabia|21.6796|39.1565
+                    AMM|Queen Alia International Airport|Amman|Jordan|31.7226|35.9932
+                    CAI|Cairo International Airport|Cairo|Egypt|30.1219|31.4056
+                    CMN|Mohammed V International Airport|Casablanca|Morocco|33.3675|-7.5898
+                    RAK|Marrakesh Menara Airport|Marrakech|Morocco|31.6069|-8.0363
+                    LOS|Murtala Muhammed International Airport|Lagos|Nigeria|6.5774|3.3212
+                    ACC|Kotoka International Airport|Accra|Ghana|5.6052|-0.1668
+                    ADD|Addis Ababa Bole International Airport|Addis Ababa|Ethiopia|8.9779|38.7993
+                    NBO|Jomo Kenyatta International Airport|Nairobi|Kenya|-1.3192|36.9278
+                    ZNZ|Abeid Amani Karume International Airport|Zanzibar|Tanzania|-6.2220|39.2249
+                    JNB|O. R. Tambo International Airport|Johannesburg|South Africa|-26.1392|28.2460
+                    CPT|Cape Town International Airport|Cape Town|South Africa|-33.9715|18.6021
+                    KIX|Kansai International Airport|Osaka|Japan|34.4347|135.2440
+                    PEK|Beijing Capital International Airport|Beijing|China|40.0799|116.6031
+                    PVG|Shanghai Pudong International Airport|Shanghai|China|31.1443|121.8083
+                    CAN|Guangzhou Baiyun International Airport|Guangzhou|China|23.3924|113.2988
+                    TPE|Taiwan Taoyuan International Airport|Taipei|Taiwan|25.0797|121.2342
+                    MNL|Ninoy Aquino International Airport|Manila|Philippines|14.5086|121.0198
+                    HAN|Noi Bai International Airport|Hanoi|Vietnam|21.2212|105.8072
+                    SGN|Tan Son Nhat International Airport|Ho Chi Minh City|Vietnam|10.8188|106.6519
+                    HKT|Phuket International Airport|Phuket|Thailand|8.1132|98.3169
+                    KUL|Kuala Lumpur International Airport|Kuala Lumpur|Malaysia|2.7456|101.7099
+                    CGK|Soekarno–Hatta International Airport|Jakarta|Indonesia|-6.1256|106.6559
+                    DPS|Ngurah Rai International Airport|Bali|Indonesia|-8.7482|115.1675
+                    BLR|Kempegowda International Airport|Bengaluru|India|13.1986|77.7066
+                    MAA|Chennai International Airport|Chennai|India|12.9941|80.1709
+                    CMB|Bandaranaike International Airport|Colombo|Sri Lanka|7.1808|79.8841
+                    KTM|Tribhuvan International Airport|Kathmandu|Nepal|27.6966|85.3591
+                    ALA|Almaty International Airport|Almaty|Kazakhstan|43.3521|77.0405
+                    TAS|Tashkent International Airport|Tashkent|Uzbekistan|41.2579|69.2812
+                    MEL|Melbourne Airport|Melbourne|Australia|-37.6690|144.8410
+                    BNE|Brisbane Airport|Brisbane|Australia|-27.3842|153.1175
+                    PER|Perth Airport|Perth|Australia|-31.9385|115.9672
+                    AKL|Auckland Airport|Auckland|New Zealand|-37.0082|174.7850
+        """
+
+        AIRPORTS = []
+        for _line in AIRPORTS_TABLE.strip().splitlines():
+            _code, _name, _city, _country, _lat, _lon = _line.strip().split("|")
+            AIRPORTS.append({"code": _code, "name": _name, "city": _city, "country": _country,
+                             "lat": float(_lat), "lon": float(_lon)})
+        BY_CODE = {a["code"]: a for a in AIRPORTS}
+        CITY_CODES = {}
+        for _a in AIRPORTS:
+            CITY_CODES.setdefault(_a["city"].lower(), []).append(_a["code"])
+
+        # Form limits (the steppers in the two forms).
+        HOTEL_MAX_ROOMS, HOTEL_MAX_ADULTS = 8, 16
+        FLIGHT_MAX_ADULTS, MAX_CHILDREN, MAX_CHILD_AGE = 9, 8, 17
+        # Coordinates resolve to the nearest known city within this distance; farther
+        # than that we ask rather than guess.
+        COORDS_CITY_KM = 50.0
+
+        INTENTS = ("hotel", "flight", "both")
+        DATE_KEYS = ("start_date", "end_date", "depart_date", "return_date", "check_in", "check_out")
+        STATE_KEYS = ("intent", "destination", "origin", "trip_type", "adults", "children_count",
+                      "children_ages", "rooms", "latitude", "longitude", "radius") + DATE_KEYS
+
+
+        def _as_dict(value):
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str) and value.strip().startswith("{"):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, dict) else {}
+                except ValueError:
+                    return {}
+            return {}
+
+
+        def _int(value, lo, hi):
+            try:
+                if isinstance(value, bool):
+                    return None
+                n = int(value)
+            except (TypeError, ValueError):
+                return None
+            return n if lo <= n <= hi else None
+
+
+        def _num(value):
+            try:
+                if isinstance(value, bool) or value is None:
+                    return None
+                n = float(value)
+                return n if math.isfinite(n) else None
+            except (TypeError, ValueError):
+                return None
+
+
+        def _iso(value):
+            try:
+                return date.fromisoformat(str(value)[:10]).isoformat()
+            except (TypeError, ValueError):
+                return None
+
+
+        def _km(lat1, lon1, lat2, lon2):
+            p1, p2 = math.radians(lat1), math.radians(lat2)
+            dp, dl = p2 - p1, math.radians(lon2 - lon1)
+            h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+            return 6371.0 * 2 * math.asin(math.sqrt(h))
+
+
+        def nearest_city(lat, lon):
+            best = min(AIRPORTS, key=lambda a: _km(lat, lon, a["lat"], a["lon"]))
+            return best["city"] if _km(lat, lon, best["lat"], best["lon"]) <= COORDS_CITY_KM else None
+
+
+        def _canonical_city(text):
+            codes = CITY_CODES.get(str(text or "").strip().lower())
+            return BY_CODE[codes[0]]["city"] if codes else None
+
+
+        def resolve_airport(place):
+            """(code, options, error) for an origin/destination the user gave.
+
+            A code in the table is used as is; a city with one airport resolves to it;
+            a city with several is a question (options); anything else is a question."""
+            place = _as_dict(place)
+            text = str(place.get("text") or "").strip()
+            if place.get("code") in BY_CODE:
+                return place["code"], [], None
+            if re.fullmatch(r"[A-Za-z]{3}", text) and text.upper() in BY_CODE:
+                return text.upper(), [], None
+            city = _canonical_city(text) or (place.get("kind") == "hotel" and None)
+            codes = CITY_CODES.get(str(city or "").lower(), [])
+            if len(codes) == 1:
+                return codes[0], [], None
+            if len(codes) > 1:
+                return None, codes, None
+            return None, [], "unknown_airport"
+
+
+        # ── Reading the user's words ─────────────────────────────────────────────
+        # Both readers return the same patch shape; a key is present only when the
+        # user said it in THIS message.
+        #
+        #   intent            hotel | flight | both
+        #   destination       {"text", "kind": city | hotel | airport}
+        #   origin            {"text", "kind": city | airport}
+        #   start_date/end_date                 dates given for the trip as a whole
+        #   depart_date/return_date/check_in/check_out   dates given for one form
+        #   trip_type         one_way | round_trip
+        #   adults, children_count, children_ages, rooms, radius
+        #   airport_code      the answer to "which airport?"
+
+        LLM_SYSTEM_PROMPT = (
+            "You read ONE message from a traveller who is filling in a flight and/or hotel "
+            "search. Return JSON only: an object holding ONLY what this message states. "
+            "Never guess, never fill defaults, never carry values over from the state you are "
+            "shown. Omit every key the message does not state.\n"
+            "Keys:\n"
+            '  intent: "hotel" | "flight" | "both" (only if the message says what they want)\n'
+            '  destination: {"text": place as written, "kind": "city" | "hotel" | "airport"} '
+            '("hotel" when they name a specific property)\n'
+            '  origin: {"text": place as written, "kind": "city" | "airport"}\n'
+            "  start_date, end_date: YYYY-MM-DD, trip dates not tied to flight or hotel\n"
+            "  depart_date, return_date: YYYY-MM-DD, explicitly flight dates\n"
+            "  check_in, check_out: YYYY-MM-DD, explicitly hotel dates\n"
+            '  trip_type: "one_way" | "round_trip" (only if stated)\n'
+            "  adults: integer; children_count: integer; children_ages: [integers]\n"
+            "  rooms: integer; radius: number in km\n"
+            '  airport_code: 3-letter code when they pick one of the offered airports\n'
+            "Resolve relative dates (\"next Friday\", \"for 3 nights\") against `today`. A bare "
+            "answer (\"2\", \"Paris\", a date) answers the fields listed in `awaiting`. "
+            "\"No kids\" is children_count 0. \"Me and my wife\" is adults 2."
+        )
+
+
+        def _vertex_token():
+            url = ("http://metadata.google.internal/computeMetadata/v1/instance/"
+                   "service-accounts/default/token?scopes="
+                   + urllib.parse.quote("https://www.googleapis.com/auth/cloud-platform", safe=""))
+            req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8"))["access_token"]
+
+
+        def llm_read(text, state, awaiting, today, model, project, region):
+            host = "aiplatform.googleapis.com" if region == "global" else region + "-aiplatform.googleapis.com"
+            endpoint = ("https://%s/v1/projects/%s/locations/%s/publishers/google/models/%s:generateContent"
+                        % (host, project, region, model))
+            body = json.dumps({
+                "systemInstruction": {"parts": [{"text": LLM_SYSTEM_PROMPT}]},
+                "contents": [{"role": "user", "parts": [{"text": json.dumps({
+                    "message": text, "awaiting": awaiting, "today": today.isoformat(),
+                    "state": {k: state.get(k) for k in STATE_KEYS if state.get(k) not in (None, [])},
+                }, default=str)}]}],
+                "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+            }).encode("utf-8")
+            req = urllib.request.Request(endpoint, data=body, method="POST", headers={
+                "Authorization": "Bearer %s" % _vertex_token(), "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            cands = payload.get("candidates") or []
+            if not cands:
+                raise ValueError("vertex returned no candidates")
+            parts = (cands[0].get("content") or {}).get("parts") or []
+            return json.loads("".join(p.get("text", "") for p in parts))
+
+
+        MONTHS = {m: i + 1 for i, m in enumerate(
+            ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
+        NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+                        "seven": 7, "eight": 8, "nine": 9, "a": 1, "an": 1, "single": 1}
+
+
+        def _n(token):
+            token = token.lower()
+            return int(token) if token.isdigit() else NUMBER_WORDS.get(token)
+
+
+        def _dates_in(text, today):
+            found = []
+            for m in re.finditer(r"\b(\d{4}-\d{2}-\d{2})\b", text):
+                if _iso(m.group(1)):
+                    found.append((m.start(), _iso(m.group(1))))
+            for m in re.finditer(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b",
+                                 text, re.I):
+                month, day = MONTHS[m.group(1).lower()], int(m.group(2))
+                for year in (today.year, today.year + 1):
+                    try:
+                        d = date(year, month, day)
+                    except ValueError:
+                        break
+                    if d >= today:
+                        found.append((m.start(), d.isoformat()))
+                        break
+            return [d for _, d in sorted(found)]
+
+
+        def _place_after(text, cue):
+            """The known city or airport code right after `cue` ("from", "to", "in"):
+            the longest run of capitalised words that names one, else None."""
+            for m in re.finditer(r"\b(?i:" + cue + r")\s+([A-Z][\w'.-]*(?:\s+[A-Z][\w'.-]*){0,3})", text):
+                words = m.group(1).split()
+                for n in range(len(words), 0, -1):
+                    cand = " ".join(words[:n]).strip(".,")
+                    if _canonical_city(cand) or (len(cand) == 3 and cand.upper() == cand and cand in BY_CODE):
+                        return cand
+            return None
+
+
+        def rule_read(text, state, awaiting, today):
+            """A deterministic reader for when the model is unavailable (and for tests).
+            It understands codes, ISO and "Nov 2" dates, counts and the common phrasings;
+            anything else is left for a question, never guessed."""
+            t = " ".join(str(text or "").split())
+            low = t.lower()
+            out = {}
+            wants_hotel = bool(re.search(r"\b(hotels?|stay|rooms?|check[- ]?in)\b", low))
+            wants_flight = bool(re.search(r"\b(flights?|fly|flying|airport)\b", low))
+            current = state.get("intent")
+            if not current:
+                if re.search(r"\bboth\b", low) or (wants_hotel and wants_flight):
+                    out["intent"] = "both"
+                elif wants_hotel:
+                    out["intent"] = "hotel"
+                elif wants_flight:
+                    out["intent"] = "flight"
+            else:
+                # Once known, the intent changes only when the user says so: mentioning
+                # "a room" while answering is not a switch to hotel-only.
+                adding = re.search(r"\b(also|too|as well|and a|plus)\b", low)
+                if re.search(r"\bboth\b", low) or (adding and ((current == "hotel" and wants_flight)
+                                                                  or (current == "flight" and re.search(r"\bhotels?\b", low)))):
+                    out["intent"] = "both"
+            if re.search(r"\b(just|only)( a| the)? hotels?\b", low):
+                out["intent"] = "hotel"
+            if re.search(r"\b(just|only)( a| the)? flights?\b", low):
+                out["intent"] = "flight"
+
+            hotel_name = re.search(r"\b((?:Hotel|The)\s+[A-Z][\w'-]*(?:[\s-][A-Z][\w'-]*)*|[A-Z][\w'-]*(?:\s+[A-Z][\w'-]*)*\s+Hotel)\b", t)
+            if hotel_name:
+                # A month or weekday ends a name: "Hotel Nov 1 to ..." names no hotel.
+                words = []
+                for w in hotel_name.group(1).split():
+                    if re.fullmatch(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?", w.lower()):
+                        break
+                    words.append(w)
+                name = " ".join(words)
+                if len(words) >= 2 and not _canonical_city(name):
+                    out["destination"] = {"text": name, "kind": "hotel"}
+
+            codes = [c for c in re.findall(r"\b([A-Z]{3})\b", t) if c in BY_CODE]
+            frm = _place_after(t, "from")
+            to = _place_after(t, "to") or _place_after(t, "in")
+            if frm:
+                out["origin"] = {"text": frm, "kind": "airport" if frm in BY_CODE else "city"}
+            if to and "destination" not in out:
+                out["destination"] = {"text": to, "kind": "airport" if to in BY_CODE else "city"}
+            if "destination" not in out and "origin" not in out:
+                city = next((a["city"] for a in AIRPORTS if re.search(r"\b%s\b" % re.escape(a["city"].lower()), low)), None)
+                if city:
+                    out["destination"] = {"text": city, "kind": "city"}
+                elif len(codes) == 1 and "airport" in (awaiting or []):
+                    out["airport_code"] = codes[0]
+
+            if re.search(r"\bone[- ]way\b", low):
+                out["trip_type"] = "one_way"
+            elif re.search(r"\bround[- ]?trip\b|\breturn(ing)?\b", low):
+                out["trip_type"] = "round_trip"
+
+            m = re.search(r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|a|an|single)\s+adults?\b", low)
+            if m:
+                out["adults"] = _n(m.group(1))
+            m = re.search(r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|a|an|single)\s+(rooms?)\b", low)
+            if m:
+                out["rooms"] = _n(m.group(1))
+            if re.search(r"\bno (kids|children)\b|\bwithout (kids|children)\b", low):
+                out["children_count"], out["children_ages"] = 0, []
+            else:
+                m = re.search(r"\b(\d+|one|two|three|four|five|six|seven|eight|a|an)\s+(children|child|kids?)\b", low)
+                if m:
+                    out["children_count"] = _n(m.group(1))
+                # An age is a number NOT followed by a counted noun ("aged 8, 1 room" is one age).
+                age = r"\d{1,2}(?!\d|\s*(?:rooms?|adults?|nights?|km|kids?|child|children|days?|weeks?)\b)"
+                ages = re.search(r"\bages?d?\s+(" + age + r"(?:\s*(?:,|and|&)\s*" + age + r")*)", low) \
+                    or re.search(r"\b(" + age + r"(?:\s*(?:,|and|&)\s*" + age + r")*)\s*(?:years?|yrs?)[- ]old\b", low)
+                if ages:
+                    out["children_ages"] = [int(x) for x in re.findall(r"\d{1,2}", ages.group(1))]
+            m = re.search(r"\bwithin\s+(\d+(?:\.\d+)?)\s*(?:km|kilomet)", low)
+            if m:
+                out["radius"] = float(m.group(1))
+
+            dates = _dates_in(t, today)
+            m = re.search(r"\bfor\s+(\d+|one|two|three|four|five|six|seven|eight|nine)\s+nights?\b", low)
+            if dates and m and len(dates) == 1:
+                dates.append((date.fromisoformat(dates[0]) + timedelta(days=_n(m.group(1)))).isoformat())
+            awaiting = list(awaiting or [])
+            has_start = any(state.get(k) for k in ("start_date", "depart_date", "check_in"))
+            if len(dates) == 1 and "return_date" in awaiting:
+                out["return_date"] = dates[0]
+            elif len(dates) == 1 and "dates" in awaiting and has_start and not re.search(r"check[- ]?in", low):
+                out["end_date"] = dates[0]
+            elif dates:
+                if re.search(r"check[- ]?in", low) or re.search(r"check[- ]?out", low):
+                    out["check_in"] = dates[0]
+                    if len(dates) > 1:
+                        out["check_out"] = dates[1]
+                else:
+                    out["start_date"] = dates[0]
+                    if len(dates) > 1:
+                        out["end_date"] = dates[1]
+
+            # A bare reply answers what was asked.
+            bare = re.fullmatch(r"(\d+|one|two|three|four|five|six|seven|eight|nine)", low.strip(" ."))
+            if bare and awaiting:
+                n = _n(bare.group(1))
+                for field in awaiting:
+                    if field in ("adults", "rooms") and field not in out:
+                        out[field] = n
+                        break
+                    if field == "children_ages" and "children_ages" not in out:
+                        out["children_ages"] = [n]
+                        break
+            if "children_ages" in awaiting and "children_ages" not in out:
+                nums = re.findall(r"\b\d{1,2}\b", low)
+                if nums and not dates and "adults" not in out and "rooms" not in out:
+                    out["children_ages"] = [int(x) for x in nums]
+            if "airport" in awaiting and codes and "airport_code" not in out:
+                out["airport_code"] = codes[0]
+            if "origin" in awaiting and "airport" not in awaiting and "origin" not in out and t and not dates and not bare:
+                place = t.strip(" .")
+                if _canonical_city(place) or place.upper() in BY_CODE:
+                    if _as_dict(out.get("destination")).get("text") == place:
+                        out.pop("destination", None)
+                    out["origin"] = {"text": place.upper() if place.upper() in BY_CODE else place,
+                                     "kind": "airport" if place.upper() in BY_CODE else "city"}
+            if "destination" in awaiting and "airport" not in awaiting and "destination" not in out and t \
+                    and not dates and not bare:
+                place = t.strip(" .")
+                if 1 <= len(place.split()) <= 5 and not re.search(r"\b(hotel|flight|both)s?\b", low):
+                    out["destination"] = {"text": place, "kind": "airport" if place.upper() in BY_CODE else "city"}
+            if "trip_type" in awaiting and "trip_type" not in out:
+                if re.search(r"\bone\b", low):
+                    out["trip_type"] = "one_way"
+                elif re.search(r"\bround\b|\bback\b", low):
+                    out["trip_type"] = "round_trip"
+            if "intent" in awaiting and "intent" not in out:
+                if re.search(r"\bboth\b", low):
+                    out["intent"] = "both"
+            return out
+
+
+        def clean_patch(raw):
+            """Keep only well-formed keys of a reader's output (the model's included)."""
+            raw = _as_dict(raw)
+            out = {}
+            if raw.get("intent") in INTENTS:
+                out["intent"] = raw["intent"]
+            for key, kinds in (("destination", ("city", "hotel", "airport")), ("origin", ("city", "airport"))):
+                place = _as_dict(raw.get(key))
+                text = " ".join(str(place.get("text") or "").split())[:120]
+                if text:
+                    out[key] = {"text": text, "kind": place.get("kind") if place.get("kind") in kinds else "city"}
+            for key in DATE_KEYS:
+                if raw.get(key) and _iso(raw.get(key)):
+                    out[key] = _iso(raw[key])
+            if raw.get("trip_type") in ("one_way", "round_trip"):
+                out["trip_type"] = raw["trip_type"]
+            for key, lo, hi in (("adults", 0, 99), ("rooms", 0, 99), ("children_count", 0, 99)):
+                if raw.get(key) is not None and _int(raw.get(key), lo, hi) is not None:
+                    out[key] = _int(raw[key], lo, hi)
+            if isinstance(raw.get("children_ages"), list):
+                ages = [_int(a, -99, 999) for a in raw["children_ages"]]
+                if all(a is not None for a in ages):
+                    out["children_ages"] = ages
+            if _num(raw.get("radius")) is not None:
+                out["radius"] = _num(raw["radius"])
+            code = str(raw.get("airport_code") or "").strip().upper()
+            if code:
+                out["airport_code"] = code
+            return out
+
+
+        # ── Merging and validating ───────────────────────────────────────────────
+
+        def coords_from(payload):
+            payload = _as_dict(payload)
+            for src in (payload, _as_dict(payload.get("submitted_value")), _as_dict(payload.get("value")),
+                        _as_dict(payload.get("location"))):
+                lat = _num(src.get("latitude", src.get("lat")))
+                lon = _num(src.get("longitude", src.get("lng", src.get("lon"))))
+                if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
+                    return lat, lon
+            return None
+
+
+        def merge(state, patch, coords, awaiting):
+            """Apply one turn's patch. The latest value wins (corrections); a changed place
+            drops its old airport choice. Returns the changed keys."""
+            s = state
+            changed = []
+
+            def put(key, value):
+                if s.get(key) != value:
+                    s[key] = value
+                    changed.append(key)
+
+            if "intent" in patch:
+                put("intent", patch["intent"])
+            for key in ("origin", "destination"):
+                if key in patch:
+                    place = dict(patch[key], typed=True)
+                    if _as_dict(s.get(key)).get("text") != place["text"] or _as_dict(s.get(key)).get("kind") != place["kind"]:
+                        put(key, place)
+                        s.pop(key + "_code", None)
+                        if key == "destination":
+                            for k in ("latitude", "longitude", "radius", "destination_airport_place"):
+                                s.pop(k, None)
+            if "airport_code" in patch:
+                target = next((k for k in ("destination", "origin") if s.get(k + "_options")), None)
+                if target and patch["airport_code"] in s[target + "_options"]:
+                    put(target + "_code", patch["airport_code"])
+            if coords and not (s.get("destination") or {}).get("kind") == "hotel":
+                put("latitude", coords[0])
+                put("longitude", coords[1])
+                if not s.get("destination"):
+                    city = nearest_city(*coords)
+                    if city:
+                        put("destination", {"text": city, "kind": "city", "typed": False, "from_coords": True})
+            for key in DATE_KEYS + ("trip_type", "adults", "rooms", "radius"):
+                if key in patch:
+                    put(key, patch[key])
+            if patch.get("trip_type") == "one_way":
+                s.pop("return_date", None)
+            if "children_ages" in patch:
+                put("children_ages", patch["children_ages"])
+                put("children_count", len(patch["children_ages"]))
+            elif "children_count" in patch:
+                put("children_count", patch["children_count"])
+                ages = s.get("children_ages") or []
+                if len(ages) != patch["children_count"]:
+                    put("children_ages", ages[:patch["children_count"]] if len(ages) > patch["children_count"] else None)
+            if s.get("children_count") == 0:
+                s["children_ages"] = []
+            if (s.get("destination") or {}).get("kind") == "hotel":
+                for k in ("latitude", "longitude"):
+                    s.pop(k, None)
+            return changed
+
+
+        def wants(state, form):
+            return state.get("intent") in (form, "both")
+
+
+        def effective(state):
+            """The per-form values: a form-specific date wins over a trip-wide one."""
+            s = state
+            e = {
+                "depart": s.get("depart_date") or s.get("start_date"),
+                "return": s.get("return_date") or s.get("end_date"),
+                "check_in": s.get("check_in") or s.get("start_date"),
+                "check_out": s.get("check_out") or s.get("end_date"),
+            }
+            e["trip_type"] = s.get("trip_type") or ("round_trip" if wants(s, "flight") and e["return"] else None)
+            return e
+
+
+        def validate(state, today):
+            """Clear every invalid value and say why, so it is asked again."""
+            s, problems = state, []
+
+            def drop(keys, message):
+                for k in keys:
+                    s.pop(k, None)
+                problems.append(message)
+
+            for key in DATE_KEYS:
+                if s.get(key) and s[key] < today.isoformat():
+                    drop([key], "%s is in the past." % _human_date(s[key]))
+            e = effective(s)
+            if wants(s, "flight") and e["trip_type"] == "round_trip" and e["depart"] and e["return"] and e["return"] < e["depart"]:
+                drop(["return_date"] if s.get("return_date") else ["end_date"],
+                     "The return date can't be before the departure date.")
+            e = effective(s)
+            if wants(s, "hotel") and e["check_in"] and e["check_out"] and e["check_out"] <= e["check_in"]:
+                drop(["check_out"] if s.get("check_out") else ["end_date"],
+                     "Check-out has to be after check-in.")
+            max_adults = FLIGHT_MAX_ADULTS if wants(s, "flight") else HOTEL_MAX_ADULTS
+            if s.get("adults") is not None and not 1 <= s["adults"] <= max_adults:
+                drop(["adults"], "I can search for 1 to %d adults." % max_adults)
+            if s.get("rooms") is not None and not 1 <= s["rooms"] <= HOTEL_MAX_ROOMS:
+                drop(["rooms"], "I can search for 1 to %d rooms." % HOTEL_MAX_ROOMS)
+            if wants(s, "hotel") and s.get("rooms") and s.get("adults") and s["rooms"] > s["adults"]:
+                drop(["rooms"], "Each room needs at least one adult.")
+            if s.get("children_count") is not None and not 0 <= s["children_count"] <= MAX_CHILDREN:
+                drop(["children_count", "children_ages"], "I can include up to %d children." % MAX_CHILDREN)
+            if s.get("children_ages") and any(not 0 <= a <= MAX_CHILD_AGE for a in s["children_ages"]):
+                drop(["children_ages"], "Children's ages are 0 to %d." % MAX_CHILD_AGE)
+            if s.get("radius") is not None and not 0 < s["radius"] <= 500:
+                drop(["radius"], "The search radius should be between 1 and 500 km.")
+            return problems
+
+
+        def _flight_place(state, key):
+            """The place a flight goes to/from: for a named hotel, the city or airport the
+            user gave for it (never the hotel's own name)."""
+            place = state.get(key)
+            if key == "destination" and _as_dict(place).get("kind") == "hotel":
+                return state.get("destination_airport_place")
+            return place
+
+
+        def resolve_places(state):
+            """Airport codes for the flight form. Sets <place>_options when we must ask."""
+            s, notes = state, []
+            for key in ("origin", "destination"):
+                s.pop(key + "_options", None)
+                place = _flight_place(s, key)
+                if not place or not wants(s, "flight") or s.get(key + "_code") in BY_CODE:
+                    continue
+                code, options, _ = resolve_airport(place)
+                if code:
+                    s[key + "_code"] = code
+                elif options:
+                    s[key + "_options"] = options
+            return notes
+
+
+        # ── What is missing, and the questions ───────────────────────────────────
+
+        def missing(state):
+            s, e, need = state, effective(state), []
+            if s.get("intent") not in INTENTS:
+                return ["intent"]
+            if not s.get("destination"):
+                need.append("destination")
+            elif wants(s, "flight") and s.get("destination_options"):
+                need.append("airport:destination")
+            elif wants(s, "flight") and not s.get("destination_code"):
+                need.append("airport_unknown:destination")
+            if wants(s, "flight"):
+                if not s.get("origin"):
+                    need.append("origin")
+                elif s.get("origin_options"):
+                    need.append("airport:origin")
+                elif not s.get("origin_code"):
+                    need.append("airport_unknown:origin")
+            if wants(s, "flight") and not e["depart"]:
+                need.append("dates")
+            elif wants(s, "hotel") and not (e["check_in"] and e["check_out"]):
+                need.append("dates")
+            if wants(s, "flight") and e["depart"] and not e["trip_type"]:
+                need.append("trip_type")
+            elif wants(s, "flight") and e["trip_type"] == "round_trip" and not e["return"] and "dates" not in need:
+                need.append("return_date")
+            if not s.get("adults"):
+                need.append("adults")
+            if s.get("children_count") and not s.get("children_ages"):
+                need.append("children_ages")
+            if wants(s, "hotel") and not s.get("rooms"):
+                need.append("rooms")
+            return need
+
+
+        def _human_date(iso):
+            d = date.fromisoformat(iso)
+            return d.strftime("%b ") + str(d.day) + d.strftime(", %Y")
+
+
+        def _airport_list(codes):
+            names = ["%s (%s)" % (BY_CODE[c]["name"], c) for c in codes]
+            return ", ".join(names[:-1]) + " or " + names[-1] if len(names) > 1 else names[0]
+
+
+        def question(item, state):
+            s, e = state, effective(state)
+            both = s.get("intent") == "both"
+            if item == "intent":
+                return "Are you looking for flights, a hotel, or both?"
+            if item == "destination":
+                return "Where would you like to %s?" % ("go" if wants(s, "flight") else "stay")
+            if item == "origin":
+                return "Which city or airport are you flying from?"
+            if item.startswith("airport:"):
+                key = item.split(":", 1)[1]
+                return "%s has several airports: %s. Which one should I use?" % (
+                    _flight_place(s, key)["text"], _airport_list(s[key + "_options"]))
+            if item.startswith("airport_unknown:"):
+                key = item.split(":", 1)[1]
+                if _as_dict(s.get(key)).get("kind") == "hotel" and not s.get("destination_airport_place"):
+                    return "Which city or airport should the flight go to for %s?" % s[key]["text"]
+                if _as_dict(s.get(key)).get("kind") == "hotel":
+                    return "I couldn't match %s to an airport. Which airport will you fly into?" % (
+                        s["destination_airport_place"]["text"])
+                return "I couldn't match %s to an airport. Which airport will you fly %s?" % (
+                    s[key]["text"], "into" if key == "destination" else "from")
+            if item == "dates":
+                if both:
+                    return "What are your travel dates: when do you leave, and when do you come back?"
+                if wants(s, "flight"):
+                    return "When would you like to depart?"
+                return "What are your check-in and check-out dates?"
+            if item == "trip_type":
+                return "Is this a one-way trip or a round trip?"
+            if item == "return_date":
+                return "When would you like to fly back?"
+            if item == "adults":
+                return "How many adults are travelling?"
+            if item == "children_ages":
+                n = s.get("children_count") or 0
+                return "How old %s?" % ("is the child" if n == 1 else "are the %d children" % n)
+            if item == "rooms":
+                return "How many rooms do you need?"
+            return ""
+
+
+        def awaiting_fields(items):
+            out = []
+            for item in items:
+                if item.startswith("airport"):
+                    out.append("airport")
+                    out.append(item.split(":", 1)[1])
+                elif item == "dates":
+                    out.append("dates")
+                else:
+                    out.append(item)
+            return out
+
+
+        def next_questions(need):
+            """One or two questions. An airport choice is asked on its own."""
+            if not need:
+                return []
+            if need[0].startswith("airport") or len(need) == 1:
+                return need[:1]
+            second = need[1]
+            return need[:1] if second.startswith("airport") else need[:2]
+
+
+        # ── The forms ────────────────────────────────────────────────────────────
+        # Field names, nesting and order are exactly FlightSearchForm / HotelSearchForm's
+        # (and the examples in adiona/frontend#55).
+
+        def _children(state):
+            return [{"age": a} for a in (state.get("children_ages") or [])]
+
+
+        def _default_destination(state, value):
+            """Provisional rule (open question 2 on adiona/frontend#55): set only when the
+            user typed the destination as a city or airport themselves, not when it came
+            from a choice we offered, from coordinates, or is a hotel property."""
+            d = state.get("destination") or {}
+            if d.get("typed") and d.get("kind") in ("city", "airport") and not d.get("from_coords") \
+                    and not state.get("destination_chosen"):
+                return value
+            return None
+
+
+        def hotel_form(state):
+            s, e = state, effective(state)
+            d = s["destination"]
+            if d.get("kind") == "hotel":
+                dest = d["text"]
+            elif d.get("kind") == "airport" and d["text"].upper() in BY_CODE:
+                dest = BY_CODE[d["text"].upper()]["city"]
+            else:
+                dest = _canonical_city(d["text"]) or d["text"]
+            criteria = {"destination": dest}
+            if d.get("kind") != "hotel" and s.get("latitude") is not None and s.get("longitude") is not None:
+                criteria["latitude"] = s["latitude"]
+                criteria["longitude"] = s["longitude"]
+            if d.get("kind") != "hotel" and s.get("radius") is not None:
+                r = s["radius"]
+                criteria["radius"] = int(r) if float(r).is_integer() else r
+            criteria.update({"checkIn": e["check_in"], "checkOut": e["check_out"], "rooms": s["rooms"],
+                             "adults": s["adults"], "children": _children(s)})
+            payload = {"criteria": criteria}
+            dd = _default_destination(s, dest)
+            if dd:
+                payload["defaultDestination"] = dd
+            return {"widget_type": "hotel_search_form", "payload": payload}
+
+
+        def flight_form(state):
+            s, e = state, effective(state)
+            criteria = {"tripType": e["trip_type"], "origin": s["origin_code"], "destination": s["destination_code"],
+                        "departDate": e["depart"]}
+            if e["trip_type"] == "round_trip":
+                criteria["returnDate"] = e["return"]
+            criteria["travelers"] = {"adults": s["adults"], "children": _children(s)}
+            payload = {"criteria": criteria}
+            dd = _default_destination(s, s["destination_code"])
+            if dd:
+                payload["defaultDestination"] = dd
+            return {"widget_type": "flight_search_form", "payload": payload}
+
+
+        def forms_for(state):
+            """Every form of the trip, hotel first; only once ALL of them are complete."""
+            if missing(state):
+                return []
+            out = []
+            if wants(state, "hotel"):
+                out.append(hotel_form(state))
+            if wants(state, "flight"):
+                out.append(flight_form(state))
+            return out
+
+
+        def run_turn(state, text, payload, today, reader):
+            """One turn: read, merge, validate, resolve, then ask or return the forms."""
+            state = json.loads(json.dumps(state or {}))
+            awaiting = state.pop("awaiting", [])
+            patch = clean_patch(reader(text, state, awaiting, today))
+            # An answer to "which airport?": one of the offered codes. A destination
+            # picked from our options was not typed by the user (defaultDestination).
+            for key in ("destination", "origin"):
+                opts = state.get(key + "_options") or []
+                if not opts:
+                    continue
+                pick = patch.get("airport_code")
+                if pick not in opts and key in patch and patch[key]["text"].upper() in opts:
+                    pick = patch[key]["text"].upper()
+                if pick in opts:
+                    if key in patch and patch[key]["text"].upper() == pick:
+                        patch.pop(key)
+                    patch["airport_code"] = pick
+                    if key == "destination":
+                        state["destination_chosen"] = True
+                    break
+            if "destination" in patch:
+                state.pop("destination_chosen", None)
+            # A named hotel with a flight: the flight needs a city or airport for it,
+            # which must not replace the hotel as the hotel form's destination.
+            if ("airport" in awaiting and "destination" in awaiting
+                    and _as_dict(state.get("destination")).get("kind") == "hotel"
+                    and _as_dict(patch.get("destination")).get("kind") in ("city", "airport")):
+                state["destination_airport_place"] = dict(patch.pop("destination"), typed=True)
+                state.pop("destination_code", None)
+            changed = merge(state, patch, coords_from(payload), awaiting)
+            problems = validate(state, today)
+            resolve_places(state)
+            need = missing(state)
+            asks = next_questions(need)
+            forms = forms_for(state)
+            state["awaiting"] = awaiting_fields(asks)
+            lines = list(problems) + [question(item, state) for item in asks]
+            if forms:
+                kinds = " and ".join(f["widget_type"].split("_")[0] for f in forms)
+                lines.append("Here's your %s search. Check the details and search when you're ready." % kinds)
+            return {"state": state, "patch": patch, "changed": changed, "problems": problems,
+                    "missing": need, "asked": asks, "forms": forms, "bot_message": " ".join(l for l in lines if l)}
+
+
+        # ── The turn ─────────────────────────────────────────────────────────────
+        # Tests exec this code with _INTAKE_LIBRARY_ONLY set and call the functions
+        # above directly; the playbook runs the body below.
+        if not globals().get("_INTAKE_LIBRARY_ONLY"):
+            def _flag(value):
+                if isinstance(value, bool):
+                    return value
+                return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+            loaded = _as_dict(loaded_state)
+            document = _as_dict(loaded.get("document"))
+            prior = _as_dict(document.get("data"))
+            payload = _as_dict(event_payload)
+            text = str(payload.get("text") or payload.get("message") or "").strip()
+            today = date.fromisoformat(str(today_override)) if _iso(today_override) else date.today()
+
+            llm = {"used": False, "model": str(llm_model or ""), "fallback_reason": ""}
+
+            def _reader(t, s, awaiting, d):
+                if not t:
+                    return {}
+                if _flag(llm_enabled):
+                    try:
+                        out = llm_read(t, s, awaiting, d, str(llm_model), str(vertex_project), str(vertex_region))
+                        llm["used"] = True
+                        return out
+                    except Exception as exc:
+                        llm["fallback_reason"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+                return rule_read(t, s, awaiting, d)
+
+            turn = run_turn(prior, text, payload, today, _reader)
+            state = turn["state"]
+            forms = turn["forms"]
+            actor = {"kind": "agent", "name": "muno-trip-intake"}
+
+            turn_events = [
+                {"thread_path": thread_path, "event": input_event},
+                {"thread_path": thread_path, "event": {
+                    "type": "agent_slot_update",
+                    "payload": {"changes": turn["changed"], "intake_state": state, "missing": turn["missing"],
+                                "llm": llm},
+                    "actor": actor}},
+            ]
+            if turn["bot_message"]:
+                turn_events.append({"thread_path": thread_path, "event": {
+                    "type": "agent_chat", "payload": {"text": turn["bot_message"]}, "actor": actor}})
+            for form in forms:
+                turn_events.append({"thread_path": thread_path, "event": {
+                    "type": "agent_widget_emit", "payload": {"envelope": form}, "actor": actor}})
+
+            # The intake keeps its own slot document, so a thread the itinerary planner
+            # also serves keeps its slot_state/current untouched.
+            turn_docs = [{"path": "%s/slot_state/intake" % thread_path, "doc": state, "merge": False}]
+            turn_docs.extend(relation_docs if isinstance(relation_docs, list) else [])
+
+            result = {
+                "thread_path": thread_path,
+                "intake_state": state,
+                "complete": bool(forms),
+                "missing": turn["missing"],
+                "asked": turn["asked"],
+                "problems": turn["problems"],
+                "forms": forms,
+                "render": forms[0] if forms else None,
+                "bot_message": turn["bot_message"],
+                "llm": llm,
+                "turn_docs": turn_docs,
+                "turn_events": turn_events,
+            }
+            globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: persist_turn
+
+  - step: persist_turn
+    desc: Save the intake state, the relation edge and the turn's events in ONE batched Firestore call
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/firestore
+      payload:
+        method: tools/call
+        tool: batch_write
+        firestore_database: "{{ workload.firestore_database }}"
+        arguments:
+          set_docs: "{{ intake_turn.turn_docs }}"
+          append_events: "{{ intake_turn.turn_events }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: final_result
+
+  - step: final_result
+    desc: Return the turn's result (render = the first form) and notify the gateway
+    tool:
+      kind: python
+      input:
+        thread_path: "{{ normalize_input.thread_path }}"
+        intake: "{{ intake_turn }}"
+        request_id: "{{ workload.request_id | default('') }}"
+        gateway_url: "{{ workload.gateway_url | default('') }}"
+      code: |
+        import json
+        import urllib.request
+
+        intake = intake if isinstance(intake, dict) else {}
+        forms = intake.get("forms") if isinstance(intake.get("forms"), list) else []
+        result = {
+            "status": "completed",
+            "thread_id": thread_path.split("/", 1)[1] if "/" in str(thread_path) else thread_path,
+            "thread_path": thread_path,
+            "complete": bool(forms),
+            "missing": intake.get("missing") or [],
+            "render": forms[0] if forms else None,
+            "forms": forms,
+            "emitted_widget_types": [f.get("widget_type") for f in forms],
+            "bot_message": intake.get("bot_message") or "",
+            "final_slot_state": intake.get("intake_state") or {},
+        }
+
+        if request_id and gateway_url:
+            try:
+                body = json.dumps({"request_id": request_id, "status": "COMPLETED", "data": result}).encode("utf-8")
+                req = urllib.request.Request(
+                    gateway_url.rstrip("/") + "/api/internal/callback/async",
+                    data=body, headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result["gateway_callback"] = {"delivered": 200 <= response.status < 300}
+            except Exception as exc:
+                result["gateway_callback"] = {"delivered": False, "error": str(exc)[:300]}
+        globals().update({"result": result})
