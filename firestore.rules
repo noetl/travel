@@ -1,19 +1,16 @@
 rules_version = '2';
+// Deny all direct client access. No browser or Firebase SDK client reads or
+// writes Firestore: the apps go through the gateway, and every read and write
+// happens in a playbook on the worker's service account (mcp/firestore and the
+// planner's inline REST), which these rules do not govern.
+//
+// This replaces the v1 demo rules, which allowed public reads of chat_threads/**,
+// trips/** and users/** (noetl/gateway advisory GHSA-qxw3-x3fw-qp2c, item 10).
+// Those were never deployed; this file is the safe state if it ever is.
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /chat_threads/{thread}/{document=**} {
-      allow read: if true;  // v1 demo: unauthenticated calendar widgets.
-      allow write: if false; // writes happen through mcp/firestore on the worker.
-    }
-
-    match /trips/{trip}/{document=**} {
-      allow read: if true;
-      allow write: if false;
-    }
-
-    match /users/{uid}/{document=**} {
-      allow read: if true;  // v1 demo; tighten to request.auth.uid == uid later.
-      allow write: if false;
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
