@@ -80,5 +80,5 @@ The gateway exchange follows the same pattern documented in
 
 - Gateway session validation now gates production playbook execution.
 - Guest mode is local-dev only via `VITE_ALLOW_GUEST=true`.
-- Firestore rules remain the v1 permissive rules until a later auth-hardening
-  round.
+- Firestore rules deny all direct client access (see
+  [firestore-rules.md](../deployment/firestore-rules.md)).
