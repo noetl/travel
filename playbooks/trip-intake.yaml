@@ -15,7 +15,8 @@ metadata:
     turn is saved to chat_threads/{thread_id} through mcp/firestore.
 
     REQUIRED (asked until known, one or two questions at a time, never asked
-    again once given; the latest answer wins, so corrections just work):
+    again once given; the latest answer wins, so corrections just work; the
+    travellers are one question: adults, whether children come, their ages):
       hotel   destination (a city, or a named hotel), checkIn, checkOut, rooms,
               adults (+ each child's age, if they mentioned children)
       flight  origin, destination (airport codes), departDate, tripType,
@@ -29,7 +30,9 @@ metadata:
 
     OUTPUT. result.render is the first form; result.forms holds every form of
     the trip (hotel first); result.bot_message is the question or the hand-off
-    line. Each form is exactly:
+    line. While the dates are being asked, result.render is the itinerary
+    planner's date_range_picker envelope (the chat's DateRangePickerWidget),
+    whose submit fills the dates. Each form is exactly:
       {"widget_type": "hotel_search_form" | "flight_search_form",
        "payload": {"criteria": {...}, "defaultDestination"?: "..."}}
 
@@ -37,7 +40,7 @@ metadata:
     check-out after check-in; counts within the forms' own limits. Airport codes
     are only those FlightSearchForm can prefill (its airports.ts); a city with
     several airports is a question, never a pick.
-  version: "1"
+  version: "2"
   agent: true
   tags: [muno, intake, forms, event-sourced]
   terminal:
@@ -797,7 +800,9 @@ workflow:
             '  airport_code: 3-letter code when they pick one of the offered airports\n'
             "Resolve relative dates (\"next Friday\", \"for 3 nights\") against `today`. A bare "
             "answer (\"2\", \"Paris\", a date) answers the fields listed in `awaiting`. "
-            "\"No kids\" is children_count 0. \"Me and my wife\" is adults 2."
+            "\"No kids\" is children_count 0. \"Me and my wife\" is adults 2. Output intent only when "
+            "the message says what the traveller wants to book; a message that merely mentions flying "
+            "or staying is not an intent."
         )
 
 
@@ -950,6 +955,7 @@ workflow:
                 # An age is a number NOT followed by a counted noun ("aged 8, 1 room" is one age).
                 age = r"\d{1,2}(?!\d|\s*(?:rooms?|adults?|nights?|km|kids?|child|children|days?|weeks?)\b)"
                 ages = re.search(r"\bages?d?\s+(" + age + r"(?:\s*(?:,|and|&)\s*" + age + r")*)", low) \
+                    or re.search(r"\b(?:kids?|children|child)\s*(?:\(|,|:)?\s*(" + age + r"(?:\s*(?:,|and|&)\s*" + age + r")*)\b(?!\s*(?:adults?|rooms?))", low) \
                     or re.search(r"\b(" + age + r"(?:\s*(?:,|and|&)\s*" + age + r")*)\s*(?:years?|yrs?)[- ]old\b", low)
                 if ages:
                     out["children_ages"] = [int(x) for x in re.findall(r"\d{1,2}", ages.group(1))]
@@ -982,7 +988,7 @@ workflow:
             if bare and awaiting:
                 n = _n(bare.group(1))
                 for field in awaiting:
-                    if field in ("adults", "rooms") and field not in out:
+                    if field in ("adults", "rooms") and field not in out and not (field == "adults" and state.get("adults")):
                         out[field] = n
                         break
                     if field == "children_ages" and "children_ages" not in out:
@@ -1006,6 +1012,9 @@ workflow:
                 place = t.strip(" .")
                 if 1 <= len(place.split()) <= 5 and not re.search(r"\b(hotel|flight|both)s?\b", low):
                     out["destination"] = {"text": place, "kind": "airport" if place.upper() in BY_CODE else "city"}
+            if "children" in awaiting and "children_count" not in out and "children_ages" not in out:
+                if re.search(r"^\s*(no|none|nope|just (us|me|adults)|only adults)\b|\bno (kids|children)\b", low):
+                    out["children_count"], out["children_ages"] = 0, []
             if "trip_type" in awaiting and "trip_type" not in out:
                 if re.search(r"\bone\b", low):
                     out["trip_type"] = "one_way"
@@ -1015,6 +1024,28 @@ workflow:
                 if re.search(r"\bboth\b", low):
                     out["intent"] = "both"
             return out
+
+
+        NARROW_RE = re.compile(
+            r"\b(just|only|instead)\b.{0,20}\b(hotels?|flights?|stay)\b"
+            r"|\b(no|without|skip|drop|cancel|don.?t need|do not need|no longer need)\b.{0,20}\b(hotels?|flights?)\b", re.I)
+
+
+        def resolve_intent(current, proposed, text):
+            """Combine the trip's intent with what this message proposes.
+
+            A model reading "I am flying from San Francisco" proposes `flight`; on a
+            `both` trip that must not drop the hotel (adiona/frontend#55: "both" came
+            back with the flight form only). So: the first intent is taken as given;
+            asking for the other half makes the trip `both`; a trip is narrowed only by
+            an explicit "just the hotel" / "no flight"."""
+            if proposed not in INTENTS:
+                return current
+            if current not in INTENTS or proposed == current:
+                return proposed
+            if NARROW_RE.search(text or ""):
+                return proposed
+            return "both"
 
 
         def clean_patch(raw):
@@ -1122,11 +1153,14 @@ workflow:
         def effective(state):
             """The per-form values: a form-specific date wins over a trip-wide one."""
             s = state
+            # Hotel and flight dates fill each other ("same dates as my flight"): the
+            # trip's details are shared, so a stay defaults to the flight's dates and a
+            # flight to the stay's, unless the user gave each its own.
             e = {
-                "depart": s.get("depart_date") or s.get("start_date"),
-                "return": s.get("return_date") or s.get("end_date"),
-                "check_in": s.get("check_in") or s.get("start_date"),
-                "check_out": s.get("check_out") or s.get("end_date"),
+                "depart": s.get("depart_date") or s.get("start_date") or s.get("check_in"),
+                "return": s.get("return_date") or s.get("end_date") or s.get("check_out"),
+                "check_in": s.get("check_in") or s.get("start_date") or s.get("depart_date"),
+                "check_out": s.get("check_out") or s.get("end_date") or s.get("return_date"),
             }
             e["trip_type"] = s.get("trip_type") or ("round_trip" if wants(s, "flight") and e["return"] else None)
             return e
@@ -1212,17 +1246,22 @@ workflow:
                     need.append("airport:origin")
                 elif not s.get("origin_code"):
                     need.append("airport_unknown:origin")
+            flight_only = s.get("intent") == "flight"
+            if flight_only and not e["trip_type"]:
+                # Before the dates, so the date picker can ask for one date or two.
+                need.append("trip_type")
             if wants(s, "flight") and not e["depart"]:
                 need.append("dates")
             elif wants(s, "hotel") and not (e["check_in"] and e["check_out"]):
                 need.append("dates")
-            if wants(s, "flight") and e["depart"] and not e["trip_type"]:
+            if wants(s, "flight") and not flight_only and e["depart"] and not e["trip_type"]:
                 need.append("trip_type")
             elif wants(s, "flight") and e["trip_type"] == "round_trip" and not e["return"] and "dates" not in need:
                 need.append("return_date")
-            if not s.get("adults"):
-                need.append("adults")
-            if s.get("children_count") and not s.get("children_ages"):
+            # Travellers are one question (adults, whether children come, their ages).
+            if not s.get("adults") or s.get("children_count") is None:
+                need.append("travelers")
+            elif s.get("children_count") and not s.get("children_ages"):
                 need.append("children_ages")
             if wants(s, "hotel") and not s.get("rooms"):
                 need.append("rooms")
@@ -1264,15 +1303,20 @@ workflow:
             if item == "dates":
                 if both:
                     return "What are your travel dates: when do you leave, and when do you come back?"
-                if wants(s, "flight"):
+                if wants(s, "flight") and e["trip_type"] == "one_way":
                     return "When would you like to depart?"
+                if wants(s, "flight"):
+                    return "When would you like to depart, and when will you fly back?"
                 return "What are your check-in and check-out dates?"
             if item == "trip_type":
                 return "Is this a one-way trip or a round trip?"
             if item == "return_date":
                 return "When would you like to fly back?"
-            if item == "adults":
-                return "How many adults are travelling?"
+            if item == "travelers":
+                if s.get("adults") and s.get("children_count") is None:
+                    return "Will any children be traveling as well? If so, please share each child's age."
+                return ("How many adults are traveling? Will any children be traveling as well? "
+                        "If so, please share each child's age.")
             if item == "children_ages":
                 n = s.get("children_count") or 0
                 return "How old %s?" % ("is the child" if n == 1 else "are the %d children" % n)
@@ -1289,6 +1333,8 @@ workflow:
                     out.append(item.split(":", 1)[1])
                 elif item == "dates":
                     out.append("dates")
+                elif item == "travelers":
+                    out.extend(["adults", "children"])
                 else:
                     out.append(item)
             return out
@@ -1298,7 +1344,9 @@ workflow:
             """One or two questions. An airport choice is asked on its own."""
             if not need:
                 return []
-            if need[0].startswith("airport") or len(need) == 1:
+            if need[0].startswith("airport") or need[0] == "trip_type" or len(need) == 1:
+                # An airport choice, and a flight's trip type (it decides whether the date
+                # picker asks for one date or two), are asked on their own.
                 return need[:1]
             second = need[1]
             return need[:1] if second.startswith("airport") else need[:2]
@@ -1307,6 +1355,39 @@ workflow:
         # ── The forms ────────────────────────────────────────────────────────────
         # Field names, nesting and order are exactly FlightSearchForm / HotelSearchForm's
         # (and the examples in adiona/frontend#55).
+
+        def date_picker(state, today):
+            """The itinerary planner's date_range_picker envelope, unchanged in shape, so
+            the Adiona chat renders its DateRangePickerWidget. Its preselection is only
+            where the calendar opens: dates enter the forms when the user submits."""
+            e = effective(state)
+            start = e["depart"] or e["check_in"]
+            end = e["return"] or e["check_out"]
+            first = date.fromisoformat(start) if start else today + timedelta(days=1)
+            return {"schema_version": 1, "widget_type": "date_range_picker", "variant": "compact", "payload": {
+                "min_date": today.isoformat(),
+                "max_date": (today + timedelta(days=365)).isoformat(),
+                "default_from": first.isoformat(),
+                "default_to": end or (first + timedelta(days=4)).isoformat(),
+                "locale": "en",
+                "submit": "submit",
+            }}
+
+
+        def dates_from_widget(payload, state):
+            """The DateRangePickerWidget's submit: {action_id: submit_dates, submitted_value: {from, to, nights}}."""
+            payload = _as_dict(payload)
+            value = _as_dict(payload.get("submitted_value")) or _as_dict(payload.get("value"))
+            start, end = _iso(value.get("from")), _iso(value.get("to"))
+            if not start:
+                return {}
+            if state.get("intent") == "flight" and effective(state)["trip_type"] == "one_way":
+                return {"depart_date": start}
+            out = {"start_date": start}
+            if end:
+                out["end_date"] = end
+            return out
+
 
         def _children(state):
             return [{"age": a} for a in (state.get("children_ages") or [])]
@@ -1379,6 +1460,17 @@ workflow:
             state = json.loads(json.dumps(state or {}))
             awaiting = state.pop("awaiting", [])
             patch = clean_patch(reader(text, state, awaiting, today))
+            patch.update(dates_from_widget(payload, state))
+            if "intent" in patch:
+                patch["intent"] = resolve_intent(state.get("intent"), patch["intent"], text)
+                if patch["intent"] == state.get("intent"):
+                    patch.pop("intent")
+            # Travellers were asked together: an answer that gives the adults and says
+            # nothing about children means none (they were asked about directly).
+            if ("children" in awaiting and "children_count" not in patch and "children_ages" not in patch
+                    and (patch.get("adults") or state.get("adults")) and state.get("children_count") is None
+                    and (text or "").strip()):
+                patch["children_count"], patch["children_ages"] = 0, []
             # An answer to "which airport?": one of the offered codes. A destination
             # picked from our options was not typed by the user (defaultDestination).
             for key in ("destination", "origin"):
@@ -1411,12 +1503,14 @@ workflow:
             asks = next_questions(need)
             forms = forms_for(state)
             state["awaiting"] = awaiting_fields(asks)
+            widget = date_picker(state, today) if any(a in ("dates", "return_date") for a in asks) else None
             lines = list(problems) + [question(item, state) for item in asks]
             if forms:
                 kinds = " and ".join(f["widget_type"].split("_")[0] for f in forms)
                 lines.append("Here's your %s search. Check the details and search when you're ready." % kinds)
             return {"state": state, "patch": patch, "changed": changed, "problems": problems,
-                    "missing": need, "asked": asks, "forms": forms, "bot_message": " ".join(l for l in lines if l)}
+                    "missing": need, "asked": asks, "forms": forms, "widget": widget,
+                    "bot_message": " ".join(l for l in lines if l)}
 
 
         # ── The turn ─────────────────────────────────────────────────────────────
@@ -1465,9 +1559,11 @@ workflow:
             if turn["bot_message"]:
                 turn_events.append({"thread_path": thread_path, "event": {
                     "type": "agent_chat", "payload": {"text": turn["bot_message"]}, "actor": actor}})
-            for form in forms:
+            # The forms once complete; otherwise the date picker when the dates are asked.
+            widgets = forms or ([turn["widget"]] if turn.get("widget") else [])
+            for widget in widgets:
                 turn_events.append({"thread_path": thread_path, "event": {
-                    "type": "agent_widget_emit", "payload": {"envelope": form}, "actor": actor}})
+                    "type": "agent_widget_emit", "payload": {"envelope": widget}, "actor": actor}})
 
             # The intake keeps its own slot document, so a thread the itinerary planner
             # also serves keeps its slot_state/current untouched.
@@ -1482,7 +1578,8 @@ workflow:
                 "asked": turn["asked"],
                 "problems": turn["problems"],
                 "forms": forms,
-                "render": forms[0] if forms else None,
+                "render": widgets[0] if widgets else None,
+                "widget": turn.get("widget"),
                 "bot_message": turn["bot_message"],
                 "llm": llm,
                 "turn_docs": turn_docs,
@@ -1532,9 +1629,11 @@ workflow:
             "thread_path": thread_path,
             "complete": bool(forms),
             "missing": intake.get("missing") or [],
-            "render": forms[0] if forms else None,
+            # The first form once complete, otherwise the date picker when the
+            # dates are asked (the planner's date_range_picker), otherwise none.
+            "render": intake.get("render") if isinstance(intake.get("render"), dict) else None,
             "forms": forms,
-            "emitted_widget_types": [f.get("widget_type") for f in forms],
+            "emitted_widget_types": [w.get("widget_type") for w in (forms or [intake.get("render")]) if isinstance(w, dict)],
             "bot_message": intake.get("bot_message") or "",
             "final_slot_state": intake.get("intake_state") or {},
         }

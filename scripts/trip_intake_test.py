@@ -149,7 +149,7 @@ check(form(kids[1])["payload"]["criteria"]["travelers"]["children"] == [{"age": 
       "the ages answer completes the travellers")
 check(form(kids[1])["payload"]["criteria"]["destination"] == "LIS", "a one-airport city resolves to its code")
 
-trip = converse(["Flights from SFO to Lisbon on Nov 10 for 2 adults", "round trip", "Nov 20"])
+trip = converse(["Flights from SFO to Lisbon on Nov 10 for 2 adults, no kids", "round trip", "Nov 20"])
 check(trip[0]["asked"] == ["trip_type"], "a departure with no return: asks one-way or round trip")
 check(trip[1]["asked"] == ["return_date"], "round trip: then asks the return date")
 check(form(trip[2])["payload"]["criteria"]["returnDate"] == "2026-11-20", "the return date completes it")
@@ -162,7 +162,7 @@ check("in the past" in past["bot_message"] and "dates" in past["asked"] and not 
 backwards = converse(["Round trip flight SFO to Lisbon departing Nov 10 returning Nov 2, 1 adult"])[0]
 check("return date can't be before" in backwards["bot_message"] and not backwards["forms"],
       "a return before the departure is refused")
-same_day = converse(["Round trip flight from SFO to Lisbon Nov 10 to Nov 10, 1 adult"])[0]
+same_day = converse(["Round trip flight from SFO to Lisbon Nov 10 to Nov 10, 1 adult, no kids"])[0]
 check(same_day["forms"] and form(same_day)["payload"]["criteria"]["returnDate"] == "2026-11-10",
       "a same-day return is allowed (return >= departure)")
 zero_nights = converse(["Hotel in Rome, check-in Nov 10, check-out Nov 10, 2 adults, 1 room"])[0]
@@ -171,19 +171,19 @@ check("Check-out has to be after check-in" in zero_nights["bot_message"] and not
 rooms = converse(["Hotel in Rome Nov 3 to Nov 7, 1 adult, 3 rooms"])[0]
 check("at least one adult" in rooms["bot_message"] and "rooms" in rooms["asked"], "more rooms than adults is refused")
 many = converse(["Flight SFO to Lisbon Nov 10 one way, 12 adults"])[0]
-check("1 to 9 adults" in many["bot_message"] and "adults" in many["asked"], "over the flight form's 9 adults is refused")
+check("1 to 9 adults" in many["bot_message"] and "travelers" in many["asked"], "over the flight form's 9 adults is refused")
 
 # ── Corrections ──────────────────────────────────────────────────────────
 
-fix = converse(["Hotel in Paris Nov 1 to Nov 5, 2 adults, 1 room", "Actually make it Rome", "3 adults"])
+fix = converse(["Hotel in Paris Nov 1 to Nov 5, 2 adults, no kids, 1 room", "Actually make it Rome", "3 adults"])
 check(form(fix[1])["payload"]["criteria"]["destination"] == "Rome", "a changed destination updates the form")
 check(form(fix[2])["payload"]["criteria"]["adults"] == 3, "a changed count updates the form")
 check(fix[1]["asked"] == [] and fix[2]["asked"] == [], "a correction asks nothing new")
-oneway = converse(["Round trip flights from SFO to JFK Nov 1 to Nov 8, 2 adults", "make it one way"])
+oneway = converse(["Round trip flights from SFO to JFK Nov 1 to Nov 8, 2 adults, no kids", "make it one way"])
 check("returnDate" not in form(oneway[1])["payload"]["criteria"]
       and form(oneway[1])["payload"]["criteria"]["tripType"] == "one_way",
       "switching to one way drops returnDate")
-switch = converse(["Flight and hotel to Rome from SFO Nov 3 to Nov 7, 2 adults", "just the hotel", "1 room"])
+switch = converse(["Flight and hotel to Rome from SFO Nov 3 to Nov 7, 2 adults, no kids", "just the hotel", "1 room"])
 check([f["widget_type"] for f in switch[2]["forms"]] == ["hotel_search_form"], "switching to hotel-only drops the flight")
 
 # ── Airports ─────────────────────────────────────────────────────────────
@@ -191,7 +191,7 @@ check([f["widget_type"] for f in switch[2]["forms"]] == ["hotel_search_form"], "
 paris = converse(["Flight from SFO to Paris on Nov 10, one way, 1 adult"])[0]
 check(paris["asked"] == ["airport:destination"] and "CDG" in paris["bot_message"] and "ORY" in paris["bot_message"],
       "a multi-airport city is a question with its airports, asked on its own")
-picked = converse(["Flight from SFO to Paris on Nov 10, one way, 1 adult", "CDG"])[-1]
+picked = converse(["Flight from SFO to Paris on Nov 10, one way, 1 adult, no kids", "CDG"])[-1]
 check(picked["forms"] and "defaultDestination" not in form(picked)["payload"],
       "a picked airport sets no defaultDestination")
 nowhere = converse(["Flight from SFO to Springfield on Nov 10, one way, 1 adult"])[0]
@@ -203,15 +203,15 @@ check(all(f["payload"]["criteria"][k] in allowed for r in [picked, kids[1], trip
 
 # ── Coordinates and named hotels ─────────────────────────────────────────
 
-pin = converse([("Hotel Nov 1 to Nov 5, 2 adults, 1 room", {"latitude": 48.86, "longitude": 2.35})])[0]
+pin = converse([("Hotel Nov 1 to Nov 5, 2 adults, no kids, 1 room", {"latitude": 48.86, "longitude": 2.35})])[0]
 crit = form(pin)["payload"]["criteria"] if pin["forms"] else {}
 check(crit.get("destination") == "Paris" and crit.get("latitude") == 48.86 and "radius" not in crit,
       "coordinates only: destination is the city name, coordinates kept, no radius invented")
 check(pin["forms"] and "defaultDestination" not in form(pin)["payload"],
       "coordinates only: no defaultDestination (the user didn't name it)")
-sea = converse([("Hotel Nov 1 to Nov 5, 2 adults, 1 room", {"latitude": 0.0, "longitude": -30.0})])[0]
+sea = converse([("Hotel Nov 1 to Nov 5, 2 adults, no kids, 1 room", {"latitude": 0.0, "longitude": -30.0})])[0]
 check(not sea["forms"] and "destination" in sea["asked"], "coordinates far from any known city: asks for the city")
-named = converse([("A room at Hotel Bel-Air Dec 10 to Dec 14, 2 adults", {"latitude": 34.08, "longitude": -118.44})])[0]
+named = converse([("A room at Hotel Bel-Air Dec 10 to Dec 14, 2 adults, no kids", {"latitude": 34.08, "longitude": -118.44})])[0]
 check(named["forms"] and "latitude" not in form(named)["payload"]["criteria"],
       "a named hotel drops the coordinates")
 
@@ -237,7 +237,7 @@ all_forms = [f for r in hotel + kids + trip + fix + oneway + switch + combo + [p
 check(all(list(f["payload"]["criteria"]) == [k for k in (HOTEL_KEYS if f["widget_type"] == "hotel_search_form"
                                                           else FLIGHT_KEYS) if k in f["payload"]["criteria"]]
           for f in all_forms), "every form uses only the form's field names, in the form's order")
-plain = converse(["Hotel in Rome Nov 3 to Nov 7, 2 adults, 1 room"])[0]["forms"][0]
+plain = converse(["Hotel in Rome Nov 3 to Nov 7, 2 adults, no kids, 1 room"])[0]["forms"][0]
 check(same(plain["payload"]["criteria"], {"destination": "Rome", "checkIn": "2026-11-03", "checkOut": "2026-11-07",
                                           "rooms": 1, "adults": 2, "children": []}),
       "no children mentioned: children [] and no optional field appears")
@@ -266,6 +266,103 @@ check(dict(steps["load_state"]["tool"]["input"], doc_path=None) == pin_in
       and steps["load_state"]["tool"]["input"]["doc_path"].endswith("/slot_state/intake"),
       "load_state bindings match; only the slot document differs")
 
+# ── Darya's answers (adiona/frontend#55, 2026-10-16) ─────────────────────
+
+# 1. Travellers are asked together: adults, whether children come, their ages.
+TRAVELERS_Q = ("How many adults are traveling? Will any children be traveling as well? "
+               "If so, please share each child's age.")
+t1 = converse(["Hotel in Rome Nov 3 to Nov 7, 1 room"])[0]
+check(t1["asked"] == ["travelers"] and TRAVELERS_Q in t1["bot_message"],
+      "travellers are one question: adults, children and their ages (%r)" % t1["bot_message"])
+t2 = converse(["Hotel in Rome Nov 3 to Nov 7, 1 room, 2 adults"])[0]
+check(t2["asked"] == ["travelers"] and t2["bot_message"].startswith("Will any children be traveling as well?"),
+      "adults already known: only the children part is asked")
+t3 = converse(["Hotel in Rome Nov 3 to Nov 7, 1 room", "2 adults"])[-1]
+check(form(t3)["payload"]["criteria"].get("children") == [],
+      "asked about children together with adults, an answer naming no children means none: children []")
+t4 = converse(["Hotel in Rome Nov 3 to Nov 7, 1 room", "2 adults and 2 kids 7 and 10"])[-1]
+check(form(t4)["payload"]["criteria"].get("children") == [{"age": 7}, {"age": 10}],
+      "the children's ages fill the form when given")
+t5 = converse(["Hotel in Rome Nov 3 to Nov 7, 1 room", "2 adults and 2 children"])[-1]
+check(t5["asked"] == ["children_ages"] and not t5["forms"], "children without ages: their ages are asked")
+
+# 5. "Both" must return both forms. Darya's prod run (2026-10-16 21:13-21:19Z) replayed
+#    with what the model actually proposed: "I am flying from San Francisco" came back as
+#    intent `flight`, which used to drop the hotel.
+both_run = converse([
+    "I want to travel to Europe", "Both", "London", "Heathrow Airport (LHR)",
+    "I am flying from San Francisco. Not sure about dates, sometime in November",
+    "November 5 to November 15, 2 adults, no kids", "one room"],
+    scripted({}, {"intent": "both"}, {"destination": {"text": "London", "kind": "city"}}, {"airport_code": "LHR"},
+             {"intent": "flight", "origin": {"text": "San Francisco", "kind": "city"}},
+             {"start_date": "2026-11-05", "end_date": "2026-11-15", "adults": 2, "children_count": 0},
+             {"rooms": 1}))
+check([f["widget_type"] for f in both_run[-1]["forms"]] == ["hotel_search_form", "flight_search_form"],
+      "'both' returns BOTH forms even when a later message mentions flying: %s"
+      % [f["widget_type"] for f in both_run[-1]["forms"]])
+check(all(r["state"].get("intent") == "both" for r in both_run[1:]), "the intent stays `both` on every later turn")
+add_hotel = converse(["Round trip flight from SFO to JFK Nov 5 to Nov 15, 2 adults, no kids", "what about hotel info", "one room"],
+                     scripted({"intent": "flight", "origin": {"text": "SFO", "kind": "airport"},
+                               "destination": {"text": "JFK", "kind": "airport"}, "start_date": "2026-11-05",
+                               "end_date": "2026-11-15", "adults": 2, "children_count": 0, "trip_type": "round_trip"},
+                              {"intent": "hotel"}, {"rooms": 1}))
+check([f["widget_type"] for f in add_hotel[-1]["forms"]] == ["hotel_search_form", "flight_search_form"]
+      and form(add_hotel[-1])["payload"]["criteria"]["checkIn"] == "2026-11-05",
+      "asking about a hotel after a flight adds it (both forms; the hotel reuses the flight's dates)")
+narrow = converse(["Flight and hotel to Rome from SFO Nov 3 to Nov 7, 2 adults, no kids", "actually just the flight"])
+check([f["widget_type"] for f in narrow[-1]["forms"]] == ["flight_search_form"], "an explicit 'just the flight' still narrows")
+check(lib["resolve_intent"]("both", "flight", "I am flying from SFO") == "both"
+      and lib["resolve_intent"]("flight", "hotel", "what about a hotel") == "both"
+      and lib["resolve_intent"]("both", "hotel", "no flight needed") == "hotel"
+      and lib["resolve_intent"](None, "flight", "a flight") == "flight", "intent resolution rules")
+
+# ── The date picker: the planner's date_range_picker, rendered by the chat ──
+
+schema = json.load(open("playbooks/widget-contract/date_range_picker.schema.json"))
+planner_steps = {s["step"]: s for s in yaml.safe_load(open(PLANNER))["workflow"]}
+planner_render = planner_steps["render_widget_chat"]["tool"]["code"]
+d1 = converse(["I need a hotel in Rome"])[0]
+w = d1["widget"] or {}
+check(w.get("widget_type") == "date_range_picker" and w.get("schema_version") == 1 and w.get("variant") == "compact"
+      and '_env("date_range_picker", "compact"' in planner_render,
+      "asking the dates returns the planner's date_range_picker envelope (schema_version 1, variant compact)")
+pay = w.get("payload") or {}
+check(set(schema["required"]) <= set(pay) and set(pay) <= set(schema["properties"]),
+      "the picker payload satisfies the widget contract schema: %s" % sorted(pay))
+check(pay.get("min_date") == "2026-10-16" and pay.get("max_date") == "2027-10-16" and pay.get("locale") == "en"
+      and pay.get("submit") == "submit" and pay.get("default_from") == "2026-10-17",
+      "picker bounds: today to a year out, opening on tomorrow, as the planner's")
+check(d1["bot_message"].startswith("What are your check-in and check-out dates?"),
+      "the question text comes with the picker")
+nodates = converse(["Hotel in Rome Nov 3 to Nov 7, 1 room"])[0]
+check(nodates["widget"] is None, "no picker when the dates are not being asked")
+check(converse(["Hotel in Rome Nov 3 to Nov 7, 2 adults, no kids, 1 room"])[0]["widget"] is None,
+      "no picker once the form is complete")
+
+SUBMIT = lambda a, b: {"action_id": "submit_dates", "value": {"from": a, "to": b, "nights": 4},
+                       "submitted_value": {"from": a, "to": b, "nights": 4}}
+hp = converse(["I need a hotel in Rome", ("", SUBMIT("2026-11-03", "2026-11-07")), "2 adults, no kids, 1 room"])
+check(hp[1]["state"].get("start_date") == "2026-11-03" and "dates" not in hp[1]["asked"]
+      and form(hp[-1])["payload"]["criteria"]["checkIn"] == "2026-11-03"
+      and form(hp[-1])["payload"]["criteria"]["checkOut"] == "2026-11-07",
+      "the picker's submit fills check-in and check-out")
+fr = converse(["Flight from SFO to Lisbon, 1 adult, no kids", "round trip", ("", SUBMIT("2026-11-10", "2026-11-20"))])
+check(fr[0]["asked"] == ["trip_type"] and fr[1]["widget"] and "fly back" in fr[1]["bot_message"]
+      and form(fr[-1])["payload"]["criteria"].get("returnDate") == "2026-11-20",
+      "flight-only: trip type first, then the picker; its submit fills departure and return")
+fo = converse(["Flight from SFO to Lisbon, 1 adult, no kids", "one way", ("", SUBMIT("2026-11-10", "2026-11-14"))])
+check(form(fo[-1])["payload"]["criteria"].get("departDate") == "2026-11-10"
+      and "returnDate" not in form(fo[-1])["payload"]["criteria"],
+      "one way: the picker's start is the departure, its end is ignored")
+bp = converse(["Flight and hotel in Rome from SFO, 2 adults, no kids, 1 room", ("", SUBMIT("2026-11-03", "2026-11-07"))])
+check([(f["payload"]["criteria"].get("checkIn") or f["payload"]["criteria"].get("departDate")) for f in bp[-1]["forms"]]
+      == ["2026-11-03", "2026-11-03"], "combined trip: one picker fills both forms' dates")
+past_pick = converse(["I need a hotel in Rome", ("", SUBMIT("2026-10-01", "2026-10-05"))])[-1]
+check("in the past" in past_pick["bot_message"] and past_pick["widget"], "a past range from the picker is refused and the picker shown again")
+rt = converse(["Flights from SFO to Lisbon on Nov 10 for 2 adults, no kids", "round trip"])[-1]
+check(rt["asked"] == ["return_date"] and (rt["widget"] or {}).get("payload", {}).get("default_from") == "2026-11-10",
+      "asking only the return date shows the picker opening on the departure")
+
 # ── The step as the playbook runs it ─────────────────────────────────────
 
 head, body = code.split("# ── The turn ", 1)
@@ -286,12 +383,14 @@ def run_step(text, prior=None, payload=None, llm_read=None):
 
 
 r1 = run_step("I need a hotel in Rome")
-check(r1["render"] is None and r1["forms"] == [] and r1["asked"] == ["dates", "adults"],
-      "step: asks while incomplete, renders nothing")
+check(r1["forms"] == [] and r1["asked"] == ["dates", "travelers"]
+      and (r1["render"] or {}).get("widget_type") == "date_range_picker",
+      "step: asks while incomplete; asking the dates renders the date picker, no form")
 check([d["path"] for d in r1["turn_docs"]] == ["chat_threads/chat-t1/slot_state/intake", "user_thread_map/abc"],
       "step: saves its own slot document plus the relation edge")
-check([e["event"]["type"] for e in r1["turn_events"]] == ["user_message", "agent_slot_update", "agent_chat"],
-      "step: events are the message, the state update and the question")
+check([e["event"]["type"] for e in r1["turn_events"]] == ["user_message", "agent_slot_update", "agent_chat", "agent_widget_emit"]
+      and r1["turn_events"][-1]["event"]["payload"]["envelope"] == r1["render"],
+      "step: events are the message, the state update, the question and the saved date picker")
 r2 = run_step("Nov 3 to Nov 7, 2 adults, 1 room", prior=r1["intake_state"])
 check(r2["render"] == form(r2) and r2["render"]["widget_type"] == "hotel_search_form",
       "step: once complete, render is the form")
@@ -303,7 +402,7 @@ def broken(*args):
     raise OSError("metadata server unreachable")
 
 
-r3 = run_step("Hotel in Rome Nov 3 to Nov 7, 2 adults, 1 room", llm_read=broken)
+r3 = run_step("Hotel in Rome Nov 3 to Nov 7, 2 adults, no kids, 1 room", llm_read=broken)
 check(r3["forms"] and not r3["llm"]["used"] and "OSError" in r3["llm"]["fallback_reason"],
       "step: a model failure falls back to the rule reader and says so")
 

@@ -26,6 +26,10 @@ Checks (PASS / FAIL / INFO per turn):
                 seq/type/payload/thread_path/server_time), so per-event user attribution is
                 via thread_owners / user_thread_map, not the event.
 
+Also validates muno/playbooks/trip-intake turns (intake_turn's turn_events/turn_docs,
+saved by persist_turn, state in slot_state/intake): pass --playbook for --thread /
+--since-minutes; an --execution is recognised by its steps.
+
 Usage (needs gcloud auth with read access to Firestore, and a NoETL server API, e.g. a
 port-forward: kubectl -n noetl port-forward pod/noetl-server-rust-embedded-0 47382:8082):
 
@@ -47,6 +51,10 @@ import urllib.parse
 import urllib.request
 
 PLANNER = "muno/playbooks/itinerary-planner"
+# muno/playbooks/trip-intake (adiona/frontend#55) writes the same thread records:
+# its access step is load_state, its turn is intake_turn (turn_events/turn_docs),
+# it saves through persist_turn and keeps its state in slot_state/intake.
+INTAKE = "muno/playbooks/trip-intake"
 ANONYMOUS = ("", "guest", None)
 
 
@@ -70,8 +78,8 @@ class Noetl:
     def execution(self, eid):
         return _get(f"{self.base}/api/executions/{eid}")
 
-    def recent(self, limit=200):
-        q = urllib.parse.urlencode({"limit": limit, "path": PLANNER})
+    def recent(self, limit=200, path=PLANNER):
+        q = urllib.parse.urlencode({"limit": limit, "path": path})
         return _get(f"{self.base}/api/executions?{q}") or []
 
 
@@ -129,7 +137,7 @@ def step_data(ex, node):
 
 def persist_child_id(ex):
     for e in ex.get("events", []):
-        if e.get("node_name") == "persist_all_atomically" and e.get("event_type") == "call.done":
+        if e.get("node_name") in ("persist_all_atomically", "persist_turn") and e.get("event_type") == "call.done":
             ctx = (((e.get("result") or {}).get("context") or {}).get("result") or {}).get("context") or {}
             return ctx.get("child_execution_id") or (ctx.get("data") or {}).get("execution_id")
     return None
@@ -205,7 +213,8 @@ def validate(noetl, fs, eid, thread_events_cache, prior_turns):
     R.update(thread_id=tid, status=ex.get("status"), started_at=ex.get("started_at"))
     R["retrieved"]["user"] = (uid or "")[:12] + ("…" if uid and len(uid) > 12 else "")
 
-    access = (step_data(ex, "load_slot_state") or {}).get("thread_access") or {}
+    intake = step_data(ex, "intake_turn") is not None or ex.get("path") == INTAKE
+    access = (step_data(ex, "load_state" if intake else "load_slot_state") or {}).get("thread_access") or {}
     if uid in ANONYMOUS:
         # A guest turn is expected to be refused before anything is written.
         put("identity", None, "user_uid=(guest/empty): anonymous turn")
@@ -218,8 +227,8 @@ def validate(noetl, fs, eid, thread_events_cache, prior_turns):
         put("persist", None, "turn refused by thread access; nothing should be written")
         return R
 
-    ext = step_data(ex, "extract_turn") or {}
-    ren = step_data(ex, "render_widget_chat") or {}
+    ext = step_data(ex, "intake_turn" if intake else "extract_turn") or {}
+    ren = {} if intake else (step_data(ex, "render_widget_chat") or {})
     exp_events = [e.get("event", {}).get("type") for e in (ext.get("turn_events") or [])] + \
                  [e.get("event", {}).get("type") for e in (ren.get("post_events") or [])]
     exp_docs = [d.get("path") for d in (ext.get("turn_docs") or [])] + [d.get("path") for d in (ren.get("post_docs") or [])]
@@ -258,7 +267,8 @@ def validate(noetl, fs, eid, thread_events_cache, prior_turns):
         f"stored {len(block)}/{len(exp_events)} at {where}: {block}"
         + ("" if block == exp_events else f"; missing {exp_events[len(block):]}"))
 
-    slot = fs.doc(f"chat_threads/{tid}/slot_state/current")
+    slot_doc = "intake" if intake else "current"
+    slot = fs.doc(f"chat_threads/{tid}/slot_state/{slot_doc}")
     # Every tool turn has an api_calls/{call_id} document. Since noetl/travel#156 the
     # render step writes it inline (with the search's offers) rather than through the
     # save batch, so it is expected from the tool call, not only from post_docs.
@@ -279,7 +289,7 @@ def validate(noetl, fs, eid, thread_events_cache, prior_turns):
             missing.append(tool_ev["offers_ref"] + " (offers)")
     R["retrieved"]["slot_state_keys"] = sorted(slot.keys())[:8] if slot else None
     put("docs", slot is not None and not missing,
-        f"slot_state/current {'present' if slot else 'MISSING'}; api_calls {len(calls) - len(missing)}/{len(calls)}"
+        f"slot_state/{slot_doc} {'present' if slot else 'MISSING'}; api_calls {len(calls) - len(missing)}/{len(calls)}"
         + offers_note + (f" missing {missing}" if missing else ""))
 
     owner = fs.doc(f"thread_owners/{tid}")
@@ -310,13 +320,14 @@ def main():
     ap.add_argument("--server", default="http://localhost:47382")
     ap.add_argument("--project", default="shastaratech-noetl-prod")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--playbook", default=PLANNER, help="for --thread/--since-minutes: %s or %s" % (PLANNER, INTAKE))
     a = ap.parse_args()
 
     noetl, fs = Noetl(a.server), Firestore(a.project)
     if a.execution:
         ids = [a.execution]
     else:
-        rows = sorted(noetl.recent(), key=lambda r: r.get("started_at") or "")
+        rows = sorted(noetl.recent(path=a.playbook), key=lambda r: r.get("started_at") or "")
         if a.since_minutes:
             cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=a.since_minutes)
             ids = [r["execution_id"] for r in rows if ms(r.get("started_at")) >= cutoff.timestamp() * 1000]
