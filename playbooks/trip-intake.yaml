@@ -40,7 +40,7 @@ metadata:
     check-out after check-in; counts within the forms' own limits. Airport codes
     are only those FlightSearchForm can prefill (its airports.ts); a city with
     several airports is a question, never a pick.
-  version: "2"
+  version: "3"
   agent: true
   tags: [muno, intake, forms, event-sourced]
   terminal:
@@ -748,6 +748,30 @@ workflow:
             return BY_CODE[codes[0]]["city"] if codes else None
 
 
+        def _names_airport(text, code):
+            """Whether `text` names airport `code` by its code or its name ("LHR",
+            "Heathrow", "Heathrow Airport (LHR)"). The city alone does not: "London"
+            does not pick one of London's airports."""
+            a = BY_CODE.get(code) or {}
+            low = str(text or "").lower()
+            short = re.sub(r"\b(international|airport)\b", "", a.get("name", "").lower()).strip()
+            return bool(re.search(r"\b%s\b" % code.lower(), low)) or (len(short) >= 4 and short in low)
+
+
+        def airport_city(text):
+            """The city of an airport named in `text` by code ("JFK", "Heathrow (LHR)") or name."""
+            t = str(text or "")
+            for code in re.findall(r"\b([A-Za-z]{3})\b", t):
+                if code.upper() in BY_CODE:
+                    return BY_CODE[code.upper()]["city"]
+            low = t.lower()
+            for a in AIRPORTS:
+                name = a["name"].lower()
+                if name in low or (name.replace(" airport", "").replace(" international", "") in low and len(name) > 8):
+                    return a["city"]
+            return None
+
+
         def resolve_airport(place):
             """(code, options, error) for an origin/destination the user gave.
 
@@ -1344,12 +1368,16 @@ workflow:
             """One or two questions. An airport choice is asked on its own."""
             if not need:
                 return []
-            if need[0].startswith("airport") or need[0] == "trip_type" or len(need) == 1:
-                # An airport choice, and a flight's trip type (it decides whether the date
-                # picker asks for one date or two), are asked on their own.
+            alone = ("dates", "return_date", "trip_type")
+            if need[0].startswith("airport") or need[0] in alone or len(need) == 1:
+                # Asked on their own: an airport choice; a flight's trip type (it decides
+                # whether the picker asks for one date or two); and the dates, which come
+                # with the date picker (adiona/frontend#55: "first will ask 'Which city or
+                # airport are you flying from?' and after user replies ask about the dates
+                # and it will return the DatePicker").
                 return need[:1]
             second = need[1]
-            return need[:1] if second.startswith("airport") else need[:2]
+            return need[:1] if second.startswith("airport") or second in alone else need[:2]
 
 
         # ── The forms ────────────────────────────────────────────────────────────
@@ -1409,10 +1437,14 @@ workflow:
             d = s["destination"]
             if d.get("kind") == "hotel":
                 dest = d["text"]
-            elif d.get("kind") == "airport" and d["text"].upper() in BY_CODE:
-                dest = BY_CODE[d["text"].upper()]["city"]
             else:
-                dest = _canonical_city(d["text"]) or d["text"]
+                # A city name, never an airport (adiona/frontend#55): a known city as is;
+                # an airport, by code or name, becomes its city; else the flight's
+                # destination airport's city; else what the user typed.
+                dest = (_canonical_city(d["text"]) or airport_city(d["text"])
+                        or (BY_CODE[s["destination_code"]]["city"] if d.get("kind") == "airport"
+                            and s.get("destination_code") in BY_CODE else None)
+                        or d["text"])
             criteria = {"destination": dest}
             if d.get("kind") != "hotel" and s.get("latitude") is not None and s.get("longitude") is not None:
                 criteria["latitude"] = s["latitude"]
@@ -1478,10 +1510,13 @@ workflow:
                 if not opts:
                     continue
                 pick = patch.get("airport_code")
-                if pick not in opts and key in patch and patch[key]["text"].upper() in opts:
-                    pick = patch[key]["text"].upper()
+                if pick not in opts and key in patch:
+                    pick = next((o for o in opts if _names_airport(patch[key]["text"], o)), pick)
                 if pick in opts:
-                    if key in patch and patch[key]["text"].upper() == pick:
+                    # The answer names the airport ("LHR", "Heathrow Airport (LHR)"): it picks
+                    # the flight's airport and must not replace the place itself, which stays
+                    # the city the hotel form needs. A different place is a change of mind.
+                    if key in patch and _names_airport(patch[key]["text"], pick):
                         patch.pop(key)
                     patch["airport_code"] = pick
                     if key == "destination":

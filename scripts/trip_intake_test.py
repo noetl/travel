@@ -120,7 +120,8 @@ check(junk["state"].get("adults") is None and not junk["patch"], "model output o
 
 hotel = converse(["I need a hotel", "Rome", "Nov 3 to Nov 7", "2", "1"])
 asked = [r["asked"] for r in hotel]
-check(asked[0] == ["destination", "dates"], "first questions are destination + dates, got %s" % asked[0])
+check(asked[0] == ["destination"] and asked[1] == ["dates"],
+      "destination first, then the dates on their own, got %s" % asked[:2])
 check(all(1 <= len(a) <= 2 for a in asked[:-1]) and asked[-1] == [], "one or two questions per turn until complete")
 def answered_then_asked(results):
     """Questions asked for a field that an EARLIER turn had already filled."""
@@ -136,7 +137,8 @@ check(not answered_then_asked(hotel), "a field once answered is never asked agai
 check(hotel[-1]["forms"] and form(hotel[-1])["payload"]["criteria"]["destination"] == "Rome",
       "the hotel form comes back once everything is known")
 check(all(not r["forms"] for r in hotel[:-1]), "no form before every required field is known")
-check(hotel[0]["bot_message"] == "Where would you like to stay? What are your check-in and check-out dates?",
+check(hotel[0]["bot_message"] == "Where would you like to stay?"
+      and hotel[1]["bot_message"] == "What are your check-in and check-out dates?",
       "the questions read naturally: %r" % hotel[0]["bot_message"])
 
 first = converse(["hello"])[0]
@@ -363,6 +365,53 @@ rt = converse(["Flights from SFO to Lisbon on Nov 10 for 2 adults, no kids", "ro
 check(rt["asked"] == ["return_date"] and (rt["widget"] or {}).get("payload", {}).get("default_from") == "2026-11-10",
       "asking only the return date shows the picker opening on the departure")
 
+# ── Darya's round 3 (adiona/frontend#55, 2026-10-18) ─────────────────────
+# Her prod run 2026-10-18 02:06-02:11Z, replayed with what the model returned. For the
+# airport answer the model gave a destination text AND/OR the code; all three shapes.
+PICK_SHAPES = {
+    "text + code": {"destination": {"text": "Heathrow Airport (LHR)", "kind": "airport"}, "airport_code": "LHR"},
+    "text only": {"destination": {"text": "Heathrow Airport (LHR)", "kind": "airport"}},
+    "name only": {"destination": {"text": "Heathrow", "kind": "airport"}},
+}
+for shape, pick_patch in PICK_SHAPES.items():
+    run = converse([
+        "i want to travel to Europe", "both", "London", "Heathrow Airport (LHR)", "From San Francisco",
+        ("", {"action_id": "submit_dates", "submitted_value": {"from": "2026-10-19", "to": "2026-10-23", "nights": 4}}),
+        "2 adults only, need one room"],
+        scripted({}, {"intent": "both"}, {"destination": {"text": "London", "kind": "city"}}, pick_patch,
+                 {"origin": {"text": "San Francisco", "kind": "city"}}, {}, {"adults": 2, "children_count": 0, "rooms": 1}))
+    # 1. the origin first, alone; the dates (with the picker) after the user replies
+    check(run[3]["asked"] == ["origin"] and run[3]["bot_message"] == "Which city or airport are you flying from?"
+          and run[3]["widget"] is None,
+          "[%s] after the airport, the origin is asked on its own, with no picker: %r" % (shape, run[3]["bot_message"]))
+    check(run[4]["asked"] == ["dates"] and (run[4]["widget"] or {}).get("widget_type") == "date_range_picker"
+          and run[4]["bot_message"] == "What are your travel dates: when do you leave, and when do you come back?",
+          "[%s] then the dates, on their own, with the date picker" % shape)
+    # 2. the hotel destination is the city, the flight keeps the airport
+    forms = {f["widget_type"]: f["payload"]["criteria"] for f in run[-1]["forms"]}
+    check(forms.get("hotel_search_form", {}).get("destination") == "London"
+          and forms.get("flight_search_form", {}).get("destination") == "LHR",
+          "[%s] hotel destination is the city (London), flight destination the airport (LHR): %s"
+          % (shape, {k: v.get("destination") for k, v in forms.items()}))
+
+# The dates are never asked together with another question, in any conversation here.
+paired = [r["asked"] for conv in (hotel, kids, trip, fix, switch, combo, both_run, add_hotel, hp, fr, fo, bp)
+          for r in conv if set(r["asked"]) & {"dates", "return_date"} and len(r["asked"]) > 1]
+check(not paired, "the dates (and the return date) are always asked on their own: %s" % paired[:3])
+check(all((r["widget"] is not None) == bool(set(r["asked"]) & {"dates", "return_date"})
+          for conv in (hotel, combo, both_run, hp, fr) for r in conv),
+      "the date picker comes exactly with the dates question")
+
+# Airports given as the hotel's destination become their city.
+for text, city in (("JFK", "New York"), ("Charles de Gaulle Airport", "Paris"), ("Heathrow Airport (LHR)", "London")):
+    h = converse(["hotel please"], scripted({"intent": "hotel", "destination": {"text": text, "kind": "airport"},
+                                             "check_in": "2026-11-03", "check_out": "2026-11-07", "adults": 2,
+                                             "children_count": 0, "rooms": 1}))[-1]
+    check(form(h)["payload"]["criteria"].get("destination") == city,
+          "a hotel 'at %s' searches the city %s" % (text, city))
+again = converse(["Flight from SFO to London on Nov 10, one way, 1 adult, no kids", "London"])[-1]
+check(again["asked"] == ["airport:destination"], "re-typing the city does not pick one of its airports")
+
 # ── The step as the playbook runs it ─────────────────────────────────────
 
 head, body = code.split("# ── The turn ", 1)
@@ -383,7 +432,7 @@ def run_step(text, prior=None, payload=None, llm_read=None):
 
 
 r1 = run_step("I need a hotel in Rome")
-check(r1["forms"] == [] and r1["asked"] == ["dates", "travelers"]
+check(r1["forms"] == [] and r1["asked"] == ["dates"]
       and (r1["render"] or {}).get("widget_type") == "date_range_picker",
       "step: asks while incomplete; asking the dates renders the date picker, no form")
 check([d["path"] for d in r1["turn_docs"]] == ["chat_threads/chat-t1/slot_state/intake", "user_thread_map/abc"],
@@ -391,7 +440,7 @@ check([d["path"] for d in r1["turn_docs"]] == ["chat_threads/chat-t1/slot_state/
 check([e["event"]["type"] for e in r1["turn_events"]] == ["user_message", "agent_slot_update", "agent_chat", "agent_widget_emit"]
       and r1["turn_events"][-1]["event"]["payload"]["envelope"] == r1["render"],
       "step: events are the message, the state update, the question and the saved date picker")
-r2 = run_step("Nov 3 to Nov 7, 2 adults, 1 room", prior=r1["intake_state"])
+r2 = run_step("Nov 3 to Nov 7, 2 adults, no kids, 1 room", prior=r1["intake_state"])
 check(r2["render"] == form(r2) and r2["render"]["widget_type"] == "hotel_search_form",
       "step: once complete, render is the form")
 check([e["event"]["type"] for e in r2["turn_events"]][-1] == "agent_widget_emit"
