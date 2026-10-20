@@ -406,6 +406,20 @@ workflow:
                     index[v] = min(bands - 1, int((v - low) / width))
             return index, edges
 
+        def _int_or_none(value):
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                return None
+            return n if n >= 0 else None
+
+        def _free_cancellation_until(rate):
+            if str(rate.get("rateClass") or "").upper() == "NRF":
+                return None
+            starts = sorted(str(_as_dict(p).get("from")) for p in _as_list(rate.get("cancellationPolicies"))
+                            if _as_dict(p).get("from"))
+            return starts[0] if starts else None
+
         def _rooms(hotel, currency, image, nights, hotel_images):
             # adiona/frontend#22 — emit up to `max_rooms` REAL bookable rates,
             # spread across price bands, instead of the single cheapest.
@@ -514,6 +528,14 @@ workflow:
                     # HotelBeds rateClass "NRF" == non-refundable.
                     "refundable": str(rate.get("rateClass") or "").upper() != "NRF",
                     "cancellationPolicies": _as_list(rate.get("cancellationPolicies")),
+                    # adiona/frontend#95: HotelBeds' `allotment` is the number of rooms
+                    # of this type still available; null when it gave none.
+                    "roomsLeft": _int_or_none(rate.get("allotment")),
+                    # adiona/frontend#95: the earliest moment a cancellation charge applies
+                    # (the earliest `from` of its cancellationPolicies, in the hotel's local
+                    # time); before it, cancelling is free. Null for a non-refundable rate
+                    # or one with no policy.
+                    "freeCancellationUntil": _free_cancellation_until(rate),
                     # Room photos when the Content API attributed any to this
                     # roomCode; otherwise the hotel photo, never a room photo
                     # borrowed from a different room.
