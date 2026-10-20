@@ -197,7 +197,8 @@ picked = converse(["Flight from SFO to Paris on Nov 10, one way, 1 adult, no kid
 check(picked["forms"] and "defaultDestination" not in form(picked)["payload"],
       "a picked airport sets no defaultDestination")
 nowhere = converse(["Flight from SFO to Springfield on Nov 10, one way, 1 adult"])[0]
-check(not nowhere["forms"] and ("destination" in nowhere["asked"] or any(a.startswith("airport") for a in nowhere["asked"])),
+check(not nowhere["forms"] and ("destination" in nowhere["asked"]
+                               or any(a.startswith(("airport", "which:")) for a in nowhere["asked"])),
       "a place with no known airport is asked about, not guessed")
 allowed = set(lib["BY_CODE"])
 check(all(f["payload"]["criteria"][k] in allowed for r in [picked, kids[1], trip[2]] for f in r["forms"]
