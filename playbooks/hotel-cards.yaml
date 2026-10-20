@@ -93,10 +93,12 @@ workload:
   # Anything else returns `validation_error: could not resolve a geolocation`,
   # so prefer explicit lat/lng and treat `city` as a label.  Caller-supplied
   # coordinates take precedence over the table in the provider.
-  # Default: Monterey, California — the locale of the card contract sample.
-  city: "Monterey, California"
-  latitude: 36.6002
-  longitude: -121.8947
+  # No default location (adiona/frontend#62): a search the caller did not place
+  # is refused by `check_location` with "No location received" instead of
+  # quietly searching Monterey, California.
+  city: ""
+  latitude: ""
+  longitude: ""
   radius: 20
   # NO ABSOLUTE DATE BELONGS HERE.  A literal check-in is correct only until
   # it is not: the previous `check_in: "2026-09-10"` made HotelBeds reject
@@ -211,7 +213,66 @@ workflow:
     next:
       spec: { mode: exclusive }
       arcs:
-        - step: search_hotels
+        - step: check_location
+
+  - step: check_location
+    desc: Refuse a search with no location rather than default one (adiona/frontend#62)
+    tool:
+      kind: python
+      input:
+        city: "{{ workload.city | default('') }}"
+        latitude: "{{ workload.latitude | default('') }}"
+        longitude: "{{ workload.longitude | default('') }}"
+      code: |
+        def _coord(value, limit):
+            try:
+                v = float(str(value).strip())
+            except (TypeError, ValueError):
+                return None
+            return v if -limit <= v <= limit else None
+
+        _lat, _lng = _coord(latitude, 90), _coord(longitude, 180)
+        _city = "" if city is None else str(city).strip()
+        has_coordinates = _lat is not None and _lng is not None
+        result = {
+            # Coordinates, or a city name the provider can place. Whether a city
+            # resolves is the provider's call; its refusal now comes back as text.
+            "location_ok": bool(has_coordinates or _city),
+            "has_coordinates": has_coordinates,
+            "city": _city,
+        }
+        globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - when: "{{ check_location.location_ok }}"
+          step: search_hotels
+        - step: no_location
+
+  - step: no_location
+    desc: No city or coordinates were sent; say so instead of searching anywhere
+    tool:
+      kind: python
+      input:
+        check_in: "{{ resolve_dates.check_in }}"
+        check_out: "{{ resolve_dates.check_out }}"
+      code: |
+        result = {
+            "hotels": [],
+            "count": 0,
+            "check_in": check_in,
+            "check_out": check_out,
+            "source": "hotelbeds",
+            "provider_error": "No location received: send a city or coordinates for the hotel search.",
+            "provider_error_code": "missing_location",
+            "provider_error_detail": None,
+            "deref_error": None,
+        }
+        globals().update({"result": result})
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: final_result
 
   - step: search_hotels
     desc: HotelBeds availability through the registered MCP provider (TEST env)
@@ -740,8 +801,10 @@ workflow:
       kind: python
       input:
         mapped: "{{ map_cards | default({}) }}"
+        no_location: "{{ no_location | default({}) }}"
       code: |
-        result = mapped if isinstance(mapped, dict) else {}
+        # One of the two ran: the mapped cards, or the "No location received" result.
+        result = mapped if isinstance(mapped, dict) and mapped else (no_location if isinstance(no_location, dict) else {})
         globals().update({"result": result})
     next:
       spec: { mode: exclusive }
