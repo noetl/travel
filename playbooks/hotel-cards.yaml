@@ -665,7 +665,21 @@ workflow:
         data = _as_dict(envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope)
         inner = _as_dict(data.get("data") if isinstance(data.get("data"), dict) else data)
         hotels = _as_list(inner.get("hotels"))
-        provider_error = envelope.get("isError") or inner.get("error")
+        # adiona/frontend#63: the provider's refusal, as text. This used to be
+        # `isError or error`, i.e. the boolean `true` for every provider failure,
+        # so the UI could only say "true" and the real reason (e.g. HotelBeds'
+        # "a paxes element per child") was lost. `summary` is the provider's
+        # user-safe message (its raw HotelBeds body stays out of it,
+        # noetl/ai-meta#175); the full diagnostic and the code ride separately.
+        provider_error = None
+        provider_error_code = None
+        provider_error_detail = None
+        if envelope.get("isError") or inner.get("error"):
+            meta = _as_dict(envelope.get("_meta"))
+            provider_error = str(envelope.get("summary") or envelope.get("text") or inner.get("user_message")
+                                 or inner.get("error") or meta.get("error") or "hotel search failed")[:500]
+            provider_error_code = inner.get("code") or meta.get("code")
+            provider_error_detail = str(inner.get("error") or meta.get("error") or "")[:2000] or None
 
         nights = _nights(check_in, check_out)
         cards = []
@@ -720,6 +734,10 @@ workflow:
             "source": "hotelbeds",
             "hotelbeds_env": inner.get("hotelbeds_env"),
             "provider_error": provider_error or None,
+            "provider_error_code": provider_error_code,
+            # Diagnostic only (may quote the provider's raw response): for logs
+            # and support, never for display.
+            "provider_error_detail": provider_error_detail,
             # Non-null means the child result was externalised and could not be
             # dereferenced — the card list is then empty for a PLUMBING reason,
             # not because HotelBeds returned nothing. Those must not look alike.
