@@ -23,7 +23,7 @@ steps = {s["step"]: s for s in yaml.safe_load(open(PLAYBOOK))["workflow"]}
 
 def map_cards(search_result):
     g = dict(search_result=search_result, check_in="2026-11-03", check_out="2026-11-07",
-             adults=2, children=0, max_rooms=10, price_bands=4)
+             adults=2, children=0, max_rooms=10, price_bands=4, currencies=["EUR"])
     exec(steps["map_cards"]["tool"]["code"], g)
     return g["result"]
 
@@ -52,7 +52,7 @@ check(rooms["a"]["promotions"] == [{"code": "EB", "name": "Early booking", "rema
 check(rooms["a"]["offers"] == [{"code": "1100", "name": "Early Booking Discount", "amount": -40.0}],
       "offers keep code, name and the amount as a number")
 check(rooms["b"]["promotions"] == [] and rooms["b"]["offers"] == [], "a rate without any: empty lists")
-check(h1["location"] == "Paris" and h1["pricePerNight"] == 100.0, "existing fields are unchanged")
+check(h1["location"] == "Paris" and h1["pricePerNight"] == [{"currency": "EUR", "price": 100.0}], "existing fields are unchanged")
 
 if failures:
     sys.exit("%d failure(s)" % len(failures))
