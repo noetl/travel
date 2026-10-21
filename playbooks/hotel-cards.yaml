@@ -132,6 +132,11 @@ workload:
   # only — a hotel with fewer bookable rates returns fewer.
   max_rooms: 10
   price_bands: 4
+  # adiona/frontend#62 item 4: return prices only in these currencies. A hotel
+  # HotelBeds priced in another currency is left out (no conversion), and the
+  # result says how many were (excluded_by_currency). HotelBeds prices in the
+  # account's currency, so this needs the account set to USD.
+  currencies: ["USD"]
 
 workflow:
   - step: start
@@ -1311,6 +1316,7 @@ workflow:
         children: "{{ workload.children }}"
         max_rooms: "{{ workload.max_rooms | default(10) }}"
         price_bands: "{{ workload.price_bands | default(4) }}"
+        currencies: "{{ workload.currencies | default(['USD']) }}"
       code: |
         import json
         import re
@@ -1496,6 +1502,31 @@ workflow:
                     out.append({"code": o.get("code"), "name": o.get("name"), "amount": _num(o.get("amount"))})
             return out
 
+        def _allowed_currencies(value):
+            # adiona/frontend#62 item 4: the currencies prices may be returned in.
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    value = [part for part in value.replace(",", " ").split() if part]
+            out = [str(c).strip().upper() for c in (value if isinstance(value, list) else []) if str(c).strip()]
+            return out or ["USD"]
+
+        def _price_list(amount, currency):
+            # [{currency, price}]: the shape adiona/frontend#62 asked for, ready for
+            # more than one currency. Empty when there is no price.
+            if amount is None or not currency:
+                return []
+            return [{"currency": str(currency).upper(), "price": amount}]
+
+        def _currency_error(cards, excluded, allowed):
+            # Every hotel was priced in a currency we do not return: say so rather
+            # than show an empty list that looks like "no hotels".
+            if cards or not excluded:
+                return None
+            return ("Hotel prices are not available in %s for this search." % " or ".join(allowed))
+
+
         def _rooms(hotel, currency, image, nights, hotel_images):
             # adiona/frontend#22 — emit up to `max_rooms` REAL bookable rates,
             # spread across price bands, instead of the single cheapest.
@@ -1598,7 +1629,9 @@ workflow:
                     "board": rate.get("boardName") or "",
                     "breakfastIncluded": _breakfast(rate.get("boardName")),
                     "price": _money(per_night, currency),
-                    "pricePerNight": per_night,
+                    # adiona/frontend#62 item 4: [{currency, price}], one entry per
+                    # currency HotelBeds priced it in (today one).
+                    "pricePerNight": _price_list(per_night, currency),
                     "totalPrice": net,
                     # adiona/frontend#62 item 4: the currency of this room's amounts.
                     "currency": currency or None,
@@ -1787,10 +1820,17 @@ workflow:
             provider_error_detail = str(inner.get("error") or meta.get("error") or "")[:2000] or None
 
         nights = _nights(check_in, check_out)
+        allowed = _allowed_currencies(globals().get("currencies"))
+        excluded_by_currency = {}
         cards = []
         for hotel in hotels:
             hotel = _as_dict(hotel)
             currency = hotel.get("currency")
+            if str(currency or "").upper() not in allowed:
+                # Only prices in the allowed currencies are returned; no conversion.
+                key = str(currency or "none").upper()
+                excluded_by_currency[key] = excluded_by_currency.get(key, 0) + 1
+                continue
             stars = _stars(hotel)
             rating = _rating(hotel)
             total = _num(hotel.get("minRate"))
@@ -1823,7 +1863,8 @@ workflow:
                 "neighborhood": hotel.get("zoneName") or None,
                 "rating": rating,
                 "ratingLabel": label,
-                "pricePerNight": per_night,
+                # adiona/frontend#62 item 4: [{currency, price}] (see _price_list).
+                "pricePerNight": _price_list(per_night, currency),
                 "totalPrice": total,
                 "nights": nights,
                 "amenities": _amenities(hotel),
@@ -1846,8 +1887,11 @@ workflow:
             "check_out": check_out,
             "source": "hotelbeds",
             "hotelbeds_env": inner.get("hotelbeds_env"),
-            "provider_error": provider_error or None,
-            "provider_error_code": provider_error_code,
+            "provider_error": provider_error or _currency_error(cards, excluded_by_currency, allowed),
+            "provider_error_code": provider_error_code or ("currency_unavailable" if _currency_error(
+                cards, excluded_by_currency, allowed) else None),
+            "currencies": allowed,
+            "excluded_by_currency": excluded_by_currency,
             # Diagnostic only (may quote the provider's raw response): for logs
             # and support, never for display.
             "provider_error_detail": provider_error_detail,

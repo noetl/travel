@@ -23,7 +23,7 @@ steps = {s["step"]: s for s in yaml.safe_load(open(PLAYBOOK))["workflow"]}
 
 def map_cards(search_result):
     g = dict(search_result=search_result, check_in="2026-11-03", check_out="2026-11-07",
-             adults=2, children=0, max_rooms=10, price_bands=4)
+             adults=2, children=0, max_rooms=10, price_bands=4, currencies=["EUR"])
     exec(steps["map_cards"]["tool"]["code"], g)
     return g["result"]
 
