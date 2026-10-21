@@ -254,8 +254,14 @@ check(not re.search(r"duffel|hotelbeds|google-places|places\.googleapis|amadeus"
 check(sorted(doc["metadata"]["capabilities"]) == ["ai:vertex-ai", "mcp:firestore"], "capabilities: firestore + the model only")
 # www.googleapis.com/auth/cloud-platform is an OAuth scope NAME, not a host contacted.
 hosts = set(re.findall(r"https?://([a-z0-9.-]+)", code.replace("https://www.googleapis.com/auth/cloud-platform", "")))
-check(hosts == {"metadata.google.internal"} and '"aiplatform.googleapis.com"' in code,
-      "the intake step reaches only the metadata server and Vertex AI: %s" % sorted(hosts))
+# Firestore is read directly for one thing only: cached place facts (intake_place_facts);
+# everything the turn saves still goes through mcp/firestore in persist_turn.
+check(hosts == {"metadata.google.internal", "firestore.googleapis.com"} and '"aiplatform.googleapis.com"' in code,
+      "the intake step reaches only the metadata server, Vertex AI and Firestore: %s" % sorted(hosts))
+fs_urls = re.findall(r'"https://firestore\.googleapis\.com[^"]*"', code)
+check(len(fs_urls) == 1 and "PLACE_CACHE_COLLECTION" in code[code.index(fs_urls[0]):code.index(fs_urls[0]) + 300]
+      and "method=\"POST\"" not in code[code.index(fs_urls[0]):code.index(fs_urls[0]) + 300],
+      "...and Firestore only to read intake_place_facts (a GET)")
 
 # ── Thread access is the planner's, byte for byte ────────────────────────
 

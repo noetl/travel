@@ -44,6 +44,15 @@ metadata:
     the correction is at least 60% alike to what was typed; otherwise, or when
     the place does not exist, the traveller is asked to check the spelling.
 
+    MODEL. Each turn's model call waits at most 7 s, with one retry after a
+    short pause on a timeout or HTTP 429/5xx (about 15 s worst case); then
+    rule_read answers instead.
+    What the model said about a place outside the table is cached in Firestore
+    intake_place_facts/{place} for 30 days and reused (so a turn the model
+    misses still knows it). To correct an entry: set `invalid: true` (the next
+    reading replaces it) or write `source: "manual"` with `facts_json` (kept
+    for good).
+
     INPUT user_location (optional, adiona/frontend#55 Part 2):
       {"city": "San Jose", "region": "CA", "country": "US", "lat": 37.3382, "lon": -121.8863}
     every field optional ("latitude"/"longitude"/"lng" also accepted; lat/lon
@@ -65,7 +74,7 @@ metadata:
     check-out after check-in; counts within the forms' own limits. Airport codes
     are only those FlightSearchForm can prefill (its airports.ts); a city with
     several airports is a question, never a pick.
-  version: "6"
+  version: "7"
   agent: true
   tags: [muno, intake, forms, event-sourced]
   terminal:
@@ -511,17 +520,22 @@ workflow:
         vertex_project: "{{ workload.vertex_project | default('shastaratech-noetl-prod') }}"
         vertex_region: "{{ workload.vertex_region | default('global') }}"
         today_override: "{{ workload.today | default('') }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
         user_location: "{{ workload.user_location | default({}) }}"
       code: |
         import base64
         import json
         import math
+        import random
         import re
+        import time
+        import urllib.error
         import urllib.parse
         import unicodedata
         import urllib.request
         import zlib
-        from datetime import date, timedelta
+        from datetime import date, datetime, timedelta, timezone
 
         # ── What this step does ──────────────────────────────────────────────────
         # One chat turn of trip intake (adiona/frontend#55). It reads the user's
@@ -2080,7 +2094,21 @@ workflow:
                 return json.loads(resp.read().decode("utf-8"))["access_token"]
 
 
-        def llm_read(text, state, awaiting, today, model, project, region):
+        # The model gets LLM_TIMEOUT_S per try and one retry, after a short random
+        # pause, when the failure is worth retrying (a timeout, a dropped connection,
+        # HTTP 429 or 5xx); anything else fails at once. Worst case is about 15 s, after
+        # which the turn falls back to rule_read (with the place table and cached facts).
+        LLM_TIMEOUT_S = 7
+        LLM_ATTEMPTS = 2
+
+
+        def _retryable(exc):
+            if isinstance(exc, urllib.error.HTTPError):
+                return exc.code == 429 or exc.code >= 500
+            return isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError))
+
+
+        def llm_read(text, state, awaiting, today, model, project, region, sleep=time.sleep):
             host = "aiplatform.googleapis.com" if region == "global" else region + "-aiplatform.googleapis.com"
             endpoint = ("https://%s/v1/projects/%s/locations/%s/publishers/google/models/%s:generateContent"
                         % (host, project, region, model))
@@ -2090,17 +2118,115 @@ workflow:
                     "message": text, "awaiting": awaiting, "today": today.isoformat(),
                     "state": {k: state.get(k) for k in STATE_KEYS if state.get(k) not in (None, [])},
                 }, default=str)}]}],
+                # No responseSchema: tried and measured live (2026-10-21), it made the model
+                # drop the destination and fill keys nobody stated ("trip_type": "round_trip",
+                # "rooms": 0) on 6 of 24 reads; without it, 40 of 40 matched. clean_patch
+                # checks every key instead.
                 "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
             }).encode("utf-8")
-            req = urllib.request.Request(endpoint, data=body, method="POST", headers={
-                "Authorization": "Bearer %s" % _vertex_token(), "Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+            token = _vertex_token()
+            for attempt in range(LLM_ATTEMPTS):
+                try:
+                    req = urllib.request.Request(endpoint, data=body, method="POST", headers={
+                        "Authorization": "Bearer %s" % token, "Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_S) as resp:
+                        payload = json.loads(resp.read().decode("utf-8"))
+                    break
+                except Exception as exc:
+                    if attempt + 1 >= LLM_ATTEMPTS or not _retryable(exc):
+                        raise
+                    sleep(0.5 + random.random())
             cands = payload.get("candidates") or []
             if not cands:
                 raise ValueError("vertex returned no candidates")
             parts = (cands[0].get("content") or {}).get("parts") or []
             return json.loads("".join(p.get("text", "") for p in parts))
+
+
+        # ── Cached place facts ───────────────────────────────────────────────────
+        # What the model said about a place outside the table (kind, coordinates,
+        # airports, islands, namesakes, a spelling correction) is kept in Firestore
+        # `intake_place_facts/{key}` and reused, so the same place gets the same
+        # answer, and a turn the model missed (timed out) still has the facts.
+        #   * an entry expires after PLACE_CACHE_DAYS and is read again from the model;
+        #   * a wrong entry: set `invalid: true` (the next reading replaces it), or
+        #     delete it; to fix one for good, write `source: "manual"` with
+        #     `facts_json`: a manual entry never expires and is never overwritten.
+        PLACE_CACHE_COLLECTION = "intake_place_facts"
+        PLACE_CACHE_DAYS = 30
+        PLACE_FACT_KEYS = ("kind", "lat", "lon", "airports", "islands", "matches", "corrected", "exists")
+
+
+        def place_cache_key(text):
+            return re.sub(r"[^a-z0-9]+", "-", _norm_place(text)).strip("-")[:120]
+
+
+        def _cue_words(text, cue):
+            """The capitalised words after a cue ("to Napa Valley"): longest first. Only
+            ever used as cache keys, never as places in their own right."""
+            out = []
+            for m in re.finditer(r"\b(?i:" + cue + r")\s+(?:the\s+)?([A-Z][\w'.-]*(?:\s+[A-Z][\w'.-]*){0,3})", text or ""):
+                words = m.group(1).strip(".,").split()
+                out.extend(" ".join(words[:n]) for n in range(len(words), 0, -1))
+            return out
+
+
+        def _fresh(hit, now):
+            hit = _as_dict(hit)
+            return bool(hit) and not hit.get("invalid") and isinstance(hit.get("facts"), dict) and (
+                hit.get("source") == "manual" or str(hit.get("expires_at") or "") > now.isoformat())
+
+
+        def use_place_cache(raw, lookup, now, text=""):
+            """(reader output with cached facts applied, docs to store, keys used).
+            `lookup(key)` -> {"facts": {...}, "source", "expires_at", "invalid"} or None.
+            When the reader found no place (the rule reader knows only table and airport
+            places), the words after "to/in" or "from" are tried against the cache: a hit
+            becomes the place; a miss is ignored."""
+            raw = dict(_as_dict(raw))
+            writes, used = [], []
+
+            def safe_lookup(ck):
+                try:
+                    return lookup(ck)
+                except Exception:  # noqa: BLE001 — the cache never breaks a turn
+                    return None
+
+            for key, cue in (("destination", "to|in"), ("origin", "from")):
+                if key in raw or not text:
+                    continue
+                for words in _cue_words(text, cue):
+                    if known_place(words) or re.fullmatch(r"[A-Za-z]{3}", words) or not place_cache_key(words):
+                        continue
+                    hit = safe_lookup(place_cache_key(words))
+                    if _fresh(hit, now):
+                        raw[key] = dict({"text": words}, **{k: v for k, v in hit["facts"].items() if k in PLACE_FACT_KEYS})
+                        used.append(place_cache_key(words))
+                        break
+            for key in ("destination", "origin"):
+                if place_cache_key(_as_dict(raw.get(key)).get("text") or "") in used:
+                    continue
+                place = _as_dict(raw.get(key))
+                text = " ".join(str(place.get("text") or "").split())
+                if (not text or place.get("kind") in ("hotel", "airport") or known_place(text)
+                        or re.fullmatch(r"[A-Za-z]{3}", text)):
+                    continue
+                ck = place_cache_key(text)
+                if not ck:
+                    continue
+                hit = _as_dict(safe_lookup(ck))
+                if _fresh(hit, now):
+                    facts = {k: v for k, v in hit["facts"].items() if k in PLACE_FACT_KEYS}
+                    raw[key] = dict({"text": text}, **facts)
+                    used.append(ck)
+                    continue
+                facts = {k: place[k] for k in PLACE_FACT_KEYS if k in place and place[k] not in (None, "", [])}
+                if any(k != "kind" for k in facts) and hit.get("source") != "manual":
+                    writes.append({"path": "%s/%s" % (PLACE_CACHE_COLLECTION, ck), "merge": False, "doc": {
+                        "key": ck, "text": text, "facts_json": json.dumps(facts, sort_keys=True), "source": "model",
+                        "created_at": now.isoformat(),
+                        "expires_at": (now + timedelta(days=PLACE_CACHE_DAYS)).isoformat()}})
+            return raw, writes, used
 
 
         MONTHS = {m: i + 1 for i, m in enumerate(
@@ -3079,6 +3205,36 @@ workflow:
             today = date.fromisoformat(str(today_override)) if _iso(today_override) else date.today()
 
             llm = {"used": False, "model": str(llm_model or ""), "fallback_reason": ""}
+            place_cache = {"used": [], "stored": [], "error": None}
+            cache_docs = []
+            _fs_db = str(globals().get("firestore_database") or "(default)")
+            _fs_project = str(globals().get("firestore_project") or vertex_project)
+
+            def _cache_lookup(key):
+                url = ("https://firestore.googleapis.com/v1/projects/%s/databases/%s/documents/%s/%s"
+                       % (_fs_project, _fs_db, PLACE_CACHE_COLLECTION, key))
+                req = urllib.request.Request(url, headers={"Authorization": "Bearer %s" % _vertex_token()})
+                try:
+                    with urllib.request.urlopen(req, timeout=3) as resp:
+                        fields = json.loads(resp.read().decode("utf-8")).get("fields") or {}
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 404:
+                        return None
+                    raise
+                val = lambda f: next(iter((fields.get(f) or {}).values()), None)
+                return {"facts": json.loads(val("facts_json") or "{}"), "source": val("source"),
+                        "expires_at": val("expires_at"), "invalid": val("invalid") is True}
+
+            def _cache(out):
+                try:
+                    out, writes, used = use_place_cache(out, _cache_lookup, datetime.now(timezone.utc), text)
+                except Exception as exc:  # noqa: BLE001 — the cache never breaks a turn
+                    place_cache["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+                    return out
+                cache_docs.extend(writes)
+                place_cache["used"].extend(used)
+                place_cache["stored"].extend(w["doc"]["key"] for w in writes)
+                return out
 
             def _reader(t, s, awaiting, d):
                 if not t:
@@ -3087,10 +3243,10 @@ workflow:
                     try:
                         out = llm_read(t, s, awaiting, d, str(llm_model), str(vertex_project), str(vertex_region))
                         llm["used"] = True
-                        return out
+                        return _cache(out)
                     except Exception as exc:
                         llm["fallback_reason"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
-                return rule_read(t, s, awaiting, d)
+                return _cache(rule_read(t, s, awaiting, d))
 
             turn = run_turn(prior, text, payload, today, _reader, globals().get("user_location"))
             state = turn["state"]
@@ -3118,6 +3274,7 @@ workflow:
             # also serves keeps its slot_state/current untouched.
             turn_docs = [{"path": "%s/slot_state/intake" % thread_path, "doc": state, "merge": False}]
             turn_docs.extend(relation_docs if isinstance(relation_docs, list) else [])
+            turn_docs.extend(cache_docs)
 
             result = {
                 "thread_path": thread_path,
@@ -3131,6 +3288,7 @@ workflow:
                 "widget": turn.get("widget"),
                 "bot_message": turn["bot_message"],
                 "llm": llm,
+                "place_cache": place_cache,
                 "turn_docs": turn_docs,
                 "turn_events": turn_events,
             }
