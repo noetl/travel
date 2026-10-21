@@ -22,7 +22,9 @@ metadata:
 
     MODES (workload.mode):
       auto   continue the full load until every hotel is covered, then fetch
-             only what changed since the last finished pass. The daily job.
+             only what changed since the last finished pass, at most once a
+             day. What the scheduled job runs (hourly, noetl/ops CronJob
+             noetl-hotelbeds-content-sync).
       full   page through the whole portfolio (resumes where it stopped).
       delta  only hotels changed since the last finished pass.
       codes  just workload.codes (testing, backfill); state is not touched.
@@ -240,9 +242,9 @@ workflow:
         #                                    fields plus `json`, the record below
         #   hotelbeds_content_sync/state     where the load stands (also `json`)
         #
-        # mode "auto" (what the daily job runs): continue the full load until it
-        # has covered every hotel, then fetch only what changed since the last
-        # finished pass. "full" / "delta" force one; "codes" loads given codes.
+        # mode "auto" (what the scheduled job runs, hourly): continue the full load
+        # until it has covered every hotel, then fetch only what changed since the
+        # last finished pass, at most once a day. "full" / "delta" force one; "codes" loads given codes.
         # Each run stops after max_pages pages or max_seconds, or at the first
         # HotelBeds refusal (e.g. a request quota), and saves where it got to, so
         # the next run continues from there.
@@ -406,6 +408,11 @@ workflow:
             if mode == "auto":
                 mode = "delta" if state.get("full_completed_at") else "full"
                 report["mode"] = "auto:" + mode
+                # The job may run hourly so the first load finishes quickly; once
+                # loaded, changes are fetched once a day, as HotelBeds asks.
+                if mode == "delta" and state.get("delta_since") == today and not state.get("delta_next_from"):
+                    report["stopped"], report["done"] = "already refreshed today", True
+                    return state, report
             if mode == "codes":
                 wanted = [c for c in (_text(c) for c in (codes or [])) if c][:1000]
                 if not wanted:

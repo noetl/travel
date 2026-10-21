@@ -162,6 +162,9 @@ check(rep3["mode"] == "auto:delta" and rep3["done"] and fetch.calls[0]["lastUpda
       "once loaded, auto fetches only what changed since the day the full load started")
 check(s3["delta_since"] == "2026-10-23" and "delta_run_on" not in s3, "the next delta starts from this one's day")
 fetch = portfolio(10)
+s3b, rep3b = run_sync("auto", s3, fetch, save, "2026-10-23", "T3b")
+check(rep3b["stopped"] == "already refreshed today" and fetch.calls == [] and s3b == s3,
+      "an hourly run on a day already refreshed calls nothing and changes nothing")
 s4, _ = run_sync("auto", s3, fetch, save, "2026-10-24", "T4")
 check(fetch.calls[0]["lastUpdateTime"] == "2026-10-23", "each delta asks for changes since the previous one")
 
@@ -173,6 +176,9 @@ check(not rep5["done"] and s5["delta_next_from"] == 501 and s5["delta_run_on"] =
 s6, rep6 = run_sync("delta", s5, fetch, save, "2026-10-26", "T6", max_pages=5, page_size=500)
 check(rep6["done"] and fetch.calls[1]["from"] == 501 and s6["delta_since"] == "2026-10-25",
       "it resumes, and the next delta starts from the day the interrupted one began")
+fetch = portfolio(1200)
+s5b, rep5b = run_sync("auto", dict(s5, delta_since="2026-10-25"), fetch, save, "2026-10-25", "T5b", max_pages=1, page_size=500)
+check(fetch.calls and fetch.calls[0]["from"] == 501, "an unfinished delta is resumed even on the same day")
 
 # HotelBeds refuses (e.g. a request quota): stop, keep the cursor, write nothing.
 def refused(params):
