@@ -571,6 +571,8 @@ workflow:
                     "price": _money(per_night, currency),
                     "pricePerNight": per_night,
                     "totalPrice": net,
+                    # adiona/frontend#62 item 4: the currency of this room's amounts.
+                    "currency": currency or None,
                     "sleeps": sleeps or default_sleeps,
                     # HotelBeds rateClass "NRF" == non-refundable.
                     "refundable": str(rate.get("rateClass") or "").upper() != "NRF",
@@ -764,6 +766,10 @@ workflow:
                 "stars": stars,
                 "bedType": hotel.get("roomName") or "",
                 "price": _money(per_night, currency),
+                # adiona/frontend#62 item 4: the currency of every amount on this
+                # card and its rooms, as HotelBeds stated it (ISO 4217). `price`
+                # shows a symbol only for USD/EUR/GBP, so read this, not the symbol.
+                "currency": currency or None,
                 "breakfastIncluded": _breakfast(hotel.get("boardName")),
                 "image": image,
                 "images": images,
