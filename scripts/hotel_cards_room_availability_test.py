@@ -40,12 +40,14 @@ rates = [
     rate("b", "380.00", rateClass="NRF", allotment="2",
          cancellationPolicies=[{"amount": "380.00", "from": "2026-10-20T00:00:00+01:00"}]),
     rate("c", "500.00"),
+    rate("d", "510.00", allotment=-1),
 ]
 r = map_cards({"data": {"hotels": [{"code": 7, "name": "Hotel 7", "categoryCode": "4EST", "currency": "EUR",
                                     "minRate": "380.00", "rates": rates, "images": []}]}})
 rooms = {room["rate_key"]: room for room in r["hotels"][0]["rooms"]}
 check(rooms["a"]["roomsLeft"] == 3 and rooms["b"]["roomsLeft"] == 2, "roomsLeft is HotelBeds' allotment (number or numeric string)")
 check(rooms["c"]["roomsLeft"] is None, "no allotment: roomsLeft is null, not a guess")
+check(rooms["d"]["roomsLeft"] is None, "a negative allotment is not a room count: null")
 check(rooms["a"]["freeCancellationUntil"] == "2026-10-30T23:59:00+01:00",
       "freeCancellationUntil is the earliest charge date, as HotelBeds gave it")
 check(rooms["b"]["freeCancellationUntil"] is None, "a non-refundable rate has no free cancellation")

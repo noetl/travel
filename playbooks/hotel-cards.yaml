@@ -481,6 +481,31 @@ workflow:
                             if _as_dict(p).get("from"))
             return starts[0] if starts else None
 
+        def _coordinates(hotel):
+            lat, lng = _num(hotel.get("latitude")), _num(hotel.get("longitude"))
+            if lat is None or lng is None or not (-90 <= lat <= 90 and -180 <= lng <= 180):
+                return None
+            return {"lat": lat, "lng": lng}
+
+        def _promotions(rate):
+            # HotelBeds promotions: {code, name, remark}.
+            out = []
+            for p in _as_list(rate.get("promotions")):
+                p = _as_dict(p)
+                if p.get("name") or p.get("code"):
+                    out.append({"code": p.get("code"), "name": p.get("name"), "remark": p.get("remark")})
+            return out
+
+        def _offers(rate):
+            # HotelBeds offers: {code, name, amount}; amount is a discount, as a
+            # (usually negative) string in the hotel's currency.
+            out = []
+            for o in _as_list(rate.get("offers")):
+                o = _as_dict(o)
+                if o.get("name") or o.get("code"):
+                    out.append({"code": o.get("code"), "name": o.get("name"), "amount": _num(o.get("amount"))})
+            return out
+
         def _rooms(hotel, currency, image, nights, hotel_images):
             # adiona/frontend#22 — emit up to `max_rooms` REAL bookable rates,
             # spread across price bands, instead of the single cheapest.
@@ -599,6 +624,11 @@ workflow:
                     # time); before it, cancelling is free. Null for a non-refundable rate
                     # or one with no policy.
                     "freeCancellationUntil": _free_cancellation_until(rate),
+                    # adiona/frontend#95: as HotelBeds gave them for this rate. paymentType
+                    # is its own code (e.g. "AT_WEB": paid when booking), passed on unchanged.
+                    "paymentType": rate.get("paymentType") or None,
+                    "promotions": _promotions(rate),
+                    "offers": _offers(rate),
                     # Room photos when the Content API attributed any to this
                     # roomCode; otherwise the hotel photo, never a room photo
                     # borrowed from a different room.
@@ -797,6 +827,10 @@ workflow:
                 "images": images,
                 "__renderDetailCard": True,
                 "location": hotel.get("destinationName") or hotel.get("zoneName") or "",
+                # adiona/frontend#95: the hotel's own coordinates and HotelBeds zone
+                # (its neighbourhood or area), as HotelBeds gave them; null when absent.
+                "coordinates": _coordinates(hotel),
+                "neighborhood": hotel.get("zoneName") or None,
                 "rating": rating,
                 "ratingLabel": label,
                 "pricePerNight": per_night,
