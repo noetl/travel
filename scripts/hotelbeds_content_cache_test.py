@@ -116,6 +116,9 @@ check(r["phones"] == [{"phoneNumber": "+33 1 00", "phoneType": "PHONEBOOKING"}] 
 check(r["interestPoints"] == [{"poiName": "Notre-Dame", "distance": 900.0}] and r["terminals"][0]["terminalCode"] == "CDG",
       "nearby places and terminals with distances")
 check(content_record({"name": "no code"})["code"] == "", "a hotel without a code has an empty code (and is skipped)")
+check(lib["city_key"]("São Paulo") == "sao paulo" and lib["city_key"]("SAN  FRANCISCO") == "san francisco"
+      and lib["city_key"]("Saint-Tropez") == "saint tropez" and lib["city_key"](None) == "",
+      "city_key compares names loosely: case, accents, punctuation")
 
 
 def portfolio(total):
@@ -216,13 +219,26 @@ commits = []
 routes["documents:commit"] = lambda u, b: (commits.append(b), {})[1]
 written, err = save_hotels("proj", "(default)", "t", [content_record({"code": n, "city": {"content": "PARIS"}})
                                                      for n in range(250)], "2026-10-21T00:00:00Z", "test")
-check(written == 250 and err is None and [len(c["writes"]) for c in commits] == [100, 100, 50],
-      "Firestore writes go 100 per commit")
+check(written == 250 and err is None
+      and [sum("/hotelbeds_content/" in w["update"]["name"] for w in c["writes"]) for c in commits] == [100, 100, 50],
+      "Firestore writes go 100 hotels per commit")
+city_writes = [w["update"] for c in commits for w in c["writes"] if "/hotelbeds_cities/" in w["update"]["name"]]
+check(len(city_writes) == 3 and city_writes[0]["name"].endswith("/hotelbeds_cities/xx-paris")
+      and city_writes[0]["fields"]["city_key"]["stringValue"] == "paris" and city_writes[0]["fields"]["prefix"]["stringValue"] == "pa"
+      and "json" not in city_writes[0]["fields"],
+      "each commit also records its cities (one document per country and city, keyed for lookup by prefix)")
 w = commits[0]["writes"][0]["update"]
+check(w["fields"]["city_key"]["stringValue"] == "paris", "each hotel document carries its city_key")
 check(w["name"] == "projects/proj/databases/(default)/documents/hotelbeds_content/0"
       and json.loads(w["fields"]["json"]["stringValue"])["city"] == "PARIS"
       and w["fields"]["city"]["stringValue"] == "PARIS" and w["fields"]["source_env"]["stringValue"] == "test",
       "one document per hotel code, the record in `json`, a few plain fields beside it")
+commits.clear()
+save_hotels("proj", "(default)", "t", [content_record(HB_HOTEL)], "now", "test")
+f = commits[0]["writes"][0]["update"]["fields"]
+check(f["lat"] == {"doubleValue": 48.859} and f["lng"] == {"doubleValue": 2.362} and f["countryCode"]["stringValue"] == "FR",
+      "hotel documents carry lat/lng as numbers and the country")
+check(commits[0]["writes"][1]["update"]["name"].endswith("/hotelbeds_cities/fr-paris"), "the city document id is country-city")
 routes["documents:commit"] = lambda u, b: (500, {"error": "boom"})
 written, err = save_hotels("proj", "(default)", "t", [content_record({"code": 1})], "now", "test")
 check(written == 0 and err and err.startswith("firestore commit HTTP 500"), "a failed commit is reported, not swallowed")

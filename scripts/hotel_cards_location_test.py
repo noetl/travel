@@ -6,9 +6,35 @@ workload default), so a city the frontend could not geocode silently returned
 Monterey hotels. Now `check_location` routes it to `no_location`, which says so
 without calling HotelBeds. Runs the steps' own code offline.
 """
+import io
+import json
 import sys
+import urllib.request
 
 import yaml
+
+
+class _Resp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+
+def _fake_urlopen(req, timeout=None):
+    # A city is now looked up in our copy of HotelBeds content (adiona/frontend#62,
+    # scripts/hotel_cards_city_test.py); here Rome is simply known.
+    if "metadata.google.internal" in req.full_url:
+        return _Resp(json.dumps({"access_token": "t"}).encode())
+    rome = {"city": {"stringValue": "ROME"}, "countryCode": {"stringValue": "IT"},
+            "lat": {"doubleValue": 41.9}, "lng": {"doubleValue": 12.5}}
+    q = json.loads(req.data.decode())["structuredQuery"]
+    hit = q["where"]["fieldFilter"]["value"]["stringValue"] == "rome"
+    return _Resp(json.dumps([{"document": {"fields": rome}}] if hit else [{"readTime": "x"}]).encode())
+
+
+urllib.request.urlopen = _fake_urlopen
 
 PLAYBOOK = "playbooks/hotel-cards.yaml"
 failures = []
@@ -27,6 +53,8 @@ wl = doc["workload"]
 
 def run(step, **inputs):
     g = dict(inputs)
+    g.setdefault("google_project", "proj")
+    g.setdefault("firestore_database", "(default)")
     exec(steps[step]["tool"]["code"], g)
     return g["result"]
 
@@ -55,7 +83,8 @@ check(arcs[0].get("step") == "search_hotels" and "location_ok" in arcs[0].get("w
 check(steps["resolve_dates"]["next"]["arcs"][0]["step"] == "check_location",
       "the location is checked before any HotelBeds call")
 
-nl = run("no_location", check_in="2026-11-03", check_out="2026-11-07")
+nl = run("no_location", check_in="2026-11-03", check_out="2026-11-07",
+         location=run("check_location", city="", latitude="", longitude=""))
 check(nl["hotels"] == [] and nl["count"] == 0, "no location: no hotels")
 check(nl["provider_error_code"] == "missing_location" and "No location received" in nl["provider_error"],
       "no location: says so, readably")
