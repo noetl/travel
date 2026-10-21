@@ -96,6 +96,10 @@ workload:
   # No default location (adiona/frontend#62): a search the caller did not place
   # is refused by `check_location` with "No location received" instead of
   # quietly searching Monterey, California.
+  # adiona/frontend#62: the city NAME the traveller typed (or trip-intake
+  # returned), e.g. "San Francisco" or "Portland, Oregon". check_location finds
+  # it in HotelBeds' records (a typo up to 40% off is corrected) and only hotels
+  # in that city are returned. Coordinates, when sent, are used as they are.
   city: ""
   latitude: ""
   longitude: ""
@@ -131,6 +135,9 @@ workload:
   # Rates to emit per hotel, spread across price bands. Real provider rows
   # only — a hotel with fewer bookable rates returns fewer.
   max_rooms: 10
+  # Where our copy of HotelBeds content lives (noetl/travel#166).
+  google_project: "shastaratech-noetl-prod"
+  firestore_database: "(default)"
   price_bands: 4
   # adiona/frontend#62 item 4: return prices only in these currencies. A hotel
   # HotelBeds priced in another currency is left out (no conversion), and the
@@ -221,14 +228,58 @@ workflow:
         - step: check_location
 
   - step: check_location
-    desc: Refuse a search with no location rather than default one (adiona/frontend#62)
+    desc: Find where to search from the city name (HotelBeds records) or coordinates, or say why not (adiona/frontend#62)
     tool:
       kind: python
       input:
         city: "{{ workload.city | default('') }}"
         latitude: "{{ workload.latitude | default('') }}"
         longitude: "{{ workload.longitude | default('') }}"
+        google_project: "{{ workload.google_project | default('shastaratech-noetl-prod') }}"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
       code: |
+        import difflib
+        import json
+        import re
+        import statistics
+        import unicodedata
+        import urllib.error
+        import urllib.request
+
+        # ── Where to search (adiona/frontend#62) ─────────────────────────────────
+        # The frontend sends the city NAME the traveller typed (or trip-intake
+        # returned); the playbook finds it in HotelBeds' own records, our copy of
+        # their hotel content (noetl/travel#166):
+        #
+        #   1. coordinates sent with the request are used as they are;
+        #   2. otherwise the city's hotels in `hotelbeds_content` (by city_key) give
+        #      the search centre: the median of their coordinates. A name several
+        #      countries share takes the one the qualifier names ("Portland, Oregon",
+        #      "Paris, France"), else the one with the most hotels;
+        #   3. a name no hotel has is matched to the closest city name HotelBeds has
+        #      (`hotelbeds_cities`, same first two letters) when it is at least 60%
+        #      alike, used without asking, and the corrected name is returned;
+        #   4. below 60%: "location not found".
+        #
+        # The search is then filtered to hotels whose own city is that city (map_cards).
+        MATCH_MIN = 0.6
+        CONTENT_COLLECTION = "hotelbeds_content"
+        CITY_COLLECTION = "hotelbeds_cities"
+        METADATA_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+
+        # Country names -> ISO 3166 code, and US state names -> code (from OurAirports, public domain),
+        # for reading a city's qualifier: "Portland, Oregon", "Paris, France".
+        COUNTRY_CODES = dict(item.split("=") for item in """afghanistan=AF|albania=AL|algeria=DZ|american samoa=AS|andorra=AD|angola=AO|anguilla=AI|antarctica=AQ|antigua and barbuda=AG|argentina=AR|armenia=AM|aruba=AW|australia=AU|austria=AT|azerbaijan=AZ|bahamas=BS|bahrain=BH|bangladesh=BD|barbados=BB|belarus=BY|belgium=BE|belize=BZ|benin=BJ|bermuda=BM|bhutan=BT|bolivia=BO|bosnia and herzegovina=BA|botswana=BW|brazil=BR|british indian ocean territory=IO|british virgin islands=VG|brunei=BN|bulgaria=BG|burkina faso=BF|burundi=BI|cambodia=KH|cameroon=CM|canada=CA|cape verde=CV|caribbean netherlands=BQ|cayman islands=KY|central african republic=CF|chad=TD|chile=CL|china=CN|christmas island=CX|cocos keeling islands=CC|colombia=CO|comoros=KM|cook islands=CK|costa rica=CR|cote d ivoire=CI|croatia=HR|cuba=CU|curacao=CW|cyprus=CY|czech republic=CZ|democratic republic of the congo=CD|denmark=DK|djibouti=DJ|dominica=DM|dominican republic=DO|ecuador=EC|egypt=EG|el salvador=SV|england=GB|equatorial guinea=GQ|eritrea=ER|estonia=EE|eswatini=SZ|ethiopia=ET|falkland islands=FK|faroe islands=FO|fiji=FJ|finland=FI|france=FR|french guiana=GF|french polynesia=PF|french southern and antarctic lands=TF|gabon=GA|gambia=GM|georgia=GE|germany=DE|ghana=GH|gibraltar=GI|greece=GR|greenland=GL|grenada=GD|guadeloupe=GP|guam=GU|guatemala=GT|guernsey=GG|guinea=GN|guinea bissau=GW|guyana=GY|haiti=HT|heard and mcdonald islands=HM|honduras=HN|hong kong=HK|hungary=HU|iceland=IS|india=IN|indonesia=ID|iran=IR|iraq=IQ|ireland=IE|isle of man=IM|israel=IL|italy=IT|jamaica=JM|japan=JP|jersey=JE|jordan=JO|kazakhstan=KZ|kenya=KE|kiribati=KI|kosovo=XK|kuwait=KW|kyrgyzstan=KG|laos=LA|latvia=LV|lebanon=LB|lesotho=LS|liberia=LR|libya=LY|liechtenstein=LI|lithuania=LT|luxembourg=LU|macau=MO|madagascar=MG|malawi=MW|malaysia=MY|maldives=MV|mali=ML|malta=MT|marshall islands=MH|martinique=MQ|mauritania=MR|mauritius=MU|mayotte=YT|mexico=MX|micronesia=FM|moldova=MD|monaco=MC|mongolia=MN|montenegro=ME|montserrat=MS|morocco=MA|mozambique=MZ|myanmar=MM|namibia=NA|nauru=NR|nepal=NP|netherlands=NL|new caledonia=NC|new zealand=NZ|nicaragua=NI|niger=NE|nigeria=NG|niue=NU|norfolk island=NF|north korea=KP|north macedonia=MK|northern mariana islands=MP|norway=NO|oman=OM|pakistan=PK|palau=PW|palestinian territory=PS|panama=PA|papua new guinea=PG|paracel islands disputed=XP|paraguay=PY|peru=PE|philippines=PH|pitcairn=PN|poland=PL|portugal=PT|puerto rico=PR|qatar=QA|republic of the congo=CG|reunion=RE|romania=RO|russia=RU|rwanda=RW|saint barthelemy=BL|saint helena ascension and tristan da cunha=SH|saint kitts and nevis=KN|saint lucia=LC|saint martin=MF|saint pierre and miquelon=PM|saint vincent and the grenadines=VC|samoa=WS|san marino=SM|sao tome and principe=ST|saudi arabia=SA|scotland=GB|senegal=SN|serbia=RS|seychelles=SC|sierra leone=SL|singapore=SG|sint maarten=SX|slovakia=SK|slovenia=SI|solomon islands=SB|somalia=SO|south africa=ZA|south georgia and the south sandwich islands=GS|south korea=KR|south sudan=SS|spain=ES|sri lanka=LK|sudan=SD|suriname=SR|sweden=SE|switzerland=CH|syria=SY|taiwan=TW|tajikistan=TJ|tanzania=TZ|thailand=TH|timor leste=TL|togo=TG|tokelau=TK|tonga=TO|trinidad and tobago=TT|tunisia=TN|turkey=TR|turkmenistan=TM|turks and caicos islands=TC|tuvalu=TV|u s virgin islands=VI|uganda=UG|uk=GB|ukraine=UA|united arab emirates=AE|united kingdom=GB|united states=US|united states minor outlying islands=UM|united states of america=US|unknown or unassigned country=ZZ|uruguay=UY|us=US|usa=US|uzbekistan=UZ|vanuatu=VU|vatican city=VA|venezuela=VE|vietnam=VN|wales=GB|wallis and futuna=WF|western sahara disputed territory=EH|yemen=YE|zambia=ZM|zimbabwe=ZW""".split("|"))
+        US_STATE_CODES = dict(item.split("=") for item in """alabama=AL|alaska=AK|arizona=AZ|arkansas=AR|california=CA|colorado=CO|connecticut=CT|delaware=DE|district of columbia=DC|florida=FL|georgia=GA|hawaii=HI|idaho=ID|illinois=IL|indiana=IN|iowa=IA|kansas=KS|kentucky=KY|louisiana=LA|maine=ME|maryland=MD|massachusetts=MA|michigan=MI|minnesota=MN|mississippi=MS|missouri=MO|montana=MT|nebraska=NE|nevada=NV|new hampshire=NH|new jersey=NJ|new mexico=NM|new york=NY|north carolina=NC|north dakota=ND|ohio=OH|oklahoma=OK|oregon=OR|pennsylvania=PA|rhode island=RI|south carolina=SC|south dakota=SD|tennessee=TN|texas=TX|utah=UT|vermont=VT|virginia=VA|washington=WA|west virginia=WV|wisconsin=WI|wyoming=WY""".split("|"))
+
+
+        def city_key(text):
+            """A city name compared loosely: lowercase, accents and punctuation gone.
+            "São Paulo" -> "sao paulo"; "SAN FRANCISCO" -> "san francisco"."""
+            low = unicodedata.normalize("NFD", str(text or "")).encode("ascii", "ignore").decode("ascii").lower()
+            return " ".join(re.sub(r"[^a-z0-9]+", " ", low).split())
+
+
         def _coord(value, limit):
             try:
                 v = float(str(value).strip())
@@ -236,17 +287,122 @@ workflow:
                 return None
             return v if -limit <= v <= limit else None
 
-        _lat, _lng = _coord(latitude, 90), _coord(longitude, 180)
-        _city = "" if city is None else str(city).strip()
-        has_coordinates = _lat is not None and _lng is not None
-        result = {
-            # Coordinates, or a city name the provider can place. Whether a city
-            # resolves is the provider's call; its refusal now comes back as text.
-            "location_ok": bool(has_coordinates or _city),
-            "has_coordinates": has_coordinates,
-            "city": _city,
-        }
-        globals().update({"result": result})
+
+        def _value(fields, key):
+            v = (fields or {}).get(key) or {}
+            for kind in ("stringValue", "doubleValue", "integerValue"):
+                if kind in v:
+                    return float(v[kind]) if kind == "integerValue" else v[kind]
+            return None
+
+
+        def firestore_query(project, database):
+            """query(structured_query) -> [document fields], over Firestore REST."""
+            state = {}
+
+            def token():
+                if "t" not in state:
+                    req = urllib.request.Request(METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        state["t"] = json.loads(resp.read().decode("utf-8"))["access_token"]
+                return state["t"]
+
+            def query(structured):
+                root = "projects/%s/databases/%s/documents" % (project, database or "(default)")
+                req = urllib.request.Request(
+                    "https://firestore.googleapis.com/v1/%s:runQuery" % root,
+                    data=json.dumps({"structuredQuery": structured}).encode("utf-8"), method="POST",
+                    headers={"Authorization": "Bearer " + token(), "Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    rows = json.loads(resp.read().decode("utf-8") or "[]")
+                return [_as_fields(r) for r in rows if isinstance(r, dict) and r.get("document")]
+
+            return query
+
+
+        def _as_fields(row):
+            return (row.get("document") or {}).get("fields") or {}
+
+
+        def _equal(field, value, collection, select, limit):
+            return {"from": [{"collectionId": collection}],
+                    "where": {"fieldFilter": {"field": {"fieldPath": field}, "op": "EQUAL", "value": {"stringValue": value}}},
+                    "select": {"fields": [{"fieldPath": f} for f in select]}, "limit": limit}
+
+
+        def _hotels_in(key, query):
+            return query(_equal("city_key", key, CONTENT_COLLECTION, ["city", "countryCode", "stateCode", "lat", "lng"], 500))
+
+
+        def _closest_city(key, query):
+            """(city_key, score) of the most alike city name HotelBeds has, or (None, 0)."""
+            rows = query(_equal("prefix", key[:2], CITY_COLLECTION, ["city_key"], 2000))
+            best, score = None, 0.0
+            for candidate in sorted({_value(r, "city_key") for r in rows if _value(r, "city_key")}):
+                ratio = difflib.SequenceMatcher(None, key, candidate).ratio()
+                if ratio > score:
+                    best, score = candidate, ratio
+            return best, score
+
+
+        def _pick_place(rows, qualifier):
+            """The rows of the one place this name means: the country / US state the
+            qualifier names, else the place with the most hotels."""
+            groups = {}
+            for r in rows:
+                groups.setdefault((_value(r, "countryCode") or "", _value(r, "stateCode") or ""), []).append(r)
+            q = city_key(qualifier)
+            if q and len(groups) > 1:
+                want_country = COUNTRY_CODES.get(q) or (q.upper() if len(q) == 2 else None)
+                want_state = US_STATE_CODES.get(q) or (q.upper() if len(q) == 2 else None)
+                named = {g: rs for g, rs in groups.items()
+                         if (want_country and g[0].upper() == want_country)
+                         or (want_state and g[0].upper() == "US" and g[1].upper() == want_state)}
+                if named:
+                    groups = named
+            return max(groups.values(), key=len)
+
+
+        def resolve_location(city, latitude, longitude, query):
+            lat, lng = _coord(latitude, 90), _coord(longitude, 180)
+            town, _, qualifier = str(city or "").strip().partition(",")
+            key = city_key(town)
+            if lat is not None and lng is not None:
+                return {"location_ok": True, "latitude": lat, "longitude": lng, "city": town.strip(), "city_key": key,
+                        "source": "coordinates", "corrected": False}
+            if not key:
+                return {"location_ok": False, "code": "missing_location",
+                        "message": "No location received: send a city or coordinates for the hotel search."}
+            try:
+                rows, matched, score = _hotels_in(key, query), key, 1.0
+                if not rows:
+                    matched, score = _closest_city(key, query)
+                    rows = _hotels_in(matched, query) if matched and score >= MATCH_MIN else []
+            except Exception as exc:  # noqa: BLE001 — say so; never search somewhere else
+                return {"location_ok": False, "code": "location_lookup_failed",
+                        "message": "Hotel search can't look up locations right now. Please try again in a moment.",
+                        "detail": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+            if not rows:
+                return {"location_ok": False, "code": "location_not_found",
+                        "message": "We couldn't find a city called \"%s\". Please check the spelling and try again." % town.strip()}
+            place = _pick_place(rows, qualifier)
+            points = [(_value(r, "lat"), _value(r, "lng")) for r in place
+                      if isinstance(_value(r, "lat"), float) and isinstance(_value(r, "lng"), float)]
+            if not points:
+                return {"location_ok": False, "code": "location_not_found",
+                        "message": "We couldn't find a city called \"%s\". Please check the spelling and try again." % town.strip()}
+            names = [_value(r, "city") for r in place if _value(r, "city")]
+            name = max(set(names), key=names.count) if names else town.strip()
+            return {"location_ok": True,
+                    "latitude": round(statistics.median(p[0] for p in points), 5),
+                    "longitude": round(statistics.median(p[1] for p in points), 5),
+                    "city": name.title() if name.isupper() else name, "city_key": matched,
+                    "countryCode": _value(place[0], "countryCode"), "source": "hotelbeds_content",
+                    "corrected": matched != key, "match_score": round(score, 2)}
+
+
+        globals().update({"result": resolve_location(city, latitude, longitude,
+                                                     firestore_query(google_project, firestore_database))})
     next:
       spec: { mode: exclusive }
       arcs:
@@ -255,12 +411,13 @@ workflow:
         - step: no_location
 
   - step: no_location
-    desc: No city or coordinates were sent; say so instead of searching anywhere
+    desc: No usable location (none sent, or a city HotelBeds does not have); say so instead of searching anywhere
     tool:
       kind: python
       input:
         check_in: "{{ resolve_dates.check_in }}"
         check_out: "{{ resolve_dates.check_out }}"
+        location: "{{ check_location }}"
       code: |
         result = {
             "hotels": [],
@@ -268,9 +425,10 @@ workflow:
             "check_in": check_in,
             "check_out": check_out,
             "source": "hotelbeds",
-            "provider_error": "No location received: send a city or coordinates for the hotel search.",
-            "provider_error_code": "missing_location",
-            "provider_error_detail": None,
+            "provider_error": (location.get("message") if isinstance(location, dict) else None)
+                              or "No location received: send a city or coordinates for the hotel search.",
+            "provider_error_code": (location.get("code") if isinstance(location, dict) else None) or "missing_location",
+            "provider_error_detail": location.get("detail") if isinstance(location, dict) else None,
             "deref_error": None,
         }
         globals().update({"result": result})
@@ -294,9 +452,9 @@ workflow:
         method: tools/call
         tool: search_hotels
         arguments:
-          city: "{{ workload.city }}"
-          latitude: "{{ workload.latitude }}"
-          longitude: "{{ workload.longitude }}"
+          city: "{{ check_location.city }}"
+          latitude: "{{ check_location.latitude }}"
+          longitude: "{{ check_location.longitude }}"
           radius: "{{ workload.radius }}"
           check_in: "{{ resolve_dates.check_in }}"
           check_out: "{{ resolve_dates.check_out }}"
@@ -327,6 +485,7 @@ workflow:
         max_rooms: "{{ workload.max_rooms | default(10) }}"
         price_bands: "{{ workload.price_bands | default(4) }}"
         currencies: "{{ workload.currencies | default(['USD']) }}"
+        city_key: "{{ check_location.city_key | default('') }}"
       code: |
         import json
         import re
@@ -536,6 +695,13 @@ workflow:
                 return None
             return ("Hotel prices are not available in %s for this search." % " or ".join(allowed))
 
+
+        def _city_key(text):
+            # The same loose comparison the content sync stores (city_key): lowercase,
+            # accents and punctuation gone. "SAN FRANCISCO" == "San Francisco".
+            import unicodedata
+            low = unicodedata.normalize("NFD", str(text or "")).encode("ascii", "ignore").decode("ascii").lower()
+            return " ".join(re.sub(r"[^a-z0-9]+", " ", low).split())
 
         def _rooms(hotel, currency, image, nights, hotel_images):
             # adiona/frontend#22 — emit up to `max_rooms` REAL bookable rates,
@@ -830,12 +996,19 @@ workflow:
             provider_error_detail = str(inner.get("error") or meta.get("error") or "")[:2000] or None
 
         nights = _nights(check_in, check_out)
+        _wanted_city = _city_key(globals().get("city_key"))
+        excluded_by_city = {"other_city": 0, "no_city": 0}
         allowed = _allowed_currencies(globals().get("currencies"))
         excluded_by_currency = {}
         cards = []
         for hotel in hotels:
             hotel = _as_dict(hotel)
             currency = hotel.get("currency")
+            if _wanted_city and _city_key(hotel.get("city")) != _wanted_city:
+                # adiona/frontend#62 item 3: only hotels whose own city (HotelBeds'
+                # content record) is the requested one; no city on file, not shown.
+                excluded_by_city["no_city" if not _city_key(hotel.get("city")) else "other_city"] += 1
+                continue
             if str(currency or "").upper() not in allowed:
                 # Only prices in the allowed currencies are returned; no conversion.
                 key = str(currency or "none").upper()
@@ -897,6 +1070,8 @@ workflow:
             "check_out": check_out,
             "source": "hotelbeds",
             "hotelbeds_env": inner.get("hotelbeds_env"),
+            "city_filter": _wanted_city or None,
+            "excluded_by_city": excluded_by_city,
             "provider_error": provider_error or _currency_error(cards, excluded_by_currency, allowed),
             "provider_error_code": provider_error_code or ("currency_unavailable" if _currency_error(
                 cards, excluded_by_currency, allowed) else None),

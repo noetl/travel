@@ -249,8 +249,14 @@ workflow:
         # HotelBeds refusal (e.g. a request quota), and saves where it got to, so
         # the next run continues from there.
 
+        import re
+        import unicodedata
+
         CONTENT_HOTELS_PATH = "/hotel-content-api/1.0/hotels"
         CONTENT_COLLECTION = "hotelbeds_content"
+        # One document per (country, city) a hotel names, for finding a city by a
+        # mistyped name (adiona/frontend#62): keyed by the first letters of city_key.
+        CITY_COLLECTION = "hotelbeds_cities"
         STATE_DOC = "hotelbeds_content_sync/state"
         FIRESTORE_COMMIT_BATCH = 100
         DESCRIPTION_MAX = 2000
@@ -344,12 +350,31 @@ workflow:
                 return exc.code, {"error": exc.read().decode("utf-8", errors="replace")[:500]}
 
 
+        def city_key(text):
+            """A city name compared loosely: lowercase, accents and punctuation gone.
+            "São Paulo" -> "sao paulo"; "SAN FRANCISCO" -> "san francisco"."""
+            low = unicodedata.normalize("NFD", str(text or "")).encode("ascii", "ignore").decode("ascii").lower()
+            return " ".join(re.sub(r"[^a-z0-9]+", " ", low).split())
+
+
+        def _fs_value(value):
+            if isinstance(value, bool):
+                return {"booleanValue": value}
+            if isinstance(value, (int, float)):
+                return {"doubleValue": float(value)}
+            return {"stringValue": str(value)}
+
+
         def _fs_doc(root, path, record, extra):
-            fields = {"json": {"stringValue": json.dumps(record, separators=(",", ":"), ensure_ascii=False)}}
+            fields = {"json": {"stringValue": json.dumps(record, separators=(",", ":"), ensure_ascii=False)}} if record else {}
             for key, value in extra.items():
                 if value is not None:
-                    fields[key] = {"stringValue": str(value)}
+                    fields[key] = _fs_value(value)
             return {"update": {"name": "%s/%s" % (root, path), "fields": fields}}
+
+
+        def _city_doc_id(country, key):
+            return re.sub(r"[^a-z0-9]+", "-", ("%s %s" % (country or "xx", key)).lower()).strip("-")
 
 
         def save_hotels(project, database, token, records, synced_at, source_env):
@@ -359,16 +384,29 @@ workflow:
             for i in range(0, len(records), FIRESTORE_COMMIT_BATCH):
                 chunk = records[i:i + FIRESTORE_COMMIT_BATCH]
                 writes = [_fs_doc(root, "%s/%s" % (CONTENT_COLLECTION, r["code"]), r,
-                                  {"code": r["code"], "city": r.get("city") or None, "countryCode": r.get("countryCode"),
+                                  {"code": r["code"], "city": r.get("city") or None, "city_key": city_key(r.get("city")) or None,
+                                   "countryCode": r.get("countryCode"), "stateCode": r.get("stateCode"),
+                                   "lat": _as_dict(r.get("coordinates")).get("lat"),
+                                   "lng": _as_dict(r.get("coordinates")).get("lng"),
                                    "destinationCode": r.get("destinationCode"), "lastUpdate": r.get("lastUpdate"),
                                    "synced_at": synced_at, "source_env": source_env})
                           for r in chunk if r.get("code")]
+                cities = {}
+                for r in chunk:
+                    key = city_key(r.get("city"))
+                    if key:
+                        cities[_city_doc_id(r.get("countryCode"), key)] = {
+                            "name": r["city"], "city_key": key, "countryCode": r.get("countryCode"),
+                            "prefix": key[:2], "synced_at": synced_at}
+                hotels_in_chunk = len(writes)
+                writes += [_fs_doc(root, "%s/%s" % (CITY_COLLECTION, doc_id), None, fields)
+                           for doc_id, fields in sorted(cities.items())]
                 if not writes:
                     continue
                 status, body = _fs_call("POST", "https://firestore.googleapis.com/v1/%s:commit" % root, token, {"writes": writes})
                 if not 200 <= status < 300:
                     return written, "firestore commit HTTP %s: %s" % (status, _text(_as_dict(body).get("error"))[:300])
-                written += len(writes)
+                written += hotels_in_chunk
             return written, None
 
 
