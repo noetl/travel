@@ -200,15 +200,16 @@ del PLACES["Atlantis"]
 r = last(["A flight to London"], rule_read)
 check(r["state"].get("destination_options") == ["LHR", "LGW", "STN"], "London still offers LHR, LGW and STN")
 
-# ── user_location (Part 2): accepted, kept, changes nothing ──────────────
+# ── user_location (Part 2): accepted and kept ─────────────────────────────
 loc = {"city": "San Jose", "region": "CA", "country": "US", "lat": 37.3382, "lon": -121.8863}
-turns = ["Flights and a hotel in Munich", "Nov 3 to Nov 8"]
+# Part 2 (scripts/trip_intake_departure_test.py) uses it only for a flight's departure.
+turns = ["A hotel in Munich", "Nov 3 to Nov 8"]
 with_loc, without = converse(turns, location=loc), converse(turns)
 check(with_loc[-1]["state"].get("user_location") == loc, "user_location is accepted and kept in the intake state")
 check([r["bot_message"] for r in with_loc] == [r["bot_message"] for r in without]
       and [r["asked"] for r in with_loc] == [r["asked"] for r in without]
       and with_loc[-1]["forms"] == without[-1]["forms"],
-      "user_location changes no question and no form")
+      "user_location changes no question and no form of a hotel-only trip")
 check(converse(["hi"], location={"lat": "north", "city": ""})[-1]["state"].get("user_location") is None,
       "a malformed user_location is dropped")
 wl = doc["workload"]

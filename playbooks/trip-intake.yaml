@@ -37,7 +37,18 @@ metadata:
     place (coordinates, airports, islands, namesakes); codes are kept only if
     they are in the airport table.
 
-    INPUT user_location (optional): accepted and kept in the intake state only.
+    A misspelled place the model recognises is corrected without asking when
+    the correction is at least 60% alike to what was typed; otherwise, or when
+    the place does not exist, the traveller is asked to check the spelling.
+
+    INPUT user_location (optional, adiona/frontend#55 Part 2):
+      {"city": "San Jose", "region": "CA", "country": "US", "lat": 37.3382, "lon": -121.8863}
+    every field optional ("latitude"/"longitude"/"lng" also accepted; lat/lon
+    win over city). When a flight needs a departure and none was given, the
+    nearest large airport within 150 km (else the nearest airport) is offered as
+    a yes/no: "Are you flying from San Jose (SJC)?". Yes uses it; no asks the
+    open question; naming another place answers it. Without a usable location,
+    or once the traveller has given a departure, nothing changes.
 
     OUTPUT. result.render is the first form; result.forms holds every form of
     the trip (hotel first); result.bot_message is the question or the hand-off
@@ -51,7 +62,7 @@ metadata:
     check-out after check-in; counts within the forms' own limits. Airport codes
     are only those FlightSearchForm can prefill (its airports.ts); a city with
     several airports is a question, never a pick.
-  version: "4"
+  version: "5"
   agent: true
   tags: [muno, intake, forms, event-sourced]
   terminal:
@@ -80,8 +91,8 @@ workload:
   today: ""
   # Optional, from the frontend: where the traveller is, e.g.
   # {city: "San Jose", region: "CA", country: "US", lat: 37.3382, lon: -121.8863}.
-  # Accepted and kept in the intake state; it does not change any question or
-  # form yet (adiona/frontend#55 Part 2, pending how it should be used).
+  # Used only to offer the nearest airport as the departure, as a yes/no
+  # (adiona/frontend#55 Part 2); see the description.
   user_location: {}
 
 workflow:
@@ -1921,9 +1932,13 @@ workflow:
             '    "islands": for a region or island group, its main islands as [{"name", "airports"}];\n'
             '    "matches": only when the name, as written, is used by several well-known places '
             '(e.g. "Portland": Oregon and Maine), each as {"label": "Portland, Oregon", "airports", "lat", "lon"}.\n'
+            '    "corrected": the correct name of the place when the text is misspelled ("Barcelonna" -> "Barcelona");\n'
+            '    "exists": false only when the text names no real place at all.\n'
             '  kind is "island" for an island ("Maui", "Kauai", "Big Island", "Mallorca", "Santorini") and '
             '"region" for a state, region or island group ("Hawaii" alone means the state, a region).\n'
             '  hotel_area: {"text": the city or area to stay in}, only when `awaiting` has hotel_area\n'
+            '  confirm: true | false, only when `awaiting` has origin_confirm: whether they accept the '
+            'departure airport they were asked about (a different place is an origin, not a confirm)\n'
             "  start_date, end_date: YYYY-MM-DD, trip dates not tied to flight or hotel\n"
             "  depart_date, return_date: YYYY-MM-DD, explicitly flight dates\n"
             "  check_in, check_out: YYYY-MM-DD, explicitly hotel dates\n"
@@ -2219,6 +2234,11 @@ workflow:
                     matches.append(match)
             if len(matches) > 1:
                 out["matches"] = matches[:6]
+            corrected = " ".join(str(place.get("corrected") or "").split())[:80]
+            if corrected:
+                out["corrected"] = corrected
+            if place.get("exists") is False:
+                out["exists"] = False
             return out
 
 
@@ -2234,6 +2254,8 @@ workflow:
                 if text:
                     out[key] = dict({"text": text, "kind": place.get("kind") if place.get("kind") in kinds else "city"},
                                     **_place_facts(place))
+            if isinstance(raw.get("confirm"), bool):
+                out["confirm"] = raw["confirm"]
             area = raw.get("hotel_area")
             area = " ".join(str(_as_dict(area).get("text") if isinstance(area, dict) else area or "").split())[:120]
             if area:
@@ -2448,7 +2470,10 @@ workflow:
                     n.endswith(":destination") for n in need):
                 need.append("hotel_area")
             if wants(s, "flight"):
-                if not s.get("origin"):
+                if not s.get("origin") and departure_suggestion(s):
+                    # adiona/frontend#55 Part 2: the traveller's location suggests one.
+                    need.append("origin_confirm")
+                elif not s.get("origin"):
                     need.append("origin")
                 elif s.get("origin_islands"):
                     need.append("island:origin")
@@ -2502,6 +2527,9 @@ workflow:
                 return "Where would you like to %s?" % ("go" if wants(s, "flight") else "stay")
             if item == "origin":
                 return "Which city or airport are you flying from?"
+            if item == "origin_confirm":
+                code = departure_suggestion(s)
+                return "Are you flying from %s (%s)?" % (BY_CODE[code]["city"].split(",")[0].strip(), code)
             if item.startswith("airport:"):
                 key = item.split(":", 1)[1]
                 if s.get(key + "_nearest"):
@@ -2566,6 +2594,9 @@ workflow:
                     out.append("dates")
                 elif item == "travelers":
                     out.extend(["adults", "children"])
+                elif item == "origin_confirm":
+                    # A yes/no, or the place they fly from instead.
+                    out.extend(["origin_confirm", "origin"])
                 else:
                     out.append(item)
             return out
@@ -2575,7 +2606,7 @@ workflow:
             """One or two questions. An airport choice is asked on its own."""
             if not need:
                 return []
-            alone = ("dates", "return_date", "trip_type", "hotel_area")
+            alone = ("dates", "return_date", "trip_type", "hotel_area", "origin_confirm")
             place = ("airport", "which:", "island:")
             if need[0].startswith(place) or need[0] in alone or len(need) == 1:
                 # Asked on their own: an airport choice; a flight's trip type (it decides
@@ -2732,9 +2763,10 @@ workflow:
 
         def clean_user_location(value):
             """The traveller's location as the frontend sends it (adiona/frontend#55
-            Part 2): {city, region, country, lat, lon}, each optional. Accepted and kept
-            in the intake state only; how it is used is still to be decided, so it
-            changes no question and no form."""
+            Part 2): {city, region, country, lat, lon}, each optional, kept in the
+            intake state. It only ever turns the departure question into a yes/no
+            about the nearest airport (departure_suggestion); nothing is filled in
+            from it without the traveller saying yes."""
             value = _as_dict(value)
             out = {}
             for key in ("city", "region", "country"):
@@ -2747,6 +2779,58 @@ workflow:
             return out
 
 
+        def departure_suggestion(state):
+            """The airport to suggest as the departure, from the traveller's location:
+            the nearest LARGE airport within NEAREST_KM (a small one nearby is not
+            suggested when a bigger one is in reach), else the nearest one. None when
+            there is no usable location, or the traveller already said no."""
+            s = state
+            if s.get("origin_suggestion_declined"):
+                return None
+            loc = _as_dict(s.get("user_location"))
+            lat, lon = _num(loc.get("lat")), _num(loc.get("lon"))
+            if lat is None or lon is None:
+                name = ", ".join(x for x in (loc.get("city"), loc.get("region")) if x)
+                places = (_table_places(name) if name else []) or (_table_places(loc.get("city")) if loc.get("city") else [])
+                if not places:
+                    return None
+                lat, lon = places[0]["lat"], places[0]["lon"]
+            near = nearest_airports(lat, lon)
+            return near[0] if near else None
+
+
+        YES_RE = re.compile(r"^\s*(yes|yeah|yep|yup|sure|correct|right|that'?s right|ok(ay)?|y)\b", re.I)
+        NO_RE = re.compile(r"^\s*(no|nope|nah|not really|n)\b", re.I)
+
+
+        def _similar(a, b):
+            import difflib
+            return difflib.SequenceMatcher(None, _norm_place(a), _norm_place(b)).ratio()
+
+
+        def check_places(patch):
+            """adiona/frontend#55: a misspelled place the model recognised is corrected
+            without asking when the correction is at least 60% alike to what was
+            typed; a place the model says does not exist, or a correction too far
+            from the text, is not used. Returns the messages to say."""
+            problems = []
+            for key in ("destination", "origin"):
+                place = patch.get(key)
+                if not place or place.get("kind") in ("hotel", "airport"):
+                    continue
+                corrected = place.get("corrected")
+                if corrected and _norm_place(corrected) != _norm_place(place["text"]):
+                    if _similar(place["text"], corrected) >= 0.6:
+                        place["typed_as"], place["text"] = place["text"], corrected
+                    else:
+                        place["exists"] = False
+                if place.get("exists") is False:
+                    patch.pop(key)
+                    problems.append("We couldn't find a place called \"%s\". Please check the spelling or enter "
+                                    "a nearby city." % place.get("typed_as", place["text"]))
+            return problems
+
+
         def run_turn(state, text, payload, today, reader, user_location=None):
             """One turn: read, merge, validate, resolve, then ask or return the forms."""
             state = json.loads(json.dumps(state or {}))
@@ -2755,6 +2839,18 @@ workflow:
             if location:
                 state["user_location"] = location
             patch = clean_patch(reader(text, state, awaiting, today))
+            place_problems = check_places(patch)
+            # "Are you flying from San Jose (SJC)?": yes takes it, no asks the open
+            # question; naming a place answers it directly.
+            if "origin_confirm" in awaiting and "origin" not in patch:
+                suggested = departure_suggestion(state)
+                said_yes = patch.get("confirm") is True or (patch.get("confirm") is None and YES_RE.search(text or ""))
+                said_no = patch.get("confirm") is False or (patch.get("confirm") is None and NO_RE.search(text or ""))
+                if said_yes and suggested:
+                    patch["origin"] = {"text": suggested, "kind": "airport"}
+                    state["origin_from_location"] = True
+                elif said_no:
+                    state["origin_suggestion_declined"] = True
             patch.update(dates_from_widget(payload, state))
             if "intent" in patch:
                 patch["intent"] = resolve_intent(state.get("intent"), patch["intent"], text)
@@ -2833,11 +2929,11 @@ workflow:
             forms = forms_for(state)
             state["awaiting"] = awaiting_fields(asks)
             widget = date_picker(state, today) if any(a in ("dates", "return_date") for a in asks) else None
-            lines = list(problems) + [question(item, state) for item in asks]
+            lines = place_problems + list(problems) + [question(item, state) for item in asks]
             if forms:
                 kinds = " and ".join(f["widget_type"].split("_")[0] for f in forms)
                 lines.append("Here's your %s search. Check the details and search when you're ready." % kinds)
-            return {"state": state, "patch": patch, "changed": changed, "problems": problems,
+            return {"state": state, "patch": patch, "changed": changed, "problems": place_problems + problems,
                     "missing": need, "asked": asks, "forms": forms, "widget": widget,
                     "bot_message": " ".join(l for l in lines if l)}
 
