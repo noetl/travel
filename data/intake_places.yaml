@@ -1,0 +1,90 @@
+# Islands and island groups trip-intake knows without asking the model (adiona/frontend#55).
+#
+# Checked BEFORE the model, so the same place always gets the same answer
+# ("Maui" is OGG every time) and it still works when the model is slow or down.
+# Built into playbooks/trip-intake.yaml by scripts/gen_intake_places.py, which
+# refuses any airport code the flight form cannot prefill (adiona's airport list).
+#
+# islands:  airports is the island's primary airport(s), primary first.
+#             one        -> used as is
+#             several    -> the traveller chooses (only where they really do)
+#             []         -> the nearest airports to lat/lon are offered
+# regions:  an island group; the traveller is asked which island (names below).
+# Coordinates are the island's rough centre (for "nearest airport" only).
+
+islands:
+  # Hawaii
+  - {name: Oahu, aliases: ["O'ahu"], country: US, airports: [HNL], lat: 21.47, lon: -157.98}
+  - {name: Maui, country: US, airports: [OGG], lat: 20.80, lon: -156.33}
+  - {name: Kauai, aliases: ["Kaua'i"], country: US, airports: [LIH], lat: 22.07, lon: -159.50}
+  - {name: Big Island, aliases: [Hawaii Island, Island of Hawaii], country: US, airports: [KOA, ITO], lat: 19.60, lon: -155.52}
+  - {name: Molokai, aliases: ["Moloka'i"], country: US, airports: [MKK], lat: 21.13, lon: -157.02}
+  - {name: Lanai, aliases: ["Lana'i"], country: US, airports: [LNY], lat: 20.83, lon: -156.92}
+  # Balearic Islands
+  - {name: Mallorca, aliases: [Majorca], country: ES, airports: [PMI], lat: 39.62, lon: 2.98}
+  - {name: Menorca, aliases: [Minorca], country: ES, airports: [MAH], lat: 39.95, lon: 4.05}
+  - {name: Ibiza, country: ES, airports: [IBZ], lat: 38.98, lon: 1.43}
+  - {name: Formentera, country: ES, airports: [], lat: 38.70, lon: 1.45}
+  # Canary Islands
+  - {name: Tenerife, country: ES, airports: [TFS, TFN], lat: 28.29, lon: -16.62}
+  - {name: Gran Canaria, country: ES, airports: [LPA], lat: 27.96, lon: -15.59}
+  - {name: Lanzarote, country: ES, airports: [ACE], lat: 29.05, lon: -13.63}
+  - {name: Fuerteventura, country: ES, airports: [FUE], lat: 28.36, lon: -14.05}
+  - {name: La Palma, country: ES, airports: [SPC], lat: 28.68, lon: -17.86}
+  - {name: El Hierro, country: ES, airports: [VDE], lat: 27.74, lon: -18.02}
+  - {name: La Gomera, country: ES, airports: [], lat: 28.10, lon: -17.11}
+  # Greek islands
+  - {name: Santorini, aliases: [Thira, Thera], country: GR, airports: [JTR], lat: 36.40, lon: 25.46}
+  - {name: Mykonos, country: GR, airports: [JMK], lat: 37.45, lon: 25.36}
+  - {name: Crete, country: GR, airports: [HER, CHQ], lat: 35.24, lon: 24.81}
+  - {name: Rhodes, aliases: [Rodos], country: GR, airports: [RHO], lat: 36.17, lon: 27.92}
+  - {name: Corfu, aliases: [Kerkyra], country: GR, airports: [CFU], lat: 39.62, lon: 19.92}
+  - {name: Kos, country: GR, airports: [KGS], lat: 36.85, lon: 27.23}
+  - {name: Zakynthos, aliases: [Zante], country: GR, airports: [ZTH], lat: 37.79, lon: 20.75}
+  - {name: Kefalonia, aliases: [Cephalonia], country: GR, airports: [EFL], lat: 38.18, lon: 20.49}
+  - {name: Lesbos, aliases: [Lesvos], country: GR, airports: [MJT], lat: 39.17, lon: 26.33}
+  - {name: Samos, country: GR, airports: [SMI], lat: 37.73, lon: 26.82}
+  - {name: Skiathos, country: GR, airports: [JSI], lat: 39.16, lon: 23.49}
+  - {name: Naxos, country: GR, airports: [], lat: 37.08, lon: 25.47}
+  - {name: Paros, country: GR, airports: [], lat: 37.08, lon: 25.15}
+  # Other Mediterranean and Atlantic islands
+  - {name: Sicily, aliases: [Sicilia], country: IT, airports: [CTA, PMO], lat: 37.60, lon: 14.02}
+  - {name: Sardinia, aliases: [Sardegna], country: IT, airports: [CAG, OLB, AHO], lat: 40.12, lon: 9.01}
+  - {name: Corsica, aliases: [Corse], country: FR, airports: [AJA, BIA], lat: 42.04, lon: 9.01}
+  - {name: Malta, country: MT, airports: [MLA], lat: 35.94, lon: 14.38}
+  - {name: Cyprus, country: CY, airports: [LCA, PFO], lat: 35.13, lon: 33.43}
+  - {name: Madeira, country: PT, airports: [FNC], lat: 32.76, lon: -16.96}
+  - {name: Sao Miguel, aliases: ["São Miguel"], country: PT, airports: [PDL], lat: 37.78, lon: -25.50}
+  - {name: Terceira, country: PT, airports: [TER], lat: 38.72, lon: -27.21}
+  # Caribbean
+  - {name: Aruba, country: AW, airports: [AUA], lat: 12.52, lon: -69.97}
+  - {name: Barbados, country: BB, airports: [BGI], lat: 13.19, lon: -59.54}
+  - {name: Jamaica, country: JM, airports: [MBJ, KIN], lat: 18.11, lon: -77.30}
+  - {name: Puerto Rico, country: PR, airports: [SJU], lat: 18.22, lon: -66.59}
+  - {name: Saint Lucia, aliases: [St Lucia, St. Lucia], country: LC, airports: [UVF], lat: 13.91, lon: -60.98}
+  - {name: Antigua, country: AG, airports: [ANU], lat: 17.07, lon: -61.80}
+  - {name: Grand Cayman, country: KY, airports: [GCM], lat: 19.32, lon: -81.24}
+  - {name: Providenciales, country: TC, airports: [PLS], lat: 21.80, lon: -72.26}
+  - {name: Sint Maarten, aliases: [St Maarten, St. Maarten, Saint Martin, St Martin], country: SX, airports: [SXM], lat: 18.04, lon: -63.07}
+  - {name: Curacao, aliases: ["Curaçao"], country: CW, airports: [CUR], lat: 12.17, lon: -68.99}
+  - {name: Saint Barthelemy, aliases: [St Barts, St Barths, St. Barts], country: BL, airports: [SBH], lat: 17.90, lon: -62.83}
+  - {name: Saint Thomas, aliases: [St Thomas, St. Thomas], country: VI, airports: [STT], lat: 18.34, lon: -64.93}
+  - {name: Saint Croix, aliases: [St Croix, St. Croix], country: VI, airports: [STX], lat: 17.73, lon: -64.78}
+  - {name: Tortola, country: VG, airports: [EIS], lat: 18.43, lon: -64.62}
+  # Elsewhere
+  - {name: Bali, country: ID, airports: [DPS], lat: -8.41, lon: 115.19}
+  - {name: Phuket, country: TH, airports: [HKT], lat: 7.95, lon: 98.34}
+  - {name: Mauritius, country: MU, airports: [MRU], lat: -20.35, lon: 57.55}
+  - {name: Tahiti, country: PF, airports: [PPT], lat: -17.65, lon: -149.43}
+  - {name: Bora Bora, country: PF, airports: [BOB], lat: -16.50, lon: -151.74}
+  - {name: Nantucket, country: US, airports: [ACK], lat: 41.28, lon: -70.10}
+  - {name: "Martha's Vineyard", aliases: [Marthas Vineyard], country: US, airports: [], lat: 41.39, lon: -70.61}
+
+regions:
+  - {name: Hawaii, aliases: [Hawaiian Islands, the Hawaiian Islands], islands: [Oahu, Maui, Kauai, Big Island]}
+  - {name: Canary Islands, aliases: [Canaries, the Canaries, the Canary Islands], islands: [Tenerife, Gran Canaria, Lanzarote, Fuerteventura, La Palma]}
+  - {name: Balearic Islands, aliases: [Balearics, the Balearics], islands: [Mallorca, Menorca, Ibiza]}
+  - {name: Greek Islands, aliases: [the Greek Islands], islands: [Santorini, Mykonos, Crete, Rhodes, Corfu]}
+  - {name: Cyclades, aliases: [the Cyclades], islands: [Santorini, Mykonos, Naxos, Paros]}
+  - {name: Azores, aliases: [the Azores], islands: [Sao Miguel, Terceira]}
+  - {name: US Virgin Islands, aliases: [USVI, the US Virgin Islands], islands: [Saint Thomas, Saint Croix]}

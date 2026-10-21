@@ -35,7 +35,10 @@ metadata:
     which island; an island with a hotel search asks "Which city or area on
     {island} would you like to stay in?". The model may say what it knows of a
     place (coordinates, airports, islands, namesakes); codes are kept only if
-    they are in the airport table.
+    they are in the airport table. Islands and island groups in
+    data/intake_places.yaml (Hawaii, the Canaries, the Balearics, Greek and
+    Caribbean islands, ...) are answered from that table first, model or not:
+    the same place always gets the same airports.
 
     A misspelled place the model recognises is corrected without asking when
     the correction is at least 60% alike to what was typed; otherwise, or when
@@ -62,7 +65,7 @@ metadata:
     check-out after check-in; counts within the forms' own limits. Airport codes
     are only those FlightSearchForm can prefill (its airports.ts); a city with
     several airports is a question, never a pick.
-  version: "5"
+  version: "6"
   agent: true
   tags: [muno, intake, forms, event-sourced]
   terminal:
@@ -1640,6 +1643,100 @@ workflow:
             ISLAND_KEYS.update(re.sub(r"\s+island$", "", p) for p in _parts if p.endswith(" island"))
         ISLAND_KEYS -= TOWN_KEYS
 
+        # Islands and island groups known without asking the model (data/intake_places.yaml,
+        # built in by scripts/gen_intake_places.py). Checked BEFORE the model's facts, so a
+        # known place always gets the same answer (Maui is OGG every time) and still works
+        # when the model is slow or down. island: airports (primary first; several means the
+        # traveller chooses; none means the nearest to its centre); region: its islands.
+        PLACES_TABLE = """
+                    island|Oahu|O'ahu|US|HNL|21.47|-157.98
+                    island|Maui||US|OGG|20.8|-156.33
+                    island|Kauai|Kaua'i|US|LIH|22.07|-159.5
+                    island|Big Island|Hawaii Island;Island of Hawaii|US|KOA,ITO|19.6|-155.52
+                    island|Molokai|Moloka'i|US|MKK|21.13|-157.02
+                    island|Lanai|Lana'i|US|LNY|20.83|-156.92
+                    island|Mallorca|Majorca|ES|PMI|39.62|2.98
+                    island|Menorca|Minorca|ES|MAH|39.95|4.05
+                    island|Ibiza||ES|IBZ|38.98|1.43
+                    island|Formentera||ES||38.7|1.45
+                    island|Tenerife||ES|TFS,TFN|28.29|-16.62
+                    island|Gran Canaria||ES|LPA|27.96|-15.59
+                    island|Lanzarote||ES|ACE|29.05|-13.63
+                    island|Fuerteventura||ES|FUE|28.36|-14.05
+                    island|La Palma||ES|SPC|28.68|-17.86
+                    island|El Hierro||ES|VDE|27.74|-18.02
+                    island|La Gomera||ES||28.1|-17.11
+                    island|Santorini|Thira;Thera|GR|JTR|36.4|25.46
+                    island|Mykonos||GR|JMK|37.45|25.36
+                    island|Crete||GR|HER,CHQ|35.24|24.81
+                    island|Rhodes|Rodos|GR|RHO|36.17|27.92
+                    island|Corfu|Kerkyra|GR|CFU|39.62|19.92
+                    island|Kos||GR|KGS|36.85|27.23
+                    island|Zakynthos|Zante|GR|ZTH|37.79|20.75
+                    island|Kefalonia|Cephalonia|GR|EFL|38.18|20.49
+                    island|Lesbos|Lesvos|GR|MJT|39.17|26.33
+                    island|Samos||GR|SMI|37.73|26.82
+                    island|Skiathos||GR|JSI|39.16|23.49
+                    island|Naxos||GR||37.08|25.47
+                    island|Paros||GR||37.08|25.15
+                    island|Sicily|Sicilia|IT|CTA,PMO|37.6|14.02
+                    island|Sardinia|Sardegna|IT|CAG,OLB,AHO|40.12|9.01
+                    island|Corsica|Corse|FR|AJA,BIA|42.04|9.01
+                    island|Malta||MT|MLA|35.94|14.38
+                    island|Cyprus||CY|LCA,PFO|35.13|33.43
+                    island|Madeira||PT|FNC|32.76|-16.96
+                    island|Sao Miguel|São Miguel|PT|PDL|37.78|-25.5
+                    island|Terceira||PT|TER|38.72|-27.21
+                    island|Aruba||AW|AUA|12.52|-69.97
+                    island|Barbados||BB|BGI|13.19|-59.54
+                    island|Jamaica||JM|MBJ,KIN|18.11|-77.3
+                    island|Puerto Rico||PR|SJU|18.22|-66.59
+                    island|Saint Lucia|St Lucia;St. Lucia|LC|UVF|13.91|-60.98
+                    island|Antigua||AG|ANU|17.07|-61.8
+                    island|Grand Cayman||KY|GCM|19.32|-81.24
+                    island|Providenciales||TC|PLS|21.8|-72.26
+                    island|Sint Maarten|St Maarten;St. Maarten;Saint Martin;St Martin|SX|SXM|18.04|-63.07
+                    island|Curacao|Curaçao|CW|CUR|12.17|-68.99
+                    island|Saint Barthelemy|St Barts;St Barths;St. Barts|BL|SBH|17.9|-62.83
+                    island|Saint Thomas|St Thomas;St. Thomas|VI|STT|18.34|-64.93
+                    island|Saint Croix|St Croix;St. Croix|VI|STX|17.73|-64.78
+                    island|Tortola||VG|EIS|18.43|-64.62
+                    island|Bali||ID|DPS|-8.41|115.19
+                    island|Phuket||TH|HKT|7.95|98.34
+                    island|Mauritius||MU|MRU|-20.35|57.55
+                    island|Tahiti||PF|PPT|-17.65|-149.43
+                    island|Bora Bora||PF|BOB|-16.5|-151.74
+                    island|Nantucket||US|ACK|41.28|-70.1
+                    island|Martha's Vineyard|Marthas Vineyard|US||41.39|-70.61
+                    region|Hawaii|Hawaiian Islands;the Hawaiian Islands|Oahu,Maui,Kauai,Big Island
+                    region|Canary Islands|Canaries;the Canaries;the Canary Islands|Tenerife,Gran Canaria,Lanzarote,Fuerteventura,La Palma
+                    region|Balearic Islands|Balearics;the Balearics|Mallorca,Menorca,Ibiza
+                    region|Greek Islands|the Greek Islands|Santorini,Mykonos,Crete,Rhodes,Corfu
+                    region|Cyclades|the Cyclades|Santorini,Mykonos,Naxos,Paros
+                    region|Azores|the Azores|Sao Miguel,Terceira
+                    region|US Virgin Islands|USVI;the US Virgin Islands|Saint Thomas,Saint Croix
+        """
+        KNOWN_PLACES, _ISLANDS = {}, {}
+        for _line in PLACES_TABLE.strip().splitlines():
+            _f = _line.strip().split("|")
+            if _f[0] == "island":
+                _name, _aliases, _cc, _codes, _lat, _lon = _f[1:]
+                _entry = {"kind": "island", "name": _name, "country": _cc,
+                          "airports": [c for c in _codes.split(",") if c], "lat": float(_lat), "lon": float(_lon)}
+                _ISLANDS[_name] = _entry
+            else:
+                _name, _aliases, _members = _f[1:]
+                _entry = {"kind": "region", "name": _name,
+                          "islands": [{"name": m, "airports": _ISLANDS[m]["airports"]} for m in _members.split(",")]}
+            for _n in [_name] + [a for a in _aliases.split(";") if a]:
+                KNOWN_PLACES[_norm_place(_n)] = _entry
+
+
+        def known_place(text):
+            """The known island or region `text` names ("Maui", "the Big Island"), or None."""
+            key = _norm_place(text)
+            return KNOWN_PLACES.get(key) or KNOWN_PLACES.get(re.sub(r"^the\s+", "", key))
+
         # Form limits (the steppers in the two forms).
         HOTEL_MAX_ROOMS, HOTEL_MAX_ADULTS = 8, 16
         FLIGHT_MAX_ADULTS, MAX_CHILDREN, MAX_CHILD_AGE = 9, 8, 17
@@ -1711,6 +1808,9 @@ workflow:
         def _canonical_city(text):
             """A place the airport table knows: a major city in its own spelling, else
             (any airport's town or island) as the user wrote it."""
+            known = known_place(text)
+            if known:
+                return known["name"]
             codes = CITY_CODES.get(str(text or "").strip().lower())
             if codes:
                 return BY_CODE[codes[0]]["city"]
@@ -1831,6 +1931,9 @@ workflow:
             airport table knows ("Kauai" in "Lihue, Kauai")."""
             place = _as_dict(place)
             kind = place.get("kind") if place.get("kind") in PLACE_KINDS else "city"
+            known = known_place(place.get("text"))
+            if known and kind not in ("hotel", "airport"):
+                return known["kind"]
             if kind == "city" and _norm_place(place.get("text")) in ISLAND_KEYS:
                 return "island"
             return kind
@@ -1865,6 +1968,16 @@ workflow:
                     and (text.isupper() or BY_CODE[text.upper()]["major"] or place.get("kind") == "airport"):
                 out["code"] = text.upper()
                 return out
+            known = known_place(text) if place.get("kind") not in ("hotel", "airport") else None
+            if known and known["kind"] == "region":
+                out["islands"] = known["islands"]
+                return out
+            if known:
+                # The table wins over whatever the model proposed for a place it knows.
+                if known["airports"]:
+                    return codes(known["airports"])
+                out["nearest"] = True
+                return codes(nearest_airports(known["lat"], known["lon"])) if nearest_airports(known["lat"], known["lon"]) else out
             lat, lon = _num(place.get("lat")), _num(place.get("lon"))
             coords = lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180
             if place.get("resolved"):
@@ -2023,7 +2136,7 @@ workflow:
         def _place_after(text, cue):
             """The known city or airport code right after `cue` ("from", "to", "in"):
             the longest run of capitalised words that names one, else None."""
-            for m in re.finditer(r"\b(?i:" + cue + r")\s+([A-Z][\w'.-]*(?:,?\s+[A-Z][\w'.-]*){0,3})", text):
+            for m in re.finditer(r"\b(?i:" + cue + r")\s+(?:the\s+)?([A-Z][\w'.-]*(?:,?\s+[A-Z][\w'.-]*){0,3})", text):
                 words = m.group(1).split()
                 for n in range(len(words), 0, -1):
                     cand = " ".join(words[:n]).strip(".,")
@@ -2080,6 +2193,13 @@ workflow:
                 out["origin"] = {"text": frm, "kind": "airport" if frm in BY_CODE else "city"}
             if to and "destination" not in out:
                 out["destination"] = {"text": to, "kind": "airport" if to in BY_CODE else "city"}
+            if "destination" not in out and "origin" not in out:
+                # A known island or region named anywhere ("Maui please"), longest name first.
+                norm_low = _norm_place(t)
+                for key in sorted(KNOWN_PLACES, key=len, reverse=True):
+                    if re.search(r"\b%s\b" % re.escape(key), norm_low):
+                        out["destination"] = {"text": KNOWN_PLACES[key]["name"], "kind": KNOWN_PLACES[key]["kind"]}
+                        break
             if "destination" not in out and "origin" not in out:
                 city = next((a["city"] for a in AIRPORTS if re.search(r"\b%s\b" % re.escape(a["city"].lower()), low)), None)
                 if city:
