@@ -1927,8 +1927,12 @@ workflow:
             "  For a destination or origin that is a place (not a hotel, not an airport), also add what "
             "you know about the place itself (this is knowledge, not something the message must state):\n"
             '    "lat", "lon": its approximate centre;\n'
-            '    "airports": IATA codes of its main commercial airport(s) with scheduled passenger flights, '
-            "on the island or serving the city; leave out small commuter airfields; [] if it has none of its own;\n"
+            '    "airports": IATA code(s) of the airport(s) with scheduled passenger flights ON the island or IN '
+            'the city itself; [] if it has none of its own (e.g. "Napa": [], nearby airports are found '
+            "separately). Usually ONE: the primary airport. Give more than one only when travellers really "
+            "choose between several airports with substantial mainline service "
+            '(e.g. "Big Island": ["KOA", "ITO"]). Leave out small regional, commuter or inter-island airports '
+            '(e.g. "Maui": ["OGG"], not JHM or HNM);\n'
             '    "islands": for a region or island group, its main islands as [{"name", "airports"}];\n'
             '    "matches": only when the name, as written, is used by several well-known places '
             '(e.g. "Portland": Oregon and Maine), each as {"label": "Portland, Oregon", "airports", "lat", "lon"}.\n'
