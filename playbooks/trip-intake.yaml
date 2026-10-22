@@ -44,9 +44,11 @@ metadata:
     the correction is at least 60% alike to what was typed; otherwise, or when
     the place does not exist, the traveller is asked to check the spelling.
 
-    MODEL. Each turn's model call waits up to 20 s (prod answers take 3-18 s); a
-    timeout is not retried, a fast failure (HTTP 429/5xx, dropped connection)
-    is retried once after a short pause; then rule_read answers instead.
+    MODEL. Claude Haiku (claude-haiku-5-5) through the Anthropic API, the Mount
+    Shasta Ranch pattern: up to 8 s per call; a timeout is not retried, a fast
+    failure (HTTP 429/5xx, dropped connection) is retried once; then rule_read
+    answers instead. The key comes from Secret Manager (anthropic_secret_name).
+    llm_provider=vertex switches back to Gemini on Vertex (up to 20 s).
     What the model said about a place outside the table is cached in Firestore
     intake_place_facts/{place} for 30 days and reused (so a turn the model
     misses still knows it). To correct an entry: set `invalid: true` (the next
@@ -74,14 +76,14 @@ metadata:
     check-out after check-in; counts within the forms' own limits. Airport codes
     are only those FlightSearchForm can prefill (its airports.ts); a city with
     several airports is a question, never a pick.
-  version: "8"
+  version: "9"
   agent: true
   tags: [muno, intake, forms, event-sourced]
   terminal:
     visible: true
     workspace: muno
     scopes: [/muno/intake, /mcp/firestore]
-  capabilities: [mcp:firestore, ai:vertex-ai]
+  capabilities: [mcp:firestore, ai:anthropic, ai:vertex-ai]
 
 workload:
   thread_id: ""
@@ -96,6 +98,20 @@ workload:
   # The model only reads the user's words into fields; every rule is code.
   # false = the deterministic reader alone (also the fallback on any model error).
   llm_enabled: true
+  # anthropic = Claude through the Anthropic API (default); vertex = Gemini on
+  # Vertex AI, kept as the rollback (llm_model / vertex_*).
+  llm_provider: anthropic
+  anthropic_model: claude-haiku-5-5
+  # GCP Secret Manager secret holding the Anthropic API key (raw, or JSON {api_key}),
+  # read with the worker's Workload Identity; never logged or returned.
+  anthropic_secret_name: shastara-eval
+  # The key is not scoped to a workspace: requests name the Mount Shasta Ranch
+  # workspace (shared with the ranch concierge, which serves this infrastructure).
+  anthropic_workspace_id: wrkspc_01Ac7pHmUHKP8xGne1VEaZuB
+  # Thinking off: the live eval (2026-10-22) scored the same with it on, and answered
+  # faster (median 1.06 s vs 1.45 s). No JSON-schema output: free JSON scored 24/24,
+  # and the reader's schema is over the API's 24-optional-field limit (HTTP 400).
+  claude_thinking: disabled
   llm_model: gemini-3.8-flash
   vertex_project: shastaratech-noetl-prod
   vertex_region: global
@@ -519,6 +535,11 @@ workflow:
         llm_model: "{{ workload.llm_model | default('gemini-3.8-flash') }}"
         vertex_project: "{{ workload.vertex_project | default('shastaratech-noetl-prod') }}"
         vertex_region: "{{ workload.vertex_region | default('global') }}"
+        llm_provider: "{{ workload.llm_provider | default('anthropic') }}"
+        anthropic_model: "{{ workload.anthropic_model | default('claude-haiku-5-5') }}"
+        anthropic_secret_name: "{{ workload.anthropic_secret_name | default('shastara-eval') }}"
+        anthropic_workspace_id: "{{ workload.anthropic_workspace_id | default('wrkspc_01Ac7pHmUHKP8xGne1VEaZuB') }}"
+        claude_thinking: "{{ workload.claude_thinking | default('disabled') }}"
         today_override: "{{ workload.today | default('') }}"
         firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
         firestore_database: "{{ workload.firestore_database | default('(default)') }}"
@@ -2079,7 +2100,7 @@ workflow:
             '  airport_code: 3-letter code when they pick one of the offered airports\n'
             "Resolve relative dates (\"next Friday\", \"for 3 nights\") against `today`. A bare "
             "answer (\"2\", \"Paris\", a date) answers the fields listed in `awaiting`. "
-            "\"No kids\" is children_count 0. \"Me and my wife\" is adults 2. Output intent only when "
+            "\"No kids\" is children_count 0. \"Me and my wife\" is adults 2. \"A room\" is rooms 1. Output intent only when "
             "the message says what the traveller wants to book; a message that merely mentions flying "
             "or staying is not an intent."
         )
@@ -2233,6 +2254,89 @@ workflow:
                         "created_at": now.isoformat(),
                         "expires_at": (now + timedelta(days=PLACE_CACHE_DAYS)).isoformat()}})
             return raw, writes, used
+
+
+        # ── Claude (Anthropic API), the default reader ───────────────────────────
+        # Same pattern as the Mount Shasta Ranch concierge (claude-haiku-5-5 straight
+        # to api.anthropic.com), called from this step. The key is the raw key in GCP
+        # Secret Manager (workload.anthropic_secret_name), read with the worker's
+        # Workload Identity (like the other provider keys); it is sent as x-api-key, kept only
+        # in memory, and never returned, logged or saved. The key is not scoped to a
+        # workspace, so every request names one (workload.anthropic_workspace_id).
+        # Gemini on Vertex (llm_read) stays as llm_provider=vertex, the rollback.
+        ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+        ANTHROPIC_VERSION = "2023-06-01"
+        CLAUDE_TIMEOUT_S = 8
+        CLAUDE_MAX_TOKENS = 1024
+        _ANTHROPIC_KEY = {}
+
+
+        def _anthropic_key(project, secret_name):
+            """The API key from Secret Manager (a raw key, or JSON {"api_key": ...}), once per process."""
+            cache_key = "%s/%s" % (project, secret_name)
+            if cache_key not in _ANTHROPIC_KEY:
+                name = "projects/%s/secrets/%s/versions/latest:access" % (project, secret_name)
+                req = urllib.request.Request("https://secretmanager.googleapis.com/v1/%s" % name,
+                                             headers={"Authorization": "Bearer %s" % _vertex_token()})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8")).get("payload", {}).get("data") or ""
+                raw = base64.b64decode(data).decode("utf-8").strip()
+                try:
+                    parsed = json.loads(raw)
+                    raw = str(parsed.get("api_key") or parsed.get("key") or "") if isinstance(parsed, dict) else raw
+                except ValueError:
+                    pass
+                if not raw:
+                    raise ValueError("secret %s holds no API key" % secret_name)
+                _ANTHROPIC_KEY[cache_key] = raw
+            return _ANTHROPIC_KEY[cache_key]
+
+
+        def _claude_json(body):
+            """The JSON object in a Messages API response: the text blocks (thinking skipped),
+            else the span from the first "{" to the last "}". Refusals and cut-off answers fail."""
+            stop = body.get("stop_reason")
+            if stop in ("refusal", "max_tokens"):
+                raise ValueError("claude stopped: %s" % stop)
+            text = "".join(b.get("text", "") for b in body.get("content") or [] if isinstance(b, dict) and b.get("type") == "text")
+            try:
+                out = json.loads(text)
+            except ValueError:
+                a, z = text.find("{"), text.rfind("}")
+                if a < 0 or z <= a:
+                    raise ValueError("claude returned no JSON")
+                out = json.loads(text[a:z + 1])
+            if not isinstance(out, dict):
+                raise ValueError("claude returned %s, not an object" % type(out).__name__)
+            return out
+
+
+        def claude_read(text, state, awaiting, today, model, project, secret_name, workspace_id,
+                        thinking="disabled", sleep=time.sleep):
+            """Read one message with Claude: up to CLAUDE_TIMEOUT_S, a timeout is not retried,
+            a fast failure (HTTP 429/5xx, dropped connection) is retried once."""
+            body = {"model": model, "max_tokens": CLAUDE_MAX_TOKENS, "system": LLM_SYSTEM_PROMPT,
+                    "messages": [{"role": "user", "content": json.dumps({
+                        "message": text, "awaiting": awaiting, "today": today.isoformat(),
+                        "state": {k: state.get(k) for k in STATE_KEYS if state.get(k) not in (None, [])},
+                    }, default=str)}],
+                    "output_config": {"effort": "low"}}
+            if thinking == "disabled":
+                body["thinking"] = {"type": "disabled"}
+            data = json.dumps(body).encode("utf-8")
+            headers = {"x-api-key": _anthropic_key(project, secret_name), "anthropic-version": ANTHROPIC_VERSION,
+                       "anthropic-workspace-id": workspace_id, "content-type": "application/json"}
+            for attempt in range(LLM_ATTEMPTS):
+                try:
+                    req = urllib.request.Request(ANTHROPIC_URL, data=data, method="POST", headers=headers)
+                    with urllib.request.urlopen(req, timeout=CLAUDE_TIMEOUT_S) as resp:
+                        payload = json.loads(resp.read().decode("utf-8"))
+                    break
+                except Exception as exc:
+                    if attempt + 1 >= LLM_ATTEMPTS or not _retryable(exc):
+                        raise
+                    sleep(0.5 + random.random())
+            return _claude_json(payload)
 
 
         MONTHS = {m: i + 1 for i, m in enumerate(
@@ -3210,7 +3314,11 @@ workflow:
             text = str(payload.get("text") or payload.get("message") or "").strip()
             today = date.fromisoformat(str(today_override)) if _iso(today_override) else date.today()
 
-            llm = {"used": False, "model": str(llm_model or ""), "fallback_reason": ""}
+            _provider = str(globals().get("llm_provider") or "anthropic").strip().lower()
+            _provider = _provider if _provider in ("anthropic", "vertex") else "anthropic"
+            _claude_model = str(globals().get("anthropic_model") or "claude-haiku-5-5")
+            llm = {"used": False, "provider": _provider,
+                   "model": _claude_model if _provider == "anthropic" else str(llm_model or ""), "fallback_reason": ""}
             place_cache = {"used": [], "stored": [], "error": None}
             cache_docs = []
             _fs_db = str(globals().get("firestore_database") or "(default)")
@@ -3247,7 +3355,13 @@ workflow:
                     return {}
                 if _flag(llm_enabled):
                     try:
-                        out = llm_read(t, s, awaiting, d, str(llm_model), str(vertex_project), str(vertex_region))
+                        if _provider == "vertex":
+                            out = llm_read(t, s, awaiting, d, str(llm_model), str(vertex_project), str(vertex_region))
+                        else:
+                            out = claude_read(t, s, awaiting, d, _claude_model, str(globals().get("firestore_project") or vertex_project),
+                                              str(globals().get("anthropic_secret_name") or "shastara-eval"),
+                                              str(globals().get("anthropic_workspace_id") or ""),
+                                              thinking=str(globals().get("claude_thinking") or "disabled"))
                         llm["used"] = True
                         return _cache(out)
                     except Exception as exc:

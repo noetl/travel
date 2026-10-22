@@ -189,7 +189,7 @@ def step(text, vertex, firestore):
     g = {"thread_path": "chat_threads/chat-r1", "event_payload": {"text": text},
          "input_event": {"type": "user_message", "payload": {"text": text}},
          "loaded_state": {"found": False}, "relation_docs": [],
-         "llm_enabled": True, "llm_model": "m", "vertex_project": "p", "vertex_region": "global",
+         "llm_enabled": True, "llm_model": "m", "llm_provider": "vertex", "vertex_project": "p", "vertex_region": "global",
          "today_override": TODAY.isoformat(), "firestore_project": "proj", "firestore_database": "(default)"}
     exec(head, g)
     g["urllib"].request.urlopen = urlopen

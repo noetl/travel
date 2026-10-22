@@ -251,13 +251,16 @@ paths = [s["tool"].get("path") for s in doc["workflow"] if s["tool"].get("kind")
 check(paths == ["automation/agents/mcp/firestore"], "the only child playbook is mcp/firestore: %s" % paths)
 src = open(PLAYBOOK).read().lower()
 check(not re.search(r"duffel|hotelbeds|google-places|places\.googleapis|amadeus", src), "no flight, hotel or places provider is named")
-check(sorted(doc["metadata"]["capabilities"]) == ["ai:vertex-ai", "mcp:firestore"], "capabilities: firestore + the model only")
+check(sorted(doc["metadata"]["capabilities"]) == ["ai:anthropic", "ai:vertex-ai", "mcp:firestore"],
+      "capabilities: firestore + the model only (Claude, Gemini as the rollback)")
 # www.googleapis.com/auth/cloud-platform is an OAuth scope NAME, not a host contacted.
 hosts = set(re.findall(r"https?://([a-z0-9.-]+)", code.replace("https://www.googleapis.com/auth/cloud-platform", "")))
 # Firestore is read directly for one thing only: cached place facts (intake_place_facts);
 # everything the turn saves still goes through mcp/firestore in persist_turn.
-check(hosts == {"metadata.google.internal", "firestore.googleapis.com"} and '"aiplatform.googleapis.com"' in code,
-      "the intake step reaches only the metadata server, Vertex AI and Firestore: %s" % sorted(hosts))
+# Claude (api.anthropic.com) with its key from Secret Manager; Vertex AI kept as the rollback.
+check(hosts == {"metadata.google.internal", "firestore.googleapis.com", "api.anthropic.com", "secretmanager.googleapis.com"}
+      and '"aiplatform.googleapis.com"' in code,
+      "the intake step reaches only the metadata server, the model (Claude or Vertex), its key and Firestore: %s" % sorted(hosts))
 fs_urls = re.findall(r'"https://firestore\.googleapis\.com[^"]*"', code)
 check(len(fs_urls) == 1 and "PLACE_CACHE_COLLECTION" in code[code.index(fs_urls[0]):code.index(fs_urls[0]) + 300]
       and "method=\"POST\"" not in code[code.index(fs_urls[0]):code.index(fs_urls[0]) + 300],
@@ -429,7 +432,7 @@ def run_step(text, prior=None, payload=None, llm_read=None):
          "input_event": {"type": "user_message", "payload": {"text": text}},
          "loaded_state": {"found": bool(prior), "document": {"data": prior} if prior else None},
          "relation_docs": [{"path": "user_thread_map/abc", "doc": {"uid": "u"}, "merge": True}],
-         "llm_enabled": llm_read is not None, "llm_model": "gemini-3.8-flash",
+         "llm_enabled": llm_read is not None, "llm_model": "gemini-3.8-flash", "llm_provider": "vertex",
          "vertex_project": "p", "vertex_region": "global", "today_override": TODAY.isoformat()}
     exec(head, g)
     if llm_read:
