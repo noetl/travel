@@ -5,7 +5,8 @@ llm_provider=vertex. Runs the intake step's own code offline, every HTTP call st
 
   * the request: api.anthropic.com/v1/messages, x-api-key from Secret Manager,
     anthropic-version, anthropic-workspace-id, effort low, max_tokens 1024, no
-    temperature; JSON schema and thinking only when switched on;
+    temperature, no JSON schema (free JSON; the reader's schema is over the API's
+    optional-field limit), thinking off unless claude_thinking=adaptive;
   * up to 8 s; a timeout is not retried; HTTP 429/5xx and dropped connections once;
   * the answer: text blocks (thinking skipped), refusals and cut-off answers fail;
   * the key: raw or JSON in the secret, read once per process, never in a result;
@@ -108,17 +109,16 @@ check(c["headers"].get("x-api-key") == KEY and c["headers"].get("anthropic-versi
 b = c["body"]
 check(b["model"] == "claude-haiku-5-5" and b["max_tokens"] == 1024 and b["output_config"] == {"effort": "low"},
       "claude-haiku-5-5, max_tokens 1024, effort low")
-check("temperature" not in b and "top_p" not in b and "thinking" not in b and "format" not in b["output_config"],
-      "no temperature (the API rejects it), no schema and default thinking unless asked")
+check("temperature" not in b and "top_p" not in b and b.get("thinking") == {"type": "disabled"},
+      "no temperature (the API rejects it), no schema, thinking off by default")
 check(b["system"] == lib["LLM_SYSTEM_PROMPT"] and json.loads(b["messages"][0]["content"])["message"] == "A flight to Rome",
       "the same prompt and message as the Gemini reader")
 check(c["timeout"] == 8, "8 s timeout")
 net = Net()
-out, sleeps, err, lib = read(net, claude_ok({"intent": "hotel"}), structured=True, thinking="disabled")
+out, sleeps, err, lib = read(net, claude_ok({"intent": "hotel"}), thinking="adaptive")
 b = net.calls[0]["body"]
-check(b["output_config"]["format"] == {"type": "json_schema", "schema": lib["CLAUDE_SCHEMA"]} and b["output_config"]["effort"] == "low",
-      "claude_structured sends the JSON schema")
-check(b.get("thinking") == {"type": "disabled"}, "claude_thinking=disabled turns thinking off")
+check("thinking" not in b and b["output_config"] == {"effort": "low"}, "claude_thinking=adaptive leaves thinking to the model")
+check('"A room" is rooms 1' in lib["LLM_SYSTEM_PROMPT"], "the prompt says \"a room\" is 1 room (the eval's Bel-Air miss)")
 
 # ── Retries ──────────────────────────────────────────────────────────────
 for exc, label in ((http_error(429), "HTTP 429"), (http_error(529), "HTTP 529 (overloaded)"), (ConnectionResetError("reset"), "a dropped connection")):
@@ -170,32 +170,23 @@ for _ in range(2):
     lib["claude_read"]("x", {}, [], TODAY, "claude-haiku-5-5", "proj", "shastara-eval", WS, sleep=lambda s: None)
 check(net.secret_reads == 1, "the key is read from Secret Manager once per process")
 
-# The schema: every key the reader may return; closed objects; nothing required.
-props = lib["CLAUDE_SCHEMA"]["properties"]
-check(set(props) >= {"intent", "destination", "origin", "trip_type", "adults", "children_count", "children_ages", "rooms",
-                     "radius", "airport_code", "hotel_area", "confirm"} | set(lib["DATE_KEYS"]),
-      "the schema has every key the reader returns")
-def closed(o):
-    if isinstance(o, dict):
-        if o.get("type") == "object" and o.get("additionalProperties") is not False:
-            return False
-        return all(closed(v) for v in o.values())
-    if isinstance(o, list):
-        return all(closed(v) for v in o)
-    return True
-check(closed(lib["CLAUDE_SCHEMA"]) and "required" not in json.dumps(lib["CLAUDE_SCHEMA"]),
-      "every object in the schema is closed (additionalProperties false); nothing is required")
+# No JSON-schema switch: the live eval found the reader's schema over the API's limit of
+# 24 optional fields, so every call was rejected and quietly answered by the rules.
+check("CLAUDE_SCHEMA" not in lib and "json_schema" not in code and "claude_structured" not in yaml.safe_dump(doc),
+      "no JSON-schema output and no switch for it")
 
 # ── The step ─────────────────────────────────────────────────────────────
 head, body_code = code.split("# ── The turn ", 1)
 wl = doc["workload"]
 check(wl.get("llm_provider") == "anthropic" and wl.get("anthropic_model") == "claude-haiku-5-5"
       and wl.get("anthropic_secret_name") == "shastara-eval" and wl.get("anthropic_workspace_id") == WS
-      and wl.get("claude_structured") is False and wl.get("claude_thinking") == "adaptive" and wl.get("llm_model") == "gemini-3.8-flash",
+      and wl.get("claude_thinking") == "disabled" and wl.get("llm_model") == "gemini-3.8-flash",
       "workload: Claude Haiku by default, the key's secret, the ranch workspace, Gemini kept for rollback")
 inp = steps["intake_turn"]["tool"]["input"]
 check(all(k in inp for k in ("llm_provider", "anthropic_model", "anthropic_secret_name", "anthropic_workspace_id",
-                             "claude_structured", "claude_thinking")), "the step receives every Claude setting")
+                             "claude_thinking")), "the step receives every Claude setting")
+check("default('disabled')" in inp["claude_thinking"] and "default('anthropic')" in inp["llm_provider"],
+      "with no workload setting the step still reads with Claude, thinking off")
 
 
 def step(net, text, **over):
@@ -204,7 +195,7 @@ def step(net, text, **over):
          "relation_docs": [], "llm_enabled": True, "llm_model": "gemini-3.8-flash", "vertex_project": "p",
          "vertex_region": "global", "today_override": TODAY.isoformat(), "firestore_project": "proj",
          "firestore_database": "(default)", "anthropic_model": "claude-haiku-5-5", "anthropic_secret_name": "shastara-eval",
-         "anthropic_workspace_id": WS, "claude_structured": "false", "claude_thinking": "adaptive"}
+         "anthropic_workspace_id": WS, "claude_thinking": "disabled"}
     g.update(over)
     exec(head, g)
     g["urllib"].request.urlopen = net
@@ -255,13 +246,15 @@ r = step(net, "A flight to Maui from SFO", llm_provider="anthropic")
 check(not r["llm"]["used"] and "TimeoutError" in r["llm"]["fallback_reason"] and r["intake_state"].get("destination_code") == "OGG",
       "Claude timing out: the rules and the island list answer (Maui -> OGG)")
 net = StepNet(claude=claude_ok(patch))
-r = step(net, "A flight to Munich", llm_provider="anthropic", claude_structured="true", claude_thinking="disabled")
-check(r["llm"]["used"] and "format" in net.bodies[0]["output_config"] and net.bodies[0].get("thinking") == {"type": "disabled"},
-      "claude_structured=\"true\" / claude_thinking=\"disabled\" (strings from the template) reach the request")
+r = step(net, "A flight to Munich", llm_provider="anthropic", claude_thinking="disabled")
+check(r["llm"]["used"] and net.bodies[0].get("thinking") == {"type": "disabled"},
+      "claude_thinking=\"disabled\" (a string from the template) reaches the request")
 net = StepNet(claude=claude_ok(patch))
-r = step(net, "A flight to Munich", llm_provider="anthropic", claude_structured="false", claude_thinking="adaptive")
-check("format" not in net.bodies[0]["output_config"] and "thinking" not in net.bodies[0],
-      "claude_structured=\"false\" sends no schema; adaptive thinking sends nothing")
+r = step(net, "A flight to Munich", llm_provider="anthropic", claude_thinking="adaptive")
+check("thinking" not in net.bodies[0], "claude_thinking=\"adaptive\" sends nothing")
+net = StepNet(claude=claude_ok(patch))
+r = step(net, "A flight to Munich", llm_provider="anthropic", claude_thinking="")
+check(net.bodies[0].get("thinking") == {"type": "disabled"}, "an empty claude_thinking means off")
 net = StepNet(claude=claude_ok(patch))
 r = step(net, "A flight to Munich", llm_provider="anthropic", anthropic_workspace_id="wrkspc_OTHER")
 check(r["llm"]["used"], "the workspace id comes from the workload")

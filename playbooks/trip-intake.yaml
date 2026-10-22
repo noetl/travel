@@ -108,9 +108,10 @@ workload:
   # The key is not scoped to a workspace: requests name the Mount Shasta Ranch
   # workspace (shared with the ranch concierge, which serves this infrastructure).
   anthropic_workspace_id: wrkspc_01Ac7pHmUHKP8xGne1VEaZuB
-  # Claude structured outputs (JSON schema) and thinking: set from the live eval.
-  claude_structured: false
-  claude_thinking: adaptive
+  # Thinking off: the live eval (2026-10-22) scored the same with it on, and answered
+  # faster (median 1.06 s vs 1.45 s). No JSON-schema output: free JSON scored 24/24,
+  # and the reader's schema is over the API's 24-optional-field limit (HTTP 400).
+  claude_thinking: disabled
   llm_model: gemini-3.8-flash
   vertex_project: shastaratech-noetl-prod
   vertex_region: global
@@ -538,8 +539,7 @@ workflow:
         anthropic_model: "{{ workload.anthropic_model | default('claude-haiku-5-5') }}"
         anthropic_secret_name: "{{ workload.anthropic_secret_name | default('shastara-eval') }}"
         anthropic_workspace_id: "{{ workload.anthropic_workspace_id | default('wrkspc_01Ac7pHmUHKP8xGne1VEaZuB') }}"
-        claude_structured: "{{ workload.claude_structured | default(false) }}"
-        claude_thinking: "{{ workload.claude_thinking | default('adaptive') }}"
+        claude_thinking: "{{ workload.claude_thinking | default('disabled') }}"
         today_override: "{{ workload.today | default('') }}"
         firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
         firestore_database: "{{ workload.firestore_database | default('(default)') }}"
@@ -2100,7 +2100,7 @@ workflow:
             '  airport_code: 3-letter code when they pick one of the offered airports\n'
             "Resolve relative dates (\"next Friday\", \"for 3 nights\") against `today`. A bare "
             "answer (\"2\", \"Paris\", a date) answers the fields listed in `awaiting`. "
-            "\"No kids\" is children_count 0. \"Me and my wife\" is adults 2. Output intent only when "
+            "\"No kids\" is children_count 0. \"Me and my wife\" is adults 2. \"A room\" is rooms 1. Output intent only when "
             "the message says what the traveller wants to book; a message that merely mentions flying "
             "or staying is not an intent."
         )
@@ -2292,34 +2292,6 @@ workflow:
             return _ANTHROPIC_KEY[cache_key]
 
 
-        def _schema_place_claude(kinds):
-            codes = {"type": "array", "items": {"type": "string"}}
-            return {"type": "object", "additionalProperties": False, "properties": {
-                "text": {"type": "string"}, "kind": {"type": "string", "enum": list(kinds)},
-                "lat": {"type": "number"}, "lon": {"type": "number"}, "airports": codes,
-                "islands": {"type": "array", "items": {"type": "object", "additionalProperties": False,
-                                                       "properties": {"name": {"type": "string"}, "airports": codes}}},
-                "matches": {"type": "array", "items": {"type": "object", "additionalProperties": False, "properties": {
-                    "label": {"type": "string"}, "airports": codes, "lat": {"type": "number"}, "lon": {"type": "number"}}}},
-                "corrected": {"type": "string"}, "exists": {"type": "boolean"}}}
-
-
-        # The reader's shape as a JSON schema, for Claude's structured outputs. Used only
-        # when workload.claude_structured is true: on Gemini the same idea made the model
-        # drop keys and invent others, so it is switched on only if the live eval says so.
-        CLAUDE_SCHEMA = {"type": "object", "additionalProperties": False, "properties": dict(
-            {"intent": {"type": "string", "enum": list(INTENTS)},
-             "destination": _schema_place_claude(PLACE_KINDS),
-             "origin": _schema_place_claude(("city", "airport", "island", "region")),
-             "trip_type": {"type": "string", "enum": ["one_way", "round_trip"]},
-             "adults": {"type": "integer"}, "children_count": {"type": "integer"},
-             "children_ages": {"type": "array", "items": {"type": "integer"}},
-             "rooms": {"type": "integer"}, "radius": {"type": "number"}, "airport_code": {"type": "string"},
-             "hotel_area": {"type": "object", "additionalProperties": False, "properties": {"text": {"type": "string"}}},
-             "confirm": {"type": "boolean"}},
-            **{k: {"type": "string"} for k in DATE_KEYS})}
-
-
         def _claude_json(body):
             """The JSON object in a Messages API response: the text blocks (thinking skipped),
             else the span from the first "{" to the last "}". Refusals and cut-off answers fail."""
@@ -2340,7 +2312,7 @@ workflow:
 
 
         def claude_read(text, state, awaiting, today, model, project, secret_name, workspace_id,
-                        structured=False, thinking="adaptive", sleep=time.sleep):
+                        thinking="disabled", sleep=time.sleep):
             """Read one message with Claude: up to CLAUDE_TIMEOUT_S, a timeout is not retried,
             a fast failure (HTTP 429/5xx, dropped connection) is retried once."""
             body = {"model": model, "max_tokens": CLAUDE_MAX_TOKENS, "system": LLM_SYSTEM_PROMPT,
@@ -2349,8 +2321,6 @@ workflow:
                         "state": {k: state.get(k) for k in STATE_KEYS if state.get(k) not in (None, [])},
                     }, default=str)}],
                     "output_config": {"effort": "low"}}
-            if structured:
-                body["output_config"]["format"] = {"type": "json_schema", "schema": CLAUDE_SCHEMA}
             if thinking == "disabled":
                 body["thinking"] = {"type": "disabled"}
             data = json.dumps(body).encode("utf-8")
@@ -3391,8 +3361,7 @@ workflow:
                             out = claude_read(t, s, awaiting, d, _claude_model, str(globals().get("firestore_project") or vertex_project),
                                               str(globals().get("anthropic_secret_name") or "shastara-eval"),
                                               str(globals().get("anthropic_workspace_id") or ""),
-                                              structured=_flag(globals().get("claude_structured")),
-                                              thinking=str(globals().get("claude_thinking") or "adaptive"))
+                                              thinking=str(globals().get("claude_thinking") or "disabled"))
                         llm["used"] = True
                         return _cache(out)
                     except Exception as exc:
