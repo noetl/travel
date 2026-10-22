@@ -44,9 +44,9 @@ metadata:
     the correction is at least 60% alike to what was typed; otherwise, or when
     the place does not exist, the traveller is asked to check the spelling.
 
-    MODEL. Each turn's model call waits at most 7 s, with one retry after a
-    short pause on a timeout or HTTP 429/5xx (about 15 s worst case); then
-    rule_read answers instead.
+    MODEL. Each turn's model call waits up to 20 s (prod answers take 3-18 s); a
+    timeout is not retried, a fast failure (HTTP 429/5xx, dropped connection)
+    is retried once after a short pause; then rule_read answers instead.
     What the model said about a place outside the table is cached in Firestore
     intake_place_facts/{place} for 30 days and reused (so a turn the model
     misses still knows it). To correct an entry: set `invalid: true` (the next
@@ -74,7 +74,7 @@ metadata:
     check-out after check-in; counts within the forms' own limits. Airport codes
     are only those FlightSearchForm can prefill (its airports.ts); a city with
     several airports is a question, never a pick.
-  version: "7"
+  version: "8"
   agent: true
   tags: [muno, intake, forms, event-sourced]
   terminal:
@@ -2094,18 +2094,24 @@ workflow:
                 return json.loads(resp.read().decode("utf-8"))["access_token"]
 
 
-        # The model gets LLM_TIMEOUT_S per try and one retry, after a short random
-        # pause, when the failure is worth retrying (a timeout, a dropped connection,
-        # HTTP 429 or 5xx); anything else fails at once. Worst case is about 15 s, after
-        # which the turn falls back to rule_read (with the place table and cached facts).
-        LLM_TIMEOUT_S = 7
+        # The model gets up to LLM_TIMEOUT_S to answer. Measured on prod (2026-10-22): answers
+        # take 3-18 s (6 of 13 over 8 s), so a shorter cap throws good answers away; a 7 s cap
+        # with a retry sent 6 of 11 turns to rule_read. A timeout is NOT retried (a slow model
+        # is rarely faster the second time); a fast failure (HTTP 429/5xx, a dropped
+        # connection) is retried once after a short random pause. Worst case about 21 s
+        # (v5 had one 25 s try), after which the turn falls back to rule_read (with the
+        # place table and cached facts).
+        LLM_TIMEOUT_S = 20
         LLM_ATTEMPTS = 2
 
 
         def _retryable(exc):
+            """A fast failure worth one more try; a timeout is not."""
             if isinstance(exc, urllib.error.HTTPError):
                 return exc.code == 429 or exc.code >= 500
-            return isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError))
+            if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
+                return False
+            return isinstance(exc, (ConnectionError, urllib.error.URLError))
 
 
         def llm_read(text, state, awaiting, today, model, project, region, sleep=time.sleep):
