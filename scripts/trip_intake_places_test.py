@@ -200,6 +200,17 @@ del PLACES["Atlantis"]
 r = last(["A flight to London"], rule_read)
 check(r["state"].get("destination_options") == ["LHR", "LGW", "STN"], "London still offers LHR, LGW and STN")
 
+# ── The model is asked for the primary airport (the Maui case) ──────────
+# The scripted PLACES above are what the prompt asks for; this pins the asking.
+# scripts/trip_intake_prompt_eval.py checks the live model against the same inputs.
+prompt = lib["LLM_SYSTEM_PROMPT"]
+check("Usually ONE: the primary airport" in prompt, "the prompt asks for the primary airport, usually one")
+check('"Big Island": ["KOA", "ITO"]' in prompt, "the prompt keeps the Big Island's two airports as the example of a real choice")
+check('"Maui": ["OGG"], not JHM or HNM' in prompt, "the prompt names Maui as OGG only, without its commuter airports")
+check("Leave out small regional, commuter or inter-island airports" in prompt, "the prompt leaves out commuter airports")
+check('"Napa": [], nearby airports are found separately' in prompt and "ON the island or IN the city itself" in prompt,
+      "the prompt keeps a place with no airport of its own at [] (the nearest are found by code, Napa)")
+
 # ── user_location (Part 2): accepted and kept ─────────────────────────────
 loc = {"city": "San Jose", "region": "CA", "country": "US", "lat": 37.3382, "lon": -121.8863}
 # Part 2 (scripts/trip_intake_departure_test.py) uses it only for a flight's departure.
