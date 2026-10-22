@@ -3,8 +3,9 @@
 facts are cached (adiona/frontend#55, after 2 of 5 prod
 turns timed out). Runs the intake step's own code offline, every HTTP call stubbed.
 
-  * llm_read: 7 s per try, one retry after a 0.5-1.5 s pause on a timeout, a dropped
-    connection, HTTP 429 or 5xx; other errors fail at once. No responseSchema: measured
+  * llm_read: up to 20 s; a timeout is not retried; a fast failure (a dropped
+    connection, HTTP 429 or 5xx) is retried once after a 0.5-1.5 s pause; other errors
+    fail at once. No responseSchema: measured
     live, it made the model drop the destination and invent keys.
   * use_place_cache: a fresh cached entry is used; an expired or invalid one is read
     again; a manual one always wins and is never overwritten; table places, hotels and
@@ -91,24 +92,29 @@ def read(*outcomes):
 
 # ── The bounded, retried model call ──────────────────────────────────────
 out, sleeps, err = read(vertex_ok({"intent": "flight"}))
-check(out == {"intent": "flight"} and sleeps == [] and calls[0][1] == 7, "one call, 7 s timeout")
+check(out == {"intent": "flight"} and sleeps == [] and calls[0][1] == 20, "one call, 20 s timeout (prod answers take 3-18 s)")
 body = calls[0][2]
 check("responseSchema" not in body["generationConfig"] and body["generationConfig"]["temperature"] == 0,
       "no responseSchema (measured live: it made the model drop the destination and invent keys)")
 out, sleeps, err = read(TimeoutError("timed out"), vertex_ok({"intent": "hotel"}))
-check(out == {"intent": "hotel"} and len(sleeps) == 1 and 0.5 <= sleeps[0] <= 1.5 and len(calls) == 2,
-      "a timeout is retried once, after a 0.5-1.5 s pause")
+check(isinstance(err, TimeoutError) and len(calls) == 1 and sleeps == [],
+      "a timeout is NOT retried (a slow model is rarely faster the second time)")
 out, sleeps, err = read(urllib.error.URLError("timed out"), vertex_ok({"intent": "hotel"}))
-check(out == {"intent": "hotel"} and len(calls) == 2, "a dropped connection is retried")
+check(err is not None and len(calls) == 1, "...nor a timeout wrapped as a URLError")
+out, sleeps, err = read(ConnectionResetError("reset"), vertex_ok({"intent": "hotel"}))
+check(out == {"intent": "hotel"} and len(calls) == 2 and len(sleeps) == 1 and 0.5 <= sleeps[0] <= 1.5,
+      "a dropped connection is retried once, after a 0.5-1.5 s pause")
+out, sleeps, err = read(urllib.error.URLError(ConnectionRefusedError("refused")), vertex_ok({"intent": "hotel"}))
+check(out == {"intent": "hotel"} and len(calls) == 2, "a refused connection is retried")
 out, sleeps, err = read(http_error(429), vertex_ok({"intent": "both"}))
 check(out == {"intent": "both"} and len(calls) == 2, "HTTP 429 is retried")
 out, sleeps, err = read(http_error(503), vertex_ok({"intent": "both"}))
 check(out == {"intent": "both"} and len(calls) == 2, "HTTP 5xx is retried")
-out, sleeps, err = read(TimeoutError("timed out"), TimeoutError("timed out"))
-check(isinstance(err, TimeoutError) and len(calls) == 2 and len(sleeps) == 1, "two timeouts: give up (the turn falls back)")
+out, sleeps, err = read(http_error(503), http_error(503))
+check(isinstance(err, urllib.error.HTTPError) and len(calls) == 2, "two fast failures: give up (the turn falls back)")
 out, sleeps, err = read(http_error(400), vertex_ok({"intent": "flight"}))
 check(isinstance(err, urllib.error.HTTPError) and len(calls) == 1 and sleeps == [], "HTTP 400 is not retried")
-check(lib["LLM_ATTEMPTS"] * lib["LLM_TIMEOUT_S"] + 1.5 <= 16, "worst case about 15 s")
+check(lib["LLM_TIMEOUT_S"] + 1.5 < 25, "worst case about 21 s: a timeout uses the one try (v5 had one 25 s try)")
 
 # ── The place-facts cache ────────────────────────────────────────────────
 use = lib["use_place_cache"]
