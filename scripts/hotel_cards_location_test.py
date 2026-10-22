@@ -55,7 +55,8 @@ check(arcs[0].get("step") == "search_hotels" and "location_ok" in arcs[0].get("w
 check(steps["resolve_dates"]["next"]["arcs"][0]["step"] == "check_location",
       "the location is checked before any HotelBeds call")
 
-nl = run("no_location", check_in="2026-11-03", check_out="2026-11-07")
+nl = run("no_location", check_in="2026-11-03", check_out="2026-11-07",
+         location=run("check_location", city="", latitude="", longitude=""))
 check(nl["hotels"] == [] and nl["count"] == 0, "no location: no hotels")
 check(nl["provider_error_code"] == "missing_location" and "No location received" in nl["provider_error"],
       "no location: says so, readably")
