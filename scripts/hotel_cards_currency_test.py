@@ -56,7 +56,8 @@ usd = r["hotels"][0]
 check(usd["pricePerNight"] == [{"currency": "USD", "price": 220.0}], "pricePerNight is [{currency, price}]")
 check(all(room["pricePerNight"] == [{"currency": "USD", "price": 220.0}] for room in usd["rooms"]) and usd["rooms"],
       "each room's pricePerNight has the same shape")
-check(usd["currency"] == "USD" and usd["price"] == "$220", "currency and the display price stay as they were")
+check(usd["currency"] == "USD" and "price" not in usd and all("price" not in room for room in usd["rooms"]),
+      "no display `price` on the card or its rooms (adiona/frontend#95): pricePerNight only")
 check(r["excluded_by_currency"] == {"CHF": 1, "NONE": 1} and r["currencies"] == ["USD"],
       "hotels left out for their currency are counted: %s" % r["excluded_by_currency"])
 check(r["provider_error"] is None, "no error when some hotels remain")
@@ -82,8 +83,8 @@ eur = r["hotels"][0] if r["hotels"] else {}
 check([c["id"] for c in r["hotels"]] == ["h1", "h2"] and r["excluded_by_currency"] == {"CHF": 1} and r["provider_error"] is None,
       "interim USD+EUR: EUR hotels are returned, others still left out")
 check(eur.get("pricePerNight") == [{"currency": "EUR", "price": 220.0}] and eur.get("currency") == "EUR"
-      and eur.get("price") == "\u20ac220" and all(rm["pricePerNight"] == [{"currency": "EUR", "price": 220.0}] for rm in eur.get("rooms") or [None]),
-      "an EUR hotel: pricePerNight [{EUR, price}] on the card and rooms, display price kept")
+      and "price" not in eur and all(rm["pricePerNight"] == [{"currency": "EUR", "price": 220.0}] for rm in eur.get("rooms") or [None]),
+      "an EUR hotel: pricePerNight [{EUR, price}] on the card and rooms, no display price")
 r = map_cards(SEARCH, currencies=[])
 check(r["currencies"] == ["USD"], "an empty list falls back to USD")
 err = {"isError": True, "summary": "Hotels are temporarily unavailable.", "data": {"error": "x", "code": "request", "hotels": []}}

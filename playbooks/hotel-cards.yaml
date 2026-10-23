@@ -10,10 +10,13 @@ metadata:
     (automation/agents/mcp/hotelbeds, tool `search_hotels`) and maps its
     availability summary onto the card contract the SPA renders:
 
-      id, name, stars, bedType, price, breakfastIncluded, image, images[],
+      id, name, stars, bedType, breakfastIncluded, image, images[],
       __renderDetailCard, location, rating, ratingLabel, pricePerNight,
       totalPrice, nights, amenities, description, category, rooms[],
       roomsTotal, priceBands[]
+
+    Prices come only as pricePerNight [{currency, price}] and totalPrice; there
+    is no display string (`price` was dropped, adiona/frontend#95).
 
     Credentials are by reference only: the provider reads the HotelBeds
     apikey/secret from GCP Secret Manager (`hotelbeds-hotels-test`) using the
@@ -82,7 +85,7 @@ metadata:
     that fails outright.  Diagnosing it needs a failing execution ID from the
     owner, which has not been supplied.  If search is still failing after this
     change, that report is still open and this playbook is not the reason.
-  version: "1.3"
+  version: "1.4"
   agent: false
   tags: [muno, hotels, hotelbeds, widgets, cards]
   capabilities: [mcp:hotelbeds]
@@ -1325,7 +1328,6 @@ workflow:
         import re
         from datetime import date
 
-        CURRENCY_SYMBOL = {"USD": "$", "EUR": "€", "GBP": "£"}
 
         # ── THE ONE PRODUCT-BLOCKED FUNCTION ──────────────────────────────
         # `ratingLabel` and `category` are product ranking/presentation
@@ -1369,13 +1371,6 @@ workflow:
                 return float(value)
             except (TypeError, ValueError):
                 return None
-
-        def _money(amount, currency):
-            if amount is None:
-                return ""
-            sym = CURRENCY_SYMBOL.get((currency or "").upper(), "")
-            whole = int(round(amount))
-            return f"{sym}{whole}" if sym else f"{whole} {currency or ''}".strip()
 
         def _nights(check_in, check_out):
             try:
@@ -1632,7 +1627,6 @@ workflow:
                     "roomCode": room_code,
                     "board": rate.get("boardName") or "",
                     "breakfastIncluded": _breakfast(rate.get("boardName")),
-                    "price": _money(per_night, currency),
                     # adiona/frontend#62 item 4: [{currency, price}], one entry per
                     # currency HotelBeds priced it in (today one).
                     "pricePerNight": _price_list(per_night, currency),
@@ -1851,10 +1845,8 @@ workflow:
                 "name": hotel.get("name") or "",
                 "stars": stars,
                 "bedType": hotel.get("roomName") or "",
-                "price": _money(per_night, currency),
                 # adiona/frontend#62 item 4: the currency of every amount on this
-                # card and its rooms, as HotelBeds stated it (ISO 4217). `price`
-                # shows a symbol only for USD/EUR/GBP, so read this, not the symbol.
+                # card and its rooms, as HotelBeds stated it (ISO 4217).
                 "currency": currency or None,
                 "breakfastIncluded": _breakfast(hotel.get("boardName")),
                 "image": image,
