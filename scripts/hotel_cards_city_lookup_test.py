@@ -98,8 +98,8 @@ exec(steps["no_location"]["tool"]["code"], g)
 check(g["result"]["provider_error_code"] == "location_not_found" and g["result"]["hotels"] == [],
       "no_location returns the lookup's own reason")
 src = open(PLAYBOOK).read()
-check("currencies" not in doc["workload"] and "hotelbeds_content" not in src and "firestore.googleapis" not in src,
-      "interim: no USD-only rule and no HotelBeds-content dependency")
+check("EUR" in (doc["workload"].get("currencies") or ["EUR"]) and "hotelbeds_content" not in src and "firestore.googleapis" not in src,
+      "interim: no USD-only rule (EUR still allowed while the account prices in EUR) and no HotelBeds-content dependency")
 
 if failures:
     sys.exit("%d failure(s)" % len(failures))

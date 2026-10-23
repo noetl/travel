@@ -82,7 +82,7 @@ metadata:
     that fails outright.  Diagnosing it needs a failing execution ID from the
     owner, which has not been supplied.  If search is still failing after this
     change, that report is still open and this playbook is not the reason.
-  version: "1.2"
+  version: "1.3"
   agent: false
   tags: [muno, hotels, hotelbeds, widgets, cards]
   capabilities: [mcp:hotelbeds]
@@ -136,7 +136,10 @@ workload:
   # HotelBeds priced in another currency is left out (no conversion), and the
   # result says how many were (excluded_by_currency). HotelBeds prices in the
   # account's currency, so this needs the account set to USD.
-  currencies: ["USD"]
+  # Interim (adiona/frontend#95, 2026-10-24): EUR is allowed too, because the
+  # HotelBeds TEST account still prices in EUR. The frontend gets the final
+  # pricePerNight [{currency, price}] shape now; drop "EUR" once the account is USD.
+  currencies: ["USD", "EUR"]
 
 workflow:
   - step: start
@@ -1316,7 +1319,7 @@ workflow:
         children: "{{ workload.children }}"
         max_rooms: "{{ workload.max_rooms | default(10) }}"
         price_bands: "{{ workload.price_bands | default(4) }}"
-        currencies: "{{ workload.currencies | default(['USD']) }}"
+        currencies: "{{ workload.currencies | default(['USD', 'EUR']) }}"
       code: |
         import json
         import re
@@ -1508,7 +1511,8 @@ workflow:
                 try:
                     value = json.loads(value)
                 except ValueError:
-                    value = [part for part in value.replace(",", " ").split() if part]
+                    # "USD,EUR", "USD EUR", or a list rendered Python-style: "['USD', 'EUR']".
+                    value = [part for part in re.split(r"[\s,\[\]'\"]+", value) if part]
             out = [str(c).strip().upper() for c in (value if isinstance(value, list) else []) if str(c).strip()]
             return out or ["USD"]
 
