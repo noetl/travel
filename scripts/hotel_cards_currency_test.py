@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""playbooks/hotel-cards.yaml: every card and room says its currency (adiona/frontend#62
-item 4). Runs map_cards' own embedded code offline (no HotelBeds).
+"""playbooks/hotel-cards.yaml: prices come only in the allowed currencies, as
+pricePerNight: [{currency, price}] (adiona/frontend#62 item 4). Runs map_cards' own
+embedded code offline (no HotelBeds).
 
-HotelBeds states one ISO 4217 currency per hotel. The card's `price` string shows a
-symbol only for USD, EUR and GBP ("$220"); any other currency became a bare
-"220 CHF", and the numbers (pricePerNight, totalPrice) carried no currency at all.
+HotelBeds prices every hotel in the account's currency (one per hotel). We return only
+the currencies in workload.currencies (default USD) and never convert: a hotel priced in
+another currency is left out, counted in excluded_by_currency, and when that leaves
+nothing the result says why instead of looking like "no hotels".
 """
 import sys
 
@@ -20,12 +22,14 @@ def check(cond, label):
         failures.append(label)
 
 
-steps = {s["step"]: s for s in yaml.safe_load(open(PLAYBOOK))["workflow"]}
+doc = yaml.safe_load(open(PLAYBOOK))
+steps = {s["step"]: s for s in doc["workflow"]}
 
 
-def map_cards(search_result):
+def map_cards(search_result, **kw):
     g = dict(search_result=search_result, check_in="2026-11-03", check_out="2026-11-07",
              adults=2, children=0, max_rooms=10, price_bands=4)
+    g.update(kw)
     exec(steps["map_cards"]["tool"]["code"], g)
     return g["result"]
 
@@ -40,17 +44,52 @@ def hotel(code, currency):
     return h
 
 
-r = map_cards({"data": {"hotels": [hotel(1, "USD"), hotel(2, "CHF"), hotel(3, None)],
-                        "meta": {"currency": "USD"}}})
-usd, chf, unknown = r["hotels"]
-check(usd["currency"] == "USD" and usd["price"] == "$220", "a USD hotel: currency USD, price $220")
-check(chf["currency"] == "CHF" and chf["price"] == "220 CHF", "a CHF hotel says CHF, not just a bare number")
-check(all(room["currency"] == card["currency"] for card in (usd, chf) for room in card["rooms"]) and chf["rooms"],
-      "every room carries its hotel's currency")
-check(unknown["currency"] is None and all(room["currency"] is None for room in unknown["rooms"]),
-      "a hotel HotelBeds gave no currency for says none (null), never a guessed USD")
-check(isinstance(usd["pricePerNight"], float) and usd["pricePerNight"] == 220.0,
-      "amounts are unchanged; only the currency is added")
+check(doc["workload"].get("currencies") == ["USD", "EUR"]
+      and "default(['USD', 'EUR'])" in steps["map_cards"]["tool"]["input"].get("currencies", ""),
+      "interim: USD and EUR are allowed (the TEST account prices in EUR), passed to map_cards")
+
+SEARCH = {"data": {"hotels": [hotel(1, "USD"), hotel(2, "CHF"), hotel(3, None), hotel(4, "usd")]}}
+r = map_cards(SEARCH)
+ids = [c["id"] for c in r["hotels"]]
+check(ids == ["h1", "h4"], "only USD-priced hotels are returned: %s" % ids)
+usd = r["hotels"][0]
+check(usd["pricePerNight"] == [{"currency": "USD", "price": 220.0}], "pricePerNight is [{currency, price}]")
+check(all(room["pricePerNight"] == [{"currency": "USD", "price": 220.0}] for room in usd["rooms"]) and usd["rooms"],
+      "each room's pricePerNight has the same shape")
+check(usd["currency"] == "USD" and usd["price"] == "$220", "currency and the display price stay as they were")
+check(r["excluded_by_currency"] == {"CHF": 1, "NONE": 1} and r["currencies"] == ["USD"],
+      "hotels left out for their currency are counted: %s" % r["excluded_by_currency"])
+check(r["provider_error"] is None, "no error when some hotels remain")
+
+r = map_cards({"data": {"hotels": [hotel(1, "EUR"), hotel(2, "EUR")]}})
+check(r["hotels"] == [] and r["provider_error"] == "Hotel prices are not available in USD for this search."
+      and r["provider_error_code"] == "currency_unavailable",
+      "every hotel in another currency: no hotels, and it says why")
+r = map_cards({"data": {"hotels": []}})
+check(r["provider_error"] is None and r["provider_error_code"] is None, "no hotels at all is not a currency error")
+
+r = map_cards(SEARCH, currencies=["USD", "CHF"])
+check([c["id"] for c in r["hotels"]] == ["h1", "h2", "h4"] and r["hotels"][1]["pricePerNight"] == [{"currency": "CHF", "price": 220.0}],
+      "other currencies can be allowed explicitly")
+r = map_cards(SEARCH, currencies='["usd"]')
+check([c["id"] for c in r["hotels"]] == ["h1", "h4"], "currencies may arrive as a JSON string")
+for rendered in ("['USD', 'EUR']", '["USD", "EUR"]', "USD, EUR", "USD EUR"):
+    r = map_cards(SEARCH, currencies=rendered)
+    check(r["currencies"] == ["USD", "EUR"], "currencies rendered as %r read as USD and EUR" % rendered)
+EUR = {"data": {"hotels": [hotel(1, "EUR"), hotel(2, "USD"), hotel(3, "CHF")]}}
+r = map_cards(EUR, currencies="['USD', 'EUR']")
+eur = r["hotels"][0] if r["hotels"] else {}
+check([c["id"] for c in r["hotels"]] == ["h1", "h2"] and r["excluded_by_currency"] == {"CHF": 1} and r["provider_error"] is None,
+      "interim USD+EUR: EUR hotels are returned, others still left out")
+check(eur.get("pricePerNight") == [{"currency": "EUR", "price": 220.0}] and eur.get("currency") == "EUR"
+      and eur.get("price") == "\u20ac220" and all(rm["pricePerNight"] == [{"currency": "EUR", "price": 220.0}] for rm in eur.get("rooms") or [None]),
+      "an EUR hotel: pricePerNight [{EUR, price}] on the card and rooms, display price kept")
+r = map_cards(SEARCH, currencies=[])
+check(r["currencies"] == ["USD"], "an empty list falls back to USD")
+err = {"isError": True, "summary": "Hotels are temporarily unavailable.", "data": {"error": "x", "code": "request", "hotels": []}}
+r = map_cards(err)
+check(r["provider_error"] == "Hotels are temporarily unavailable." and r["provider_error_code"] == "request",
+      "a provider error still wins over the currency message")
 
 if failures:
     sys.exit("%d failure(s)" % len(failures))
