@@ -38,6 +38,7 @@ STEP = "extract_turn"
 HARNESSES = [
     "scripts/planner_flow_advance_test.py",
     "scripts/planner_restate_routing_test.py",
+    "scripts/planner_claude_test.py",
 ]
 
 doc = yaml.safe_load(open(PLAYBOOK))
