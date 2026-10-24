@@ -42,6 +42,14 @@ def run(event_type, payload, loaded_slot_state):
             "default_origin": "SFO",
             "vertex_project": "shastaratech-noetl-prod",
             "vertex_region": "global",
+            # Added with the Claude reader (v1.8). The Gemini rollback keeps these
+            # routing harnesses on the path they were written against; with no
+            # network either provider falls back to the heuristic they assert.
+            "llm_provider": "vertex",
+            "anthropic_model": "claude-haiku-5-5",
+            "anthropic_secret_name": "shastara-eval",
+            "anthropic_workspace_id": "wrkspc_test",
+            "claude_thinking": "disabled",
             "slm_backend": "gemini",
             "slm_endpoint": "",
             "slm_model": "",

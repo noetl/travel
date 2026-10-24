@@ -29,7 +29,7 @@ metadata:
     intent, the planner carries the hotel's rate_key (captured from search) to
     mcp/hotelbeds.book_hotel (checkRate→bookings, TEST/SANDBOX only), and a
     hotel_confirmation widget renders the real booking reference.
-  version: "1.7"
+  version: "1.8"
   agent: true
   tags: [muno, itinerary, trip-planner, event-sourced, widgets]
   terminal:
@@ -60,6 +60,19 @@ workload:
   # is ample for slot extraction; switch to gemini-2.5-pro here if quality
   # needs it -- this is a workload key, so no code change.
   llm_extraction_model: gemini-3.8-flash
+  # anthropic = Claude through the Anthropic API (default, the trip-intake
+  # pattern, noetl/travel#178); vertex = Gemini on Vertex AI, kept as the
+  # rollback (llm_extraction_model / vertex_*).
+  llm_provider: anthropic
+  anthropic_model: claude-haiku-5-5
+  # GCP Secret Manager secret (in vertex_project) holding the Anthropic API key,
+  # read in the step with the worker's Workload Identity; never logged.
+  anthropic_secret_name: shastara-eval
+  # The key is not scoped to a workspace: requests name the Mount Shasta Ranch
+  # workspace, shared with trip-intake and the ranch concierge.
+  anthropic_workspace_id: wrkspc_01Ac7pHmUHKP8xGne1VEaZuB
+  # Thinking off: extraction is a one-shot read (same choice as trip-intake v9).
+  claude_thinking: disabled
   vertex_project: shastaratech-noetl-prod
   vertex_region: global
   # Kill switch for the LLM extraction added in v68 (noetl/ai-meta#268).
@@ -554,10 +567,18 @@ workflow:
         default_origin: "{{ workload.default_origin | default('SFO') }}"
         vertex_project: "{{ workload.vertex_project | default('shastaratech-noetl-prod') }}"
         vertex_region: "{{ workload.vertex_region | default('global') }}"
+        llm_provider: "{{ workload.llm_provider | default('anthropic') }}"
+        anthropic_model: "{{ workload.anthropic_model | default('claude-haiku-5-5') }}"
+        anthropic_secret_name: "{{ workload.anthropic_secret_name | default('shastara-eval') }}"
+        anthropic_workspace_id: "{{ workload.anthropic_workspace_id | default('wrkspc_01Ac7pHmUHKP8xGne1VEaZuB') }}"
+        claude_thinking: "{{ workload.claude_thinking | default('disabled') }}"
       code: |
+        import base64
         import copy
         import json
+        import random
         import re
+        import time
         import uuid
         from datetime import date, datetime, timezone, timedelta
         import urllib.error
@@ -1270,6 +1291,11 @@ workflow:
             "for one of those -- e.g. \"trip to Lisbon\".\n"
             "`party` is an OBJECT: {\"adults\": 2, \"children\": []}. Dates are "
             "ISO yyyy-mm-dd strings.\n"
+            "Every date goes in slot_updates, not only in tool arguments: "
+            "check_in_date is the start (the outbound flight date or hotel "
+            "check-in), check_out_date the end (the return flight or check-out); "
+            "a one-way trip has no check_out_date. Resolve \"next Friday\" "
+            "against `today`.\n"
             "ALWAYS fill `region.city_code` with the 3-letter IATA city code "
             "(Lisbon -> LIS, Paris -> PAR), and set `flight_origin` / "
             "`flight_destination` to IATA codes too (San Francisco -> SFO). "
@@ -1466,6 +1492,104 @@ workflow:
             text_out = "".join(p.get("text", "") for p in parts)
             return json.loads(text_out)
 
+        # ── Claude (default since v1.8) ─────────────────────────────────
+        # The trip-intake v9 client (noetl/travel#178): claude-haiku-5-5 over
+        # the Anthropic API, the key read from Secret Manager with the pod's
+        # Workload Identity, effort low, thinking off, free JSON (no output
+        # schema: the trip-intake eval found schemas over the API's optional-
+        # field limit rejected outright). Up to CLAUDE_TIMEOUT_S; a timeout is
+        # NOT retried (a slow model stays slow), HTTP 429/5xx and dropped
+        # connections are retried once. Any failure leaves the heuristic.
+        ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+        ANTHROPIC_VERSION = "2023-06-01"
+        CLAUDE_TIMEOUT_S = 8
+        CLAUDE_MAX_TOKENS = 1024
+        LLM_ATTEMPTS = 2
+        _ANTHROPIC_KEY = {}
+
+        def _anthropic_key(project, secret_name):
+            """The API key from Secret Manager (raw, or JSON {"api_key": ...}), once per process."""
+            cache_key = "%s/%s" % (project, secret_name)
+            if cache_key not in _ANTHROPIC_KEY:
+                name = "projects/%s/secrets/%s/versions/latest:access" % (project, secret_name)
+                req = urllib.request.Request(
+                    "https://secretmanager.googleapis.com/v1/%s" % name,
+                    headers={"Authorization": "Bearer %s" % _vertex_token()})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8")).get("payload", {}).get("data") or ""
+                raw = base64.b64decode(data).decode("utf-8").strip()
+                try:
+                    parsed = json.loads(raw)
+                    raw = str(parsed.get("api_key") or parsed.get("key") or "") if isinstance(parsed, dict) else raw
+                except ValueError:
+                    pass
+                if not raw:
+                    raise ValueError("secret %s holds no API key" % secret_name)
+                _ANTHROPIC_KEY[cache_key] = raw
+            return _ANTHROPIC_KEY[cache_key]
+
+        def _retryable(exc):
+            """A fast failure worth one more try; a timeout is not."""
+            if isinstance(exc, urllib.error.HTTPError):
+                return exc.code == 429 or exc.code >= 500
+            if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
+                return False
+            return isinstance(exc, (ConnectionError, urllib.error.URLError))
+
+        def _claude_json(body):
+            """The JSON object in a Messages API response: the text blocks, else the
+            span from the first "{" to the last "}". Refusals and cut-off answers fail."""
+            stop = body.get("stop_reason")
+            if stop in ("refusal", "max_tokens"):
+                raise ValueError("claude stopped: %s" % stop)
+            text_out = "".join(b.get("text", "") for b in body.get("content") or []
+                               if isinstance(b, dict) and b.get("type") == "text")
+            try:
+                out = json.loads(text_out)
+            except ValueError:
+                a, z = text_out.find("{"), text_out.rfind("}")
+                if a < 0 or z <= a:
+                    raise ValueError("claude returned no JSON")
+                out = json.loads(text_out[a:z + 1])
+            if not isinstance(out, dict):
+                raise ValueError("claude returned %s, not an object" % type(out).__name__)
+            return out
+
+        def _claude_extract(model, user_text, current_slots, ev_type, project,
+                            secret_name, workspace_id, thinking="disabled",
+                            sleep=time.sleep):
+            """The same prompt and turn as the Gemini path, read by Claude."""
+            req_body = {
+                "model": model,
+                "max_tokens": CLAUDE_MAX_TOKENS,
+                "system": LLM_SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": json.dumps({
+                    "event_type": ev_type,
+                    "user_message": user_text,
+                    "slot_state": current_slots,
+                    "today": date.today().isoformat(),
+                }, default=str)}],
+                "output_config": {"effort": "low"},
+            }
+            if str(thinking or "disabled").strip().lower() != "adaptive":
+                req_body["thinking"] = {"type": "disabled"}
+            data = json.dumps(req_body).encode("utf-8")
+            headers = {"x-api-key": _anthropic_key(project, secret_name),
+                       "anthropic-version": ANTHROPIC_VERSION,
+                       "anthropic-workspace-id": workspace_id,
+                       "content-type": "application/json"}
+            for attempt in range(LLM_ATTEMPTS):
+                try:
+                    req = urllib.request.Request(ANTHROPIC_URL, data=data, method="POST", headers=headers)
+                    with urllib.request.urlopen(req, timeout=CLAUDE_TIMEOUT_S) as resp:
+                        payload = json.loads(resp.read().decode("utf-8"))
+                    break
+                except Exception as exc:
+                    if attempt + 1 >= LLM_ATTEMPTS or not _retryable(exc):
+                        raise
+                    sleep(0.5 + random.random())
+            return _claude_json(payload)
+
         llm_used = False
         llm_error = ""
         # `llm_extraction_enabled` is an execution-level kill switch: pass it
@@ -1480,16 +1604,31 @@ workflow:
         # earns its place (resolving "Lisbon", which the gazetteer cannot).
         _structured_event = event_type in ("user_widget_submit",
                                            "user_widget_cta_click")
+        _llm_provider = str(llm_provider or "anthropic").strip().lower()
+        _llm_model = (str(llm_extraction_model or "gemini-2.0-flash") if _llm_provider == "vertex"
+                      else str(anthropic_model or "claude-haiku-5-5"))
         if _llm_on and not _structured_event:
             try:
-                _parsed = _llm_extract(
-                    llm_extraction_model or "gemini-2.0-flash",
-                    text,
-                    slot_state,
-                    event_type,
-                    vertex_project or "shastaratech-noetl-prod",
-                    vertex_region or "global",
-                )
+                if _llm_provider == "vertex":
+                    _parsed = _llm_extract(
+                        _llm_model,
+                        text,
+                        slot_state,
+                        event_type,
+                        vertex_project or "shastaratech-noetl-prod",
+                        vertex_region or "global",
+                    )
+                else:
+                    _parsed = _claude_extract(
+                        _llm_model,
+                        text,
+                        slot_state,
+                        event_type,
+                        vertex_project or "shastaratech-noetl-prod",
+                        str(anthropic_secret_name or "shastara-eval"),
+                        str(anthropic_workspace_id or ""),
+                        thinking=str(claude_thinking or "disabled"),
+                    )
                 _u, _t, _i = _llm_validate(_parsed)
                 # MERGE, never replace.  The heuristic has already parsed the
                 # deterministic parts of the turn -- in particular a widget
@@ -2172,8 +2311,8 @@ workflow:
         first_tool = tool_requests[0] if tool_requests else {}
         call_id = f"call_{uuid.uuid4().hex[:12]}"
         llm_contract = {
-            "provider": ai_provider,
-            "model": llm_extraction_model,
+            "provider": "vertex-ai" if _llm_provider == "vertex" else "anthropic",
+            "model": _llm_model,
             "temperature": 0,
             "response_format": "json_object",
             # DYNAMIC since v68: True only when the LLM call did not drive
