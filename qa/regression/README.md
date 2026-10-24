@@ -38,7 +38,7 @@ noetl exec qa/regression/cases/frontend-health.yaml --runtime local \
 
 | Case | Checks | Needs |
 |---|---|---|
-| [`profile-merge`](cases/profile-merge.yaml) | Saving profile section B must not wipe section A, and a read-back returns both | `gateway_url` for the live tier |
+| [`profile-merge`](cases/profile-merge.yaml) | Saving profile section B must not wipe section A, and a read-only read-back returns both (drives `muno/playbooks/profile` through the gateway, document `users/{uid}`) | `gateway_url` + `QA_GATEWAY_TOKEN` for the live tier |
 | [`frontend-health`](cases/frontend-health.yaml) | `team4.mestumre.dev` resolves, answers 200, serves a non-empty HTML body within budget | nothing |
 | [`hotel-cards-smoke`](cases/hotel-cards-smoke.yaml) | hotel-cards parses, keeps its catalog path, reaches a terminal step, still declares its widget type | `server_endpoint` for the execution tier |
 | [`dispatch-health`](cases/dispatch-health.yaml) | A trivial playbook still dispatches and completes in normal time — the tier-stall class | nothing |
