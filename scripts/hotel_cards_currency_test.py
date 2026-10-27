@@ -44,9 +44,9 @@ def hotel(code, currency):
     return h
 
 
-check(doc["workload"].get("currencies") == ["USD"]
-      and "default(['USD'])" in steps["map_cards"]["tool"]["input"].get("currencies", ""),
-      "USD is the default and only currency, passed to map_cards")
+check(doc["workload"].get("currencies") == ["USD", "EUR"]
+      and "default(['USD', 'EUR'])" in steps["map_cards"]["tool"]["input"].get("currencies", ""),
+      "interim: USD and EUR are allowed (the TEST account prices in EUR), passed to map_cards")
 
 SEARCH = {"data": {"hotels": [hotel(1, "USD"), hotel(2, "CHF"), hotel(3, None), hotel(4, "usd")]}}
 r = map_cards(SEARCH)
@@ -73,6 +73,17 @@ check([c["id"] for c in r["hotels"]] == ["h1", "h2", "h4"] and r["hotels"][1]["p
       "other currencies can be allowed explicitly")
 r = map_cards(SEARCH, currencies='["usd"]')
 check([c["id"] for c in r["hotels"]] == ["h1", "h4"], "currencies may arrive as a JSON string")
+for rendered in ("['USD', 'EUR']", '["USD", "EUR"]', "USD, EUR", "USD EUR"):
+    r = map_cards(SEARCH, currencies=rendered)
+    check(r["currencies"] == ["USD", "EUR"], "currencies rendered as %r read as USD and EUR" % rendered)
+EUR = {"data": {"hotels": [hotel(1, "EUR"), hotel(2, "USD"), hotel(3, "CHF")]}}
+r = map_cards(EUR, currencies="['USD', 'EUR']")
+eur = r["hotels"][0] if r["hotels"] else {}
+check([c["id"] for c in r["hotels"]] == ["h1", "h2"] and r["excluded_by_currency"] == {"CHF": 1} and r["provider_error"] is None,
+      "interim USD+EUR: EUR hotels are returned, others still left out")
+check(eur.get("pricePerNight") == [{"currency": "EUR", "price": 220.0}] and eur.get("currency") == "EUR"
+      and eur.get("price") == "\u20ac220" and all(rm["pricePerNight"] == [{"currency": "EUR", "price": 220.0}] for rm in eur.get("rooms") or [None]),
+      "an EUR hotel: pricePerNight [{EUR, price}] on the card and rooms, display price kept")
 r = map_cards(SEARCH, currencies=[])
 check(r["currencies"] == ["USD"], "an empty list falls back to USD")
 err = {"isError": True, "summary": "Hotels are temporarily unavailable.", "data": {"error": "x", "code": "request", "hotels": []}}
