@@ -12,6 +12,7 @@ Content API call. Runs the playbooks' own embedded code offline, with every HTTP
 """
 import base64
 import io
+import datetime
 import json
 import sys
 import urllib.error
@@ -295,8 +296,13 @@ def search(source="cache", firestore=None):
         else {"missing": d} for d in b["documents"]] + [
         {"found": {"name": "projects/proj/databases/(default)/documents/hotelbeds_content/777",
                    "fields": {"json": {"stringValue": json.dumps(dict(CACHED, code="777"))}}}}])
+    # The search step refuses a check-in before date.today(), so a fixed date turns
+    # this test into a time bomb once it passes. Keep the stay in the future.
+    stay_in = datetime.date.today() + datetime.timedelta(days=30)
+    stay_out = stay_in + datetime.timedelta(days=4)
     g = dict(method="tools/call", tool="search_hotels", book_tolerance=15, max_hotels=10,
-             arguments={"latitude": 48.85, "longitude": 2.35, "check_in": "2026-11-03", "check_out": "2026-11-07"},
+             arguments={"latitude": 48.85, "longitude": 2.35,
+                        "check_in": stay_in.isoformat(), "check_out": stay_out.isoformat()},
              hotelbeds_env="test", hotelbeds_api_base="https://api.test.hotelbeds.com", google_project="proj",
              hotelbeds_secret_name="hotelbeds-hotels-test", hotel_content_source=source, firestore_database="(default)")
     exec(search_step["code"], g)
