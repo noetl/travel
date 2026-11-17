@@ -22,10 +22,14 @@ workload:
   # A synthetic id, never a real person. The document it writes is disposable by construction.
   test_user_id: qa-regression-user-0001
 
-  # Live mode needs a gateway that will accept a profile write for the test user. With it absent
-  # the case reports `blocked`, never `pass`: a check that could not run has not passed.
+  # Live mode drives the SAME path the SPA does: gateway `executePlaybook` -> this playbook ->
+  # Firestore `users/{uid}` (the profile IS that document; there is no `/profile` subdocument).
+  # It needs the gateway URL here and a session token in QA_GATEWAY_TOKEN. With either absent the
+  # case reports `blocked`, never `pass`: a check that could not run has not passed.
   gateway_url: ""
-  profile_path_template: "users/{user_id}/profile"
+  profile_playbook: muno/playbooks/profile
+  # Seconds to wait for each of the three executions to reach a terminal status.
+  execution_timeout_s: 180
 
   # The two sections the regression is about. B must not erase A.
   section_a_key: home_airport
@@ -92,10 +96,8 @@ workflow:
 
           qa_report.require_debug()
 
-          def merged_ok(document, a_key, a_value, b_key, b_value):
-              """The detector under test: both sections present with their own values."""
-              data = (document or {}).get("data") or {}
-              return data.get(a_key) == a_value and data.get(b_key) == b_value
+          # The SAME detector the live tier asserts with, so these controls test what runs live.
+          from profile_live import merged_ok
 
           A, AV, B, BV = "home_airport", "LIS", "seat_preference", "aisle"
 
@@ -105,7 +107,7 @@ workflow:
           )
 
           # Positive control: a correctly merged document must satisfy the detector.
-          good = {"data": {A: AV, B: BV}}
+          good = {A: AV, B: BV}
           case.assert_true(
               "detector_accepts_a_correct_merge",
               merged_ok(good, A, AV, B, BV),
@@ -113,7 +115,7 @@ workflow:
           )
 
           # Negative control: section B having wiped section A must be REJECTED.
-          wiped = {"data": {B: BV}}
+          wiped = {B: BV}
           case.assert_true(
               "detector_rejects_a_wipe",
               not merged_ok(wiped, A, AV, B, BV),
@@ -146,7 +148,7 @@ workflow:
           when: '{{ workload.gateway_url == "" }}'
 
   - step: run_live_profile_merge
-    desc: Act and assert -- write section A, write section B, read back, require both
+    desc: Act and assert -- write section A, write section B, read back read-only, require both
     tool:
       kind: shell
       cmds:
@@ -157,22 +159,21 @@ workflow:
 
           GATEWAY_URL="{{ workload.gateway_url }}" \
           TEST_USER_ID="{{ workload.test_user_id }}" \
-          PROFILE_PATH_TEMPLATE="{{ workload.profile_path_template }}" \
+          PROFILE_PLAYBOOK="{{ workload.profile_playbook }}" \
+          EXECUTION_TIMEOUT_S="{{ workload.execution_timeout_s }}" \
           SECTION_A_KEY="{{ workload.section_a_key }}" \
           SECTION_A_VALUE="{{ workload.section_a_value }}" \
           SECTION_B_KEY="{{ workload.section_b_key }}" \
           SECTION_B_VALUE="{{ workload.section_b_value }}" \
           env -u PYTHONOPTIMIZE python3 - "$REPO" "$WORKSPACE" <<'PY'
-          import json
           import os
           import sys
-          import urllib.error
-          import urllib.request
           from pathlib import Path
 
           repo, workspace = Path(sys.argv[1]), Path(sys.argv[2])
           sys.path.insert(0, str(repo / "qa" / "regression" / "lib"))
           import qa_report
+          import profile_live
 
           qa_report.require_debug()
 
@@ -180,61 +181,31 @@ workflow:
               "profile_merge_live",
               "Saving profile section B must not wipe section A",
           )
+          out = workspace / "results" / "profile_merge_live.json"
 
-          gateway = os.environ.get("GATEWAY_URL", "").rstrip("/")
-          user_id = os.environ["TEST_USER_ID"]
-          path = os.environ["PROFILE_PATH_TEMPLATE"].replace("{user_id}", user_id)
-          a_key, a_value = os.environ["SECTION_A_KEY"], os.environ["SECTION_A_VALUE"]
-          b_key, b_value = os.environ["SECTION_B_KEY"], os.environ["SECTION_B_VALUE"]
-          token = os.environ.get("QA_GATEWAY_TOKEN", "").strip()
-
-          def call(action, payload):
-              body = json.dumps({"action": action, "path": path, "payload": payload}).encode()
-              headers = {"Content-Type": "application/json"}
-              if token:
-                  headers["Authorization"] = f"Bearer {token}"
-              request = urllib.request.Request(
-                  f"{gateway}/api/profile", data=body, headers=headers, method="POST"
-              )
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  return json.loads(response.read().decode("utf-8") or "{}")
+          gateway = os.environ.get("GATEWAY_URL", "").strip()
+          # /graphql requires a session; an anonymous attempt would 401 and read as a failure of
+          # the merge rather than of the setup.
+          token = qa_report.env_or_block(case, "QA_GATEWAY_TOKEN")
+          if case.blocked_reason:
+              sys.exit(case.finish(out))
 
           try:
-              # Arrange + act: two independent section writes, in order.
-              call("save_section", {a_key: a_value})
-              call("save_section", {b_key: b_value})
-              read_back = call("read_profile", {})
-          except urllib.error.HTTPError as exc:
-              detail = exc.read().decode("utf-8", "replace")[:300]
-              case.block(f"gateway rejected the QA write: HTTP {exc.code}: {detail}")
-              sys.exit(case.finish(workspace / "results" / "profile_merge_live.json"))
+              profile_live.run_merge_case(
+                  case,
+                  profile_live.http_transport(gateway, token),
+                  os.environ["PROFILE_PLAYBOOK"],
+                  os.environ["TEST_USER_ID"],
+                  os.environ["SECTION_A_KEY"], os.environ["SECTION_A_VALUE"],
+                  os.environ["SECTION_B_KEY"], os.environ["SECTION_B_VALUE"],
+                  timeout_s=float(os.environ.get("EXECUTION_TIMEOUT_S") or 180),
+              )
+          except profile_live.GatewayError as exc:
+              case.block(f"gateway call failed: {exc}")
           except Exception as exc:  # noqa: BLE001 - any transport failure blocks, never passes
               case.block(f"gateway unreachable: {type(exc).__name__}: {exc}")
-              sys.exit(case.finish(workspace / "results" / "profile_merge_live.json"))
-
-          data = (read_back or {}).get("data") or {}
-
-          # An empty read-back is the false green this case exists to prevent: writes "succeeded",
-          # nothing came back, and a naive assertion sees no exception and reports green.
-          case.assert_non_empty(
-              "read_back_returned_a_document", data,
-              "a read-back that returned nothing cannot evidence a merge",
-          )
-          case.assert_equal(
-              "section_b_was_saved", data.get(b_key), b_value,
-              "the write under test must itself have landed",
-          )
-          case.assert_equal(
-              "section_a_survived_the_section_b_write", data.get(a_key), a_value,
-              "THE REGRESSION: writing section B must merge, not replace the document",
-          )
-
-          case.add_evidence(
-              profile_path=path, gateway=gateway,
-              read_back_keys=sorted(data.keys()),
-              authenticated=bool(token),
-          )
-          sys.exit(case.finish(workspace / "results" / "profile_merge_live.json"))
+          case.add_evidence(gateway=gateway)
+          sys.exit(case.finish(out))
           PY
     next:
       arcs:
