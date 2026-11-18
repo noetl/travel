@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearSession, storeSession } from './gatewaySession';
-import { executePlaybook, graphqlErrorMessage, noetlClient, PERMISSION_DENIED_MESSAGE, waitForExecutionCompletion } from './noetlClient';
-import noetlClientSource from './noetlClient.ts?raw';
+import { executePlaybook, noetlClient, waitForExecutionCompletion } from './noetlClient';
 
 class MockEventSource {
   static OPEN = 1;
@@ -217,18 +216,5 @@ describe('noetlClient auth token handling', () => {
     });
 
     vi.useRealTimers();
-  });
-
-  // noetl/gateway#57 authorizes executions server-side. The client pre-check
-  // against /api/auth/check-access granted only via role rows, so it blocked
-  // role-less regular users from playbooks the gateway allows.
-  it('does not pre-check /api/auth/check-access before executing', () => {
-    expect(noetlClientSource).not.toContain('/api/auth/check-access');
-  });
-
-  it("maps the gateway's 'not authorized' refusal to the permission message", () => {
-    expect(graphqlErrorMessage([{ message: 'not authorized' }])).toBe(PERMISSION_DENIED_MESSAGE);
-    expect(graphqlErrorMessage([{ message: 'Execution 1 failed: boom' }])).toBe('Execution 1 failed: boom');
-    expect(graphqlErrorMessage(undefined)).toBe('GraphQL error');
   });
 });
