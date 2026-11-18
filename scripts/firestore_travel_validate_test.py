@@ -88,8 +88,12 @@ check("homeCity without coordinates warns that suggestions never run",
 
 print("client rules")
 REPO_RULES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "firestore.rules")
-check("the repo's demo firestore.rules is detected as world-readable users/",
-      v.rules_allow_public_user_read(open(REPO_RULES).read()))
+# The repo's firestore.rules denies all direct client access since 9a43bd0, so the
+# detector must NOT flag it. A world-readable rule is still exercised synthetically.
+check("the repo's firestore.rules (deny-all) is not flagged",
+      not v.rules_allow_public_user_read(open(REPO_RULES).read()))
+check("a world-readable users/ rule is flagged", v.rules_allow_public_user_read(
+    "match /users/{uid}/{document=**} {\n allow read: if true;\n}\n"))
 check("an owner-only users/ rule is not flagged", not v.rules_allow_public_user_read(
     "match /users/{uid}/{document=**} {\n allow read: if request.auth.uid == uid;\n}\n"
     "match /chat_threads/{t} { allow read: if true; }"))
