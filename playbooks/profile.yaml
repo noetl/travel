@@ -46,12 +46,20 @@ metadata:
     rejected, and it hides a merge that did not apply. The extra `get_doc` is
     one round trip against a store the write already warmed.
 
-    ⚠ SUGGESTIONS ARE BEST-EFFORT AND NEVER FAIL THE SAVE. A profile save
-    that succeeds must report success even if Places is down or the profile
-    carries no coordinates. `suggest_pois` is guarded on `has_coords` and its
-    failure degrades `suggestions` to `[]` with a `suggestions_error` note —
-    it does not fail the run. The save is the contract; the suggestions are
-    the garnish.
+    ⚠ SUGGESTIONS ARE BEST-EFFORT, BUT ONLY PARTLY GUARDED TODAY (noetl/travel#185).
+    `suggest_pois` runs only when there are coordinates (`has_coords`). A Places
+    API error (HTTP 4xx/5xx, a token or secret failure) is caught inside the
+    google-places child, comes back as a normal result with `status: error`,
+    and `build_response` turns it into `suggestions: []` plus a
+    `suggestions_error`. The save is still reported.
+    A child FAILURE is different: a timeout over this step's `timeout`, a
+    FAILED or CANCELLED child, or no result event. That fails `suggest_pois`,
+    and with it the whole run, so `build_response` never runs. On a save the
+    write has already happened, but the caller gets a failed run. On a read
+    with stored coordinates, the caller gets no profile.
+    A `spec.policy` rule on this single tool would not help: only a tool
+    LIST evaluates policy rules (scripts/single_tool_policy_rule_test.py).
+    The fix is a one-item list, and it waits on a platform fix (#185).
 
     ⚠ DEVIATION FROM THE INLINE PATTERN, DELIBERATE. The itinerary planner
     INLINES its Firestore and Places calls because a `kind: playbook` hop
@@ -397,15 +405,8 @@ workflow:
           type: "{{ plan_suggestions.included_type | default('') }}"
           radius: "{{ workload.poi_radius_m }}"
           maxResultCount: "{{ workload.poi_limit }}"
-      spec:
-        policy:
-          rules:
-            # Suggestions are garnish. A Places failure must not fail a save
-            # that already succeeded — continue and let build_response report
-            # the empty list with a reason.
-            - when: "{{ output.status == 'error' }}"
-              then:
-                do: continue
+      # No `spec.policy` here: on a single tool it is never evaluated (the server
+      # even renders its `when` to false at dispatch). See the header and #185.
     next:
       spec: { mode: exclusive }
       arcs:
