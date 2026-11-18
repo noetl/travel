@@ -46,20 +46,17 @@ metadata:
     rejected, and it hides a merge that did not apply. The extra `get_doc` is
     one round trip against a store the write already warmed.
 
-    ⚠ SUGGESTIONS ARE BEST-EFFORT, BUT ONLY PARTLY GUARDED TODAY (noetl/travel#185).
+    ⚠ SUGGESTIONS ARE BEST-EFFORT AND NEVER FAIL THE RUN (noetl/travel#185).
     `suggest_pois` runs only when there are coordinates (`has_coords`). A Places
     API error (HTTP 4xx/5xx, a token or secret failure) is caught inside the
     google-places child, comes back as a normal result with `status: error`,
     and `build_response` turns it into `suggestions: []` plus a
     `suggestions_error`. The save is still reported.
-    A child FAILURE is different: a timeout over this step's `timeout`, a
-    FAILED or CANCELLED child, or no result event. That fails `suggest_pois`,
-    and with it the whole run, so `build_response` never runs. On a save the
-    write has already happened, but the caller gets a failed run. On a read
-    with stored coordinates, the caller gets no profile.
-    A `spec.policy` rule on this single tool would not help: only a tool
-    LIST evaluates policy rules (scripts/single_tool_policy_rule_test.py).
-    The fix is a one-item list, and it waits on a platform fix (#185).
+    A child FAILURE (a timeout over the step's `timeout`, a FAILED or
+    CANCELLED child, or no result event) is absorbed by the `do: continue` rule
+    on `suggest_pois`. That rule works only because the tool is a one-item LIST:
+    on a single tool it is never evaluated (scripts/single_tool_policy_rule_test.py).
+    `build_response` then reports `suggestions: []` with a `suggestions_error`.
 
     ⚠ DEVIATION FROM THE INLINE PATTERN, DELIBERATE. The itinerary planner
     INLINES its Firestore and Places calls because a `kind: playbook` hop
@@ -386,27 +383,45 @@ workflow:
 
   - step: suggest_pois
     desc: Points of interest near the profile's home coordinates
+    # ⚠ A ONE-ITEM LIST, deliberately (noetl/travel#185). Only a tool list
+    # evaluates `spec.policy` rules; on a single tool they are never read, and a
+    # failed Places child would fail the whole run AFTER the save. In a list the
+    # child's failure (timeout, FAILED/CANCELLED, no result) reaches the rule as
+    # `output.status == 'error'` and `do: continue` completes the step, so
+    # build_response still returns the stored profile with a `suggestions_error`.
+    # Requires noetl-tools >= the release with noetl/tools#121: before it, a
+    # playbook sub-task parked under NOETL_PLAYBOOK_AWAIT_PARK and the step got a
+    # `parked` placeholder instead of the child's result.
+    # The step result is `{places: <child payload>}` (labelled), so readers use
+    # `suggest_pois.places`. On an absorbed failure `places` is null.
     tool:
-      kind: playbook
-      path: automation/agents/mcp/google-places
-      return_result: true
-      result_step: google_places_dispatch
-      timeout: 60
-      payload:
-        method: tools/call
-        tool: nearby_search
-        arguments:
-          lat: "{{ plan_suggestions.lat }}"
-          lng: "{{ plan_suggestions.lng }}"
-          # First interest becomes the Places `includedType`; the rest are
-          # applied as a post-filter in build_response, because Places takes
-          # one included type per call and a second round trip per interest
-          # is not worth the latency on a settings page.
-          type: "{{ plan_suggestions.included_type | default('') }}"
-          radius: "{{ workload.poi_radius_m }}"
-          maxResultCount: "{{ workload.poi_limit }}"
-      # No `spec.policy` here: on a single tool it is never evaluated (the server
-      # even renders its `when` to false at dispatch). See the header and #185.
+      - places:
+          kind: playbook
+          path: automation/agents/mcp/google-places
+          return_result: true
+          result_step: google_places_dispatch
+          timeout: 60
+          payload:
+            method: tools/call
+            tool: nearby_search
+            arguments:
+              lat: "{{ plan_suggestions.lat }}"
+              lng: "{{ plan_suggestions.lng }}"
+              # First interest becomes the Places `includedType`; the rest are
+              # applied as a post-filter in build_response, because Places takes
+              # one included type per call and a second round trip per interest
+              # is not worth the latency on a settings page.
+              type: "{{ plan_suggestions.included_type | default('') }}"
+              radius: "{{ workload.poi_radius_m }}"
+              maxResultCount: "{{ workload.poi_limit }}"
+          spec:
+            policy:
+              rules:
+                # Suggestions are garnish: a failed Places child must not fail
+                # a save that already happened, or a read.
+                - when: "{{ output.status == 'error' }}"
+                  then:
+                    do: continue
     next:
       spec: { mode: exclusive }
       arcs:
@@ -424,7 +439,8 @@ workflow:
         validated: "{{ validate_input | default({}) }}"
         loaded: "{{ load_profile | default({}) }}"
         planned: "{{ plan_suggestions | default({}) }}"
-        places_raw: "{{ suggest_pois | default({}) }}"
+        # A labelled one-item list: the child payload sits under `places` (#185).
+        places_raw: "{{ suggest_pois.places | default({}) }}"
       code: |
         def _unwrap(step_out):
             # The MCP envelope nests the payload under `data`; a failed call

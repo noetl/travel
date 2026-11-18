@@ -74,7 +74,16 @@ check("plan_suggestions routes on its own has_coords", arcs[0], ("{{ plan_sugges
 check("...else skip_suggestions", arcs[1], (None, "skip_suggestions"))
 check("load_profile routes only to plan_suggestions",
       [a["step"] for a in steps["load_profile"]["next"]["arcs"]], ["plan_suggestions"])
-args = steps["suggest_pois"]["tool"]["payload"]["arguments"]
+_pois_tool = steps["suggest_pois"]["tool"]
+# #185: a one-item list labelled `places` (a single tool would ignore its rule).
+_places = _pois_tool[0]["places"] if isinstance(_pois_tool, list) else _pois_tool
+check("suggest_pois is a one-item tool list", isinstance(_pois_tool, list) and len(_pois_tool) == 1, True)
+check("the list item is labelled places", isinstance(_pois_tool, list) and list(_pois_tool[0]) == ["places"], True)
+check("a failed Places child continues", (_places.get("spec") or {}).get("policy", {}).get("rules"),
+      [{"when": "{{ output.status == 'error' }}", "then": {"do": "continue"}}])
+check("build_response reads the labelled result",
+      steps["build_response"]["tool"]["input"]["places_raw"], "{{ suggest_pois.places | default({}) }}")
+args = _places["payload"]["arguments"]
 check("suggest_pois reads lat from the plan", args["lat"], "{{ plan_suggestions.lat }}")
 check("suggest_pois reads lng from the plan", args["lng"], "{{ plan_suggestions.lng }}")
 check("build_response binds the plan", "planned" in steps["build_response"]["tool"]["input"], True)
