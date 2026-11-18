@@ -119,6 +119,17 @@ workload:
   # "this user never saved a profile" became indistinguishable from "saved an empty one".
   # adiona/frontend#59.
   read_only: false
+  # Delete mode: remove the document `users/{uid}` and confirm it is gone.
+  #
+  # ⚠ Interlocked, because it is the one irreversible operation here (PITR is off; the
+  # recovery window is the 1h version retention):
+  #   * only an explicit truthy spelling counts, and anything unrecognised means DO NOT
+  #     delete — the opposite default to `read_only`, because here the destructive outcome
+  #     is the one to avoid;
+  #   * `profile` must be empty, so a save that carries data can never turn into a delete;
+  #   * `delete` together with `read_only` is refused as ambiguous.
+  # Subcollections (users/{uid}/trips/*) are NOT removed: delete_doc does not cascade.
+  delete: false
   # Suggestion tuning. `poi_type` maps onto the Places `includedType` filter;
   # leaving it empty asks Places for everything nearby.
   poi_radius_m: 5000
@@ -148,6 +159,7 @@ workflow:
         uid: "{{ workload.uid | default('') }}"
         profile: "{{ workload.profile | default({}) }}"
         read_only: "{{ workload.read_only | default(false) }}"
+        delete: "{{ workload.delete | default(false) }}"
       code: |
         # A blank uid would make the document path `users/` — which is a
         # COLLECTION, not a document. Firestore would reject it, but only
@@ -169,8 +181,21 @@ workflow:
             _read_only = bool(read_only)
         else:
             _read_only = False
+        # Same spellings as read_only, opposite default: unknown means DO NOT delete.
+        if isinstance(delete, bool):
+            _delete = delete
+        elif isinstance(delete, str):
+            _delete = delete.strip().lower() in ("1", "true", "yes", "on")
+        elif isinstance(delete, int):
+            _delete = bool(delete)
+        else:
+            _delete = False
         if not _uid:
             result = {"ok": False, "error": "uid is required to address users/{uid}"}
+        elif _delete and _read_only:
+            result = {"ok": False, "error": "delete and read_only are mutually exclusive"}
+        elif _delete and _profile != {}:
+            result = {"ok": False, "error": "delete requires an empty profile; refusing to treat a save as a delete"}
         elif not isinstance(_profile, dict):
             result = {"ok": False, "error": f"profile must be an object, got {type(_profile).__name__}"}
         else:
@@ -188,6 +213,7 @@ workflow:
                 "ok": True,
                 "uid": _uid,
                 "read_only": _read_only,
+                "delete": _delete,
                 "doc_path": f"users/{_uid}",
                 "profile": _profile,
                 "has_coords": has_coords,
@@ -211,6 +237,9 @@ workflow:
         # scripts/playbook_skip_topology_test.py enforces this for every playbook.
         - when: "{{ validate_input.ok and validate_input.read_only }}"
           step: begin_read
+        # Delete before save, for the same first-match reason as the read arc.
+        - when: "{{ validate_input.ok and validate_input.delete }}"
+          step: delete_profile
         - when: "{{ validate_input.ok }}"
           step: save_profile
         - step: reject_input
@@ -247,6 +276,82 @@ workflow:
             "ok": False,
             "saved": False,
             "error": _v.get("error") or "profile input rejected",
+        }
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: delete_profile
+    desc: Remove the document users/{uid} (no cascade to subcollections)
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/firestore
+      return_result: true
+      result_step: firestore_dispatch
+      timeout: 60
+      payload:
+        method: tools/call
+        tool: delete_doc
+        arguments:
+          path: "{{ validate_input.doc_path }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: confirm_deleted
+
+  - step: confirm_deleted
+    desc: Read the path back; a delete is only reported once the document is gone
+    tool:
+      kind: playbook
+      path: automation/agents/mcp/firestore
+      return_result: true
+      result_step: firestore_dispatch
+      timeout: 60
+      payload:
+        method: tools/call
+        tool: get_doc
+        arguments:
+          path: "{{ validate_input.doc_path }}"
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: build_delete_response
+
+  - step: build_delete_response
+    desc: Report the delete from what the store holds afterwards, not from the request
+    tool:
+      kind: python
+      input:
+        validated: "{{ validate_input | default({}) }}"
+        deleted: "{{ delete_profile | default({}) }}"
+        confirmed: "{{ confirm_deleted | default({}) }}"
+      code: |
+        def _unwrap(step_out):
+            if not isinstance(step_out, dict):
+                return {}
+            return step_out.get("data") or step_out.get("structuredContent") or {}
+
+        _v = validated if isinstance(validated, dict) else {}
+        _d = _unwrap(deleted)
+        _c = _unwrap(confirmed)
+        delete_error = _d.get("error") if isinstance(_d, dict) and _d.get("ok") is False else None
+        # Absent `found` means the read-back itself failed: do not report a delete as
+        # confirmed on the strength of a read that did not happen.
+        found_after = _c.get("found") if isinstance(_c, dict) else None
+        gone = found_after is False
+        result = {
+            "ok": gone and not delete_error,
+            "uid": _v.get("uid"),
+            "deleted": gone and not delete_error,
+            "was_absent": bool(_d.get("not_found")) if isinstance(_d, dict) else False,
+            "found_after_delete": found_after,
+            "saved": False,
+            "read_only": False,
+            "profile": {},
+            "suggestions": [],
+            "error": delete_error or (None if gone else "document still present (or unreadable) after delete"),
+            "note": "subcollections under users/{uid} are not removed (delete_doc does not cascade)",
         }
     next:
       spec: { mode: exclusive }
