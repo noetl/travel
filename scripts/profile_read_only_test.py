@@ -88,7 +88,7 @@ for value, expect, note in [
 # ------------------------------------------------------------------- the routing
 print("\nrouting:")
 arcs = validate["next"]["arcs"]
-check("validate_input has 3 arcs", len(arcs), 3)
+check("validate_input has 4 arcs (read, delete, save, reject)", len(arcs), 4)
 
 # ⚠ ORDER. `mode: exclusive` takes the FIRST matching arc. If the save arc came first,
 # `validate_input.ok` would match for a read too and every read would still write — the
@@ -103,7 +103,8 @@ check(
     "read_only" in (first.get("when") or ""),
     True,
 )
-check("second arc targets save_profile", arcs[1].get("step"), "save_profile")
+check("second arc targets delete_profile", arcs[1].get("step"), "delete_profile")
+check("third arc targets save_profile", arcs[2].get("step"), "save_profile")
 check("fallback arc targets reject_input", arcs[-1].get("step"), "reject_input")
 check("fallback arc is unguarded", arcs[-1].get("when") is None, True)
 
