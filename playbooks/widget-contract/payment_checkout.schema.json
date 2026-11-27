@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noetl.github.io/muno/widget-contract/payment_checkout.schema.json",
+  "title": "PaymentCheckoutPayload",
+  "description": "Stripe checkout hand-off for a picked flight or hotel (payments_checkout_mode). Nothing is booked or charged yet; the client opens its checkout (muno/playbooks/payments create_checkout). The server re-prices, so amount/currency are display-only and may be empty.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "title"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": [
+        "flight",
+        "hotel"
+      ]
+    },
+    "offer_id": {
+      "type": "string",
+      "description": "Duffel offer id (kind=flight)."
+    },
+    "rate_key": {
+      "type": "string",
+      "description": "HotelBeds rateKey (kind=hotel)."
+    },
+    "title": {
+      "type": "string"
+    },
+    "subtitle": {
+      "type": "string"
+    },
+    "amount": {
+      "type": "string",
+      "description": "Display-only indicative price; may be empty."
+    },
+    "currency": {
+      "type": "string"
+    },
+    "party": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "adults": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "children": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rooms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

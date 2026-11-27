@@ -106,6 +106,7 @@ def run(net, text, event_type="user_message", slots=None, payload=None, **over):
         "slm_backend": "gemini", "slm_endpoint": "", "slm_model": "", "slm_api_key": "",
         "llm_provider": "anthropic", "anthropic_model": "claude-haiku-5-5",
         "anthropic_secret_name": "shastara-eval", "anthropic_workspace_id": WS, "claude_thinking": "disabled",
+        "payments_checkout_mode": "off", "payments_canary_uids": [],
     }
     g.update(over)
     real_urlopen, real_sleep = urllib.request.urlopen, time.sleep

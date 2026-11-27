@@ -1,0 +1,1602 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: muno_payments
+  path: muno/playbooks/payments
+  description: |
+    Stripe checkout for Duffel flights and HotelBeds hotels (TEST MODE ONLY).
+    Design: docs/architecture/payments-stripe.md. Adiona is the merchant of
+    record (owner decision 2026-11-26, option A): the traveller's card is
+    authorised into Adiona's Stripe account, Adiona books the provider (Duffel
+    balance / HotelBeds invoice), and the hold is captured only after the
+    provider confirms. A failed booking cancels the hold, so nothing is charged.
+
+    GENERATED FILE. Source: playbooks/payments/{payments.yaml.in,core.py,run.py,
+    settle.py}; regenerate with `python3 scripts/build_payments_playbooks.py`.
+
+    ACTIONS (workload.action)
+
+      create_checkout  kind (flight|hotel), offer_id | rate_key, passengers |
+                       holder (+ rooms/adults/children), client_request_id,
+                       source, thread_id, title. Re-prices server-side (any
+                       client amount is ignored), writes checkouts/{id}, creates
+                       a manual-capture PaymentIntent, returns client_secret.
+      finalize         checkout_id. Re-reads the PaymentIntent from Stripe; only
+                       `requires_capture` claims the checkout (CAS) and books the
+                       provider; then `settle` captures or cancels. Idempotent:
+                       the SPA fast path and the Stripe webhook both call it.
+      get_status       checkout_id.
+      cancel_booking   checkout_id. Sketch only; disabled (CANCEL_BOOKING_ENABLED).
+
+    RESULT (the step result with `schema: muno.payments.v1` and `final: true`;
+    on the booking path that is `settle`, otherwise `run`)
+
+      { status: ok|error, schema, action, final, error?, message?,
+        checkout: { checkout_id, state, kind, title, amount_minor, currency,
+                    display_amount, line_items, provider_ref?, provider_booking?,
+                    error? },
+        client_secret?   (create_checkout only) }
+
+    IDENTITY. `uid` is the caller; behind the gateway it is overwritten with the
+    session's verified Auth0 subject. Empty or "guest" is refused, and a checkout
+    belonging to another uid reads as not found.
+
+workload:
+  uid: ""
+  action: get_status
+  checkout_id: ""
+  kind: ""
+  offer_id: ""
+  rate_key: ""
+  passengers: []
+  holder: {}
+  rooms: 1
+  adults: 1
+  children: 0
+  client_request_id: ""
+  source: widget
+  thread_id: ""
+  title: ""
+  request_id: ""
+  gateway_url: ""
+  firestore_project: shastaratech-noetl-prod
+  firestore_database: "(default)"
+
+workflow:
+  - step: start
+    desc: Entry point
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: run
+
+  - step: run
+    desc: Run the action; for finalize, claim the checkout and route to the provider booking
+    tool:
+      kind: python
+      input:
+        uid: "{{ workload.uid | default('') }}"
+        action: "{{ workload.action | default('get_status') }}"
+        checkout_id: "{{ workload.checkout_id | default('') }}"
+        kind: "{{ workload.kind | default('') }}"
+        offer_id: "{{ workload.offer_id | default('') }}"
+        rate_key: "{{ workload.rate_key | default('') }}"
+        passengers: "{{ workload.passengers | default([]) }}"
+        holder: "{{ workload.holder | default({}) }}"
+        rooms: "{{ workload.rooms | default(1) }}"
+        adults: "{{ workload.adults | default(1) }}"
+        children: "{{ workload.children | default(0) }}"
+        client_request_id: "{{ workload.client_request_id | default('') }}"
+        source: "{{ workload.source | default('widget') }}"
+        thread_id: "{{ workload.thread_id | default('') }}"
+        title: "{{ workload.title | default('') }}"
+        request_id: "{{ workload.request_id | default('') }}"
+        gateway_url: "{{ workload.gateway_url | default('') }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
+      code: |
+        # ── muno payments core (generated into every payments python step) ──────────
+        # SOURCE OF TRUTH: playbooks/payments/core.py. scripts/build_payments_playbooks.py
+        # renders it into playbooks/payments.yaml and playbooks/payments-webhook.yaml;
+        # scripts/payments_build_sync_test.py fails when the two drift. Edit here, then
+        # run the generator; never edit the generated `code:` blocks by hand.
+        #
+        # TEST MODE ONLY. Every guard below fails closed:
+        #   * the Stripe key must be sk_test_/rk_test_ (else `live_key_refused`, and no
+        #     request is sent), and every Stripe response/event must be livemode:false;
+        #   * Duffel tokens must be duffel_test_; HotelBeds must be the sandbox host.
+        # Hosts, secret names and pricing are CONSTANTS, not workload: a caller can pass
+        # any workload variable through the gateway, and none of these may be steerable
+        # (a workload `duffel_api_base` would ship the bearer to an arbitrary host, and
+        # a workload markup could price a booking below cost).
+        #
+        # The Stripe client transcribes automation/agents/mcp/stripe (noetl/ops) inline
+        # for latency, the way the planner inlines HotelBeds: a `kind: playbook` hop
+        # costs ~9s of orchestration (noetl/ai-meta#286).
+        import base64
+        import calendar
+        import gzip
+        import hashlib
+        import json
+        import re
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+
+        SCHEMA = "muno.payments.v1"
+        METADATA_TOKEN_URL = ("http://metadata.google.internal/computeMetadata/v1/"
+                              "instance/service-accounts/default/token")
+        SECRETS_PROJECT = "shastaratech-noetl-prod"
+        STRIPE_API = "https://api.stripe.com"
+        STRIPE_VERSION = "2024-06-20"
+        STRIPE_SECRET = "stripe-api-test"
+        DUFFEL_API = "https://api.duffel.com"
+        DUFFEL_VERSION = "v2"
+        DUFFEL_SECRET = "duffel-api-test"
+        HOTELBEDS_API = "https://api.test.hotelbeds.com"
+        HOTELBEDS_SECRET = "hotelbeds-hotels-test"
+        SANDBOX_HOST_MARKERS = ("api.test.hotelbeds.com", "sandbox")
+        CHECKRATES_PATH = "/hotel-api/1.0/checkrates"
+        # Option A (owner, 2026-11-26): charge the provider total as-is. A markup or
+        # service fee is a change to these two numbers; _price_quote already itemises.
+        PRICING = {"markup_bps": 0, "service_fee_minor": 0}
+        # The traveller-cancel path refunds through Stripe but does not yet cancel the
+        # provider booking, so it stays off until that half exists.
+        CANCEL_BOOKING_ENABLED = False
+        STUCK_BOOKING_MS = 10 * 60 * 1000
+        EVENTS_SEEN_CAP = 50
+        ZERO_DECIMAL = {"BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG",
+                        "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"}
+        CHECKOUT_ID_RE = re.compile(r"^co_[0-9a-f]{24}$")
+        REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+        FINAL_STATES = ("confirmed", "booking_failed_released", "refund_pending",
+                        "refunded", "canceled", "needs_review")
+        CLAIMABLE_STATES = ("created", "requires_payment", "payment_failed", "authorized")
+
+
+        class PaymentError(Exception):
+            def __init__(self, code, message, status=0):
+                Exception.__init__(self, message)
+                self.code = code
+                self.message = message
+                self.status = status
+
+
+        def _as_dict(value):
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str) and value.strip().startswith("{"):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    return {}
+            return {}
+
+
+        def _as_list(value):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str) and value.strip().startswith("["):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, list) else []
+                except Exception:
+                    return []
+            return []
+
+
+        def _text(value, default=""):
+            value = default if value is None else value
+            return str(value).strip()
+
+
+        def _int(value, default=0):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+
+        def _now_ms():
+            return int(time.time() * 1000)
+
+
+        def _uid_ok(uid):
+            uid = _text(uid)
+            return bool(uid) and uid.lower() != "guest"
+
+
+        def _uid_hash(uid):
+            return hashlib.sha256(_text(uid).encode("utf-8")).hexdigest()[:32]
+
+
+        # ── GCP: metadata token + Secret Manager ────────────────────────────────────
+        _cache = {}
+
+
+        def _metadata_token():
+            if "metadata" not in _cache:
+                req = urllib.request.Request(METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"}, method="GET")
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        payload = json.loads(resp.read().decode("utf-8") or "{}")
+                except Exception as exc:
+                    raise PaymentError("credential_unavailable",
+                                       "metadata token unavailable (Workload Identity): %s" % type(exc).__name__)
+                token = _as_dict(payload).get("access_token")
+                if not token:
+                    raise PaymentError("credential_unavailable", "metadata token endpoint returned no access_token")
+                _cache["metadata"] = token
+            return _cache["metadata"]
+
+
+        def _gsm(secret_name):
+            # The value is never logged, returned or put in an error message.
+            key = "gsm:" + secret_name
+            if key not in _cache:
+                name = "projects/%s/secrets/%s/versions/latest:access" % (SECRETS_PROJECT, secret_name)
+                req = urllib.request.Request("https://secretmanager.googleapis.com/v1/" + name,
+                                             headers={"Authorization": "Bearer " + _metadata_token()}, method="GET")
+                try:
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        payload = json.loads(resp.read().decode("utf-8") or "{}")
+                except urllib.error.HTTPError as exc:
+                    raise PaymentError("credential_unavailable",
+                                       "secret manager HTTP %s for '%s': the worker GSA lacks "
+                                       "secretmanager.secretAccessor, or the secret is not loaded yet"
+                                       % (exc.code, secret_name))
+                except Exception as exc:
+                    raise PaymentError("credential_unavailable",
+                                       "secret manager unreachable for '%s': %s" % (secret_name, type(exc).__name__))
+                encoded = _text(_as_dict(_as_dict(payload).get("payload")).get("data"))
+                if not encoded:
+                    raise PaymentError("credential_unavailable", "secret '%s' has no payload data" % secret_name)
+                _cache[key] = base64.b64decode(encoded).decode("utf-8").strip()
+            return _cache[key]
+
+
+        def _extract_token(raw):
+            # Bare string, {"token": ...} or {"data": {"token": ...}} (the Duffel shape).
+            s = _text(raw)
+            if s.startswith("{"):
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    return s
+                if isinstance(obj, dict):
+                    data = obj.get("data")
+                    if isinstance(data, dict) and data.get("token"):
+                        return _text(data.get("token"))
+                    for k in ("token", "secret_key", "api_key", "key"):
+                        if obj.get(k):
+                            return _text(obj.get(k))
+            return s
+
+
+        # ── Firestore REST (inline, like threads.yaml) ──────────────────────────────
+        def _fs_root():
+            return ("https://firestore.googleapis.com/v1/projects/%s/databases/%s/documents/"
+                    % (_text(globals().get("firestore_project"), SECRETS_PROJECT) or SECRETS_PROJECT,
+                       urllib.parse.quote(_text(globals().get("firestore_database"), "(default)") or "(default)",
+                                          safe="()")))
+
+
+        def _fs_encode(value):
+            if value is None:
+                return {"nullValue": None}
+            if isinstance(value, bool):
+                return {"booleanValue": value}
+            if isinstance(value, int):
+                return {"integerValue": str(value)}
+            if isinstance(value, float):
+                return {"doubleValue": value}
+            if isinstance(value, dict):
+                return {"mapValue": {"fields": {str(k): _fs_encode(v) for k, v in value.items()}}}
+            if isinstance(value, (list, tuple)):
+                return {"arrayValue": {"values": [_fs_encode(v) for v in value]}}
+            return {"stringValue": str(value)}
+
+
+        def _fs_decode(value):
+            value = _as_dict(value)
+            if "nullValue" in value:
+                return None
+            if "booleanValue" in value:
+                return bool(value["booleanValue"])
+            if "integerValue" in value:
+                return _int(value["integerValue"])
+            if "doubleValue" in value:
+                return float(value["doubleValue"])
+            if "stringValue" in value:
+                return value["stringValue"]
+            if "mapValue" in value:
+                return {k: _fs_decode(v) for k, v in _as_dict(_as_dict(value["mapValue"]).get("fields")).items()}
+            if "arrayValue" in value:
+                return [_fs_decode(v) for v in _as_list(_as_dict(value["arrayValue"]).get("values"))]
+            return None
+
+
+        def _fs_call(method, path, query=None, body=None):
+            url = _fs_root() + urllib.parse.quote(path, safe="/")
+            if query:
+                url += "?" + urllib.parse.urlencode(query, doseq=True)
+            data = json.dumps(body).encode("utf-8") if body is not None else None
+            headers = {"Authorization": "Bearer " + _metadata_token()}
+            if data is not None:
+                headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return 200, json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                return exc.code, {}
+
+
+        def _doc_path(cid):
+            return "checkouts/" + cid
+
+
+        def _get_checkout(cid):
+            status, body = _fs_call("GET", _doc_path(cid))
+            if status == 404:
+                return None, None
+            if status != 200:
+                raise PaymentError("store_unavailable", "Firestore read failed (%s)" % status)
+            fields = {k: _fs_decode(v) for k, v in _as_dict(body.get("fields")).items()}
+            return fields, body.get("updateTime")
+
+
+        def _create_checkout_doc(cid, fields):
+            status, body = _fs_call("PATCH", _doc_path(cid), query={"currentDocument.exists": "false"},
+                                    body={"fields": {k: _fs_encode(v) for k, v in fields.items()}})
+            if status in (400, 409, 412):
+                return None  # already exists
+            if status != 200:
+                raise PaymentError("store_unavailable", "Firestore create failed (%s)" % status)
+            return body.get("updateTime")
+
+
+        def _cas(cid, update_time, fields):
+            # Compare-and-set: the write lands only if nobody wrote the checkout since we
+            # read it at `update_time`. Returns the new updateTime, or None on conflict.
+            fields = dict(fields)
+            fields["updated_at_ms"] = _now_ms()
+            query = [("updateMask.fieldPaths", k) for k in fields]
+            if update_time:
+                query.append(("currentDocument.updateTime", update_time))
+            status, body = _fs_call("PATCH", _doc_path(cid), query=query,
+                                    body={"fields": {k: _fs_encode(v) for k, v in fields.items()}})
+            if status in (400, 409, 412):
+                return None
+            if status != 200:
+                raise PaymentError("store_unavailable", "Firestore write failed (%s)" % status)
+            return body.get("updateTime") or "written"
+
+
+        def _transition(cid, allowed_from, fields, attempts=3):
+            # Re-read and CAS until the write lands or the state is no longer one we
+            # may move from. Returns (doc_after, moved).
+            for _ in range(attempts):
+                doc, ut = _get_checkout(cid)
+                if doc is None:
+                    raise PaymentError("not_found", "checkout not found")
+                if allowed_from is not None and doc.get("state") not in allowed_from:
+                    return doc, False
+                if _cas(cid, ut, fields):
+                    doc.update(fields)
+                    return doc, True
+            doc, _ = _get_checkout(cid)
+            return doc, False
+
+
+        # ── Money ───────────────────────────────────────────────────────────────────
+        def _exponent(currency):
+            return 0 if _text(currency).upper() in ZERO_DECIMAL else 2
+
+
+        def _to_minor(amount, currency):
+            try:
+                value = Decimal(_text(amount))
+            except (InvalidOperation, ValueError):
+                raise PaymentError("pricing_failed", "provider returned a non-numeric amount")
+            exp = _exponent(currency)
+            minor = int((value * (Decimal(10) ** exp)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+            if minor <= 0:
+                raise PaymentError("pricing_failed", "provider returned a non-positive amount")
+            return minor
+
+
+        def _fmt(minor, currency):
+            exp = _exponent(currency)
+            cur = _text(currency).upper()
+            if exp == 0:
+                return "%s %d" % (cur, minor)
+            return "%s %s" % (cur, str((Decimal(minor) / (Decimal(10) ** exp)).quantize(Decimal("0.01"))))
+
+
+        def _price_quote(base_minor, currency, pricing):
+            pricing = _as_dict(pricing)
+            bps = max(0, _int(pricing.get("markup_bps"), 0))
+            fee = max(0, _int(pricing.get("service_fee_minor"), 0))
+            markup = (int(base_minor) * bps + 5000) // 10000
+            total = int(base_minor) + markup + fee
+            items = [{"code": "provider_total", "label": "Booking", "amount_minor": int(base_minor)}]
+            if markup:
+                items.append({"code": "markup", "label": "Adiona markup", "amount_minor": markup})
+            if fee:
+                items.append({"code": "service_fee", "label": "Service fee", "amount_minor": fee})
+            return {"base_minor": int(base_minor), "markup_minor": markup, "fee_minor": fee,
+                    "total_minor": total, "currency": _text(currency).upper(), "line_items": items}
+
+
+        # ── Stripe (TEST MODE ONLY) ─────────────────────────────────────────────────
+        def _stripe_key():
+            if "stripe" not in _cache:
+                key = _extract_token(_gsm(STRIPE_SECRET))
+                if not (key.startswith("sk_test_") or key.startswith("rk_test_")):
+                    raise PaymentError("live_key_refused",
+                                       "the Stripe key in '%s' is not a test-mode key; refusing to call Stripe"
+                                       % STRIPE_SECRET)
+                _cache["stripe"] = key
+            return _cache["stripe"]
+
+
+        def _form(params, prefix=""):
+            pairs = []
+            if isinstance(params, dict):
+                for k, v in params.items():
+                    pairs.extend(_form(v, "%s[%s]" % (prefix, k) if prefix else str(k)))
+            elif isinstance(params, (list, tuple)):
+                for i, v in enumerate(params):
+                    pairs.extend(_form(v, "%s[%d]" % (prefix, i)))
+            elif params is None:
+                pass
+            elif isinstance(params, bool):
+                pairs.append((prefix, "true" if params else "false"))
+            else:
+                pairs.append((prefix, str(params)))
+            return pairs
+
+
+        def _stripe(method, path, params=None, idem=None):
+            method = method.upper()
+            if method == "POST" and not idem:
+                raise PaymentError("internal", "every Stripe POST needs an Idempotency-Key")
+            headers = {"Authorization": "Bearer " + _stripe_key(), "Stripe-Version": STRIPE_VERSION}
+            url = STRIPE_API + path
+            data = None
+            if method == "GET" and params:
+                url += "?" + urllib.parse.urlencode(_form(params))
+            elif params is not None or method == "POST":
+                data = urllib.parse.urlencode(_form(params or {})).encode("utf-8")
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+            if idem:
+                headers["Idempotency-Key"] = idem
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                try:
+                    err = _as_dict(json.loads(exc.read().decode("utf-8") or "{}").get("error"))
+                except Exception:
+                    err = {}
+                code = _text(err.get("decline_code") or err.get("code") or err.get("type"), "stripe_error")
+                raise PaymentError("stripe_" + code, _text(err.get("message"), "Stripe request failed")[:300], exc.code)
+            except Exception as exc:
+                raise PaymentError("stripe_unreachable", "Stripe unreachable: %s" % type(exc).__name__)
+            if _as_dict(body).get("livemode") is True:
+                raise PaymentError("livemode_refused", "Stripe returned a live-mode object; refusing to continue")
+            return _as_dict(body)
+
+
+        def _pi_path(pi_id, suffix=""):
+            return "/v1/payment_intents/" + urllib.parse.quote(_text(pi_id), safe="") + suffix
+
+
+        # ── Providers: re-price (TEST/SANDBOX only) ─────────────────────────────────
+        def _duffel_offer(offer_id):
+            token = _extract_token(_gsm(DUFFEL_SECRET))
+            if not token.startswith("duffel_test_"):
+                raise PaymentError("live_key_refused", "the Duffel token is not a test token; refusing to re-price")
+            url = "%s/air/offers/%s?return_available_services=false" % (
+                DUFFEL_API, urllib.parse.quote(_text(offer_id), safe=""))
+            req = urllib.request.Request(url, method="GET", headers={
+                "Authorization": "Bearer " + token, "Duffel-Version": DUFFEL_VERSION,
+                "Accept": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                raise PaymentError("offer_unavailable", "Duffel offer lookup failed (%s)" % exc.code, exc.code)
+            except Exception as exc:
+                raise PaymentError("offer_unavailable", "Duffel unreachable: %s" % type(exc).__name__)
+            offer = _as_dict(_as_dict(body).get("data"))
+            if offer.get("live_mode") is True:
+                raise PaymentError("livemode_refused", "Duffel returned a live-mode offer")
+            return offer
+
+
+        def _is_sandbox(base):
+            low = _text(base).lower()
+            return any(marker in low for marker in SANDBOX_HOST_MARKERS)
+
+
+        def _hotelbeds_checkrate(rate_key):
+            if not _is_sandbox(HOTELBEDS_API):
+                raise PaymentError("not_sandbox", "HotelBeds host is not the sandbox")
+            raw = _gsm(HOTELBEDS_SECRET)
+            try:
+                cred = json.loads(raw)
+            except Exception:
+                raise PaymentError("credential_unavailable", "HotelBeds secret is not JSON")
+            apikey = _text(cred.get("apikey") or cred.get("api_key") or cred.get("key"))
+            secret = _text(cred.get("secret") or cred.get("shared_secret"))
+            if not apikey or not secret:
+                raise PaymentError("credential_unavailable", "HotelBeds secret is missing apikey/secret")
+            sig = hashlib.sha256(("%s%s%d" % (apikey, secret, int(time.time()))).encode("utf-8")).hexdigest()
+            req = urllib.request.Request(
+                HOTELBEDS_API + CHECKRATES_PATH, method="POST",
+                data=json.dumps({"rooms": [{"rateKey": rate_key}]}).encode("utf-8"),
+                headers={"Api-key": apikey, "X-Signature": sig, "Accept": "application/json",
+                         "Accept-Encoding": "gzip", "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=45) as resp:
+                    raw_body = resp.read()
+                    if "gzip" in _text(resp.headers.get("Content-Encoding") if getattr(resp, "headers", None) else "").lower():
+                        raw_body = gzip.decompress(raw_body)
+                    body = json.loads(raw_body.decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                raise PaymentError("rate_unavailable", "HotelBeds checkRate failed (%s)" % exc.code, exc.code)
+            except Exception as exc:
+                raise PaymentError("rate_unavailable", "HotelBeds unreachable: %s" % type(exc).__name__)
+            hotel = _as_dict(_as_dict(body).get("hotel"))
+            for room in _as_list(hotel.get("rooms")):
+                for rate in _as_list(_as_dict(room).get("rates")):
+                    rate = _as_dict(rate)
+                    if _text(rate.get("rateKey")):
+                        return {"rate_key": _text(rate.get("rateKey")), "net": rate.get("net"),
+                                "currency": _text(hotel.get("currency")), "hotel_name": _text(hotel.get("name")),
+                                "check_in": _text(hotel.get("checkIn")), "check_out": _text(hotel.get("checkOut"))}
+            raise PaymentError("rate_unavailable", "HotelBeds checkRate returned no bookable rate")
+
+
+        # ── Views ───────────────────────────────────────────────────────────────────
+        def _view(doc):
+            doc = _as_dict(doc)
+            quote = _as_dict(doc.get("quote"))
+            view = {
+                "checkout_id": doc.get("checkout_id"),
+                "state": doc.get("state"),
+                "kind": doc.get("kind"),
+                "title": doc.get("title") or "",
+                "amount_minor": quote.get("total_minor"),
+                "currency": quote.get("currency"),
+                "display_amount": _fmt(quote.get("total_minor") or 0, quote.get("currency") or "USD") if quote else "",
+                "line_items": _as_list(quote.get("line_items")),
+            }
+            if doc.get("provider_ref"):
+                view["provider_ref"] = doc.get("provider_ref")
+            if _as_dict(doc.get("provider_booking")):
+                view["provider_booking"] = _as_dict(doc.get("provider_booking"))
+            if _as_dict(doc.get("error")):
+                view["error"] = _as_dict(doc.get("error"))
+            return view
+
+
+        def _ok(action, doc=None, **extra):
+            out = {"status": "ok", "schema": SCHEMA, "action": action, "final": True}
+            if doc is not None:
+                out["checkout"] = _view(doc)
+            out.update(extra)
+            return out
+
+
+        def _err(action, code, message):
+            return {"status": "error", "schema": SCHEMA, "action": action, "final": True,
+                    "error": code, "message": _text(message)[:300]}
+
+
+        def _callback(result):
+            rid = _text(globals().get("request_id"))
+            gw = _text(globals().get("gateway_url"))
+            if not (rid and gw):
+                return
+            try:
+                body = json.dumps({"request_id": rid,
+                                   "status": "COMPLETED" if result.get("status") == "ok" else "FAILED",
+                                   "data": result}).encode("utf-8")
+                req = urllib.request.Request(gw.rstrip("/") + "/api/internal/callback/async", data=body,
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result["gateway_callback"] = {"delivered": 200 <= response.status < 300}
+            except Exception as exc:
+                result["gateway_callback"] = {"delivered": False, "error": type(exc).__name__}
+        # ── end of muno payments core ───────────────────────────────────────────────
+        # ── step `run`: create_checkout / finalize (claim) / get_status / cancel_booking
+        ACTIONS = ("create_checkout", "finalize", "get_status", "cancel_booking")
+        PASSENGER_FIELDS = ("given_name", "family_name", "born_on", "email", "phone_number")
+
+
+        def _owned(cid, uid):
+            if not CHECKOUT_ID_RE.match(_text(cid)):
+                raise PaymentError("validation_error", "checkout_id is malformed")
+            doc, ut = _get_checkout(cid)
+            # Not found and not yours look the same, so a probe learns nothing.
+            if doc is None or _text(doc.get("uid")) != _text(uid):
+                raise PaymentError("not_found", "checkout not found")
+            return doc, ut
+
+
+        def _clean_passengers(raw):
+            passengers = _as_list(raw)
+            if not passengers:
+                raise PaymentError("validation_error", "passengers must be a non-empty array")
+            out = []
+            for idx, p in enumerate(passengers):
+                p = _as_dict(p)
+                missing = [k for k in PASSENGER_FIELDS if not _text(p.get(k))]
+                if missing:
+                    raise PaymentError("validation_error",
+                                       "passenger %d is missing %s" % (idx + 1, ", ".join(missing)))
+                item = {k: _text(p.get(k))[:120] for k in PASSENGER_FIELDS}
+                item["title"] = _text(p.get("title") or "mr").lower()[:8]
+                if _text(p.get("gender")):
+                    item["gender"] = _text(p.get("gender")).lower()[:1]
+                out.append(item)
+            return out
+
+
+        def _reprice(kind, args):
+            # The server is the only source of the amount: any client amount is ignored.
+            if kind == "flight":
+                offer = _duffel_offer(args["offer_id"])
+                expires = _text(offer.get("expires_at"))
+                try:
+                    _exp_s = calendar.timegm(time.strptime(expires[:19], "%Y-%m-%dT%H:%M:%S")) if expires else 0
+                except ValueError:
+                    _exp_s = 0
+                if _exp_s and _exp_s <= time.time():
+                    raise PaymentError("offer_expired", "this fare has expired; search again")
+                currency = _text(offer.get("total_currency")).upper()
+                base_minor = _to_minor(offer.get("total_amount"), currency)
+                if len(_as_list(offer.get("passengers"))) not in (0, len(args["passengers"])):
+                    raise PaymentError("validation_error", "the fare is priced for %d passenger(s)"
+                                       % len(_as_list(offer.get("passengers"))))
+                return base_minor, currency, {"name": "duffel", "offer_id": args["offer_id"],
+                                              "expires_at": expires}
+            rate = _hotelbeds_checkrate(args["rate_key"])
+            currency = rate["currency"].upper()
+            return _to_minor(rate["net"], currency), currency, {
+                "name": "hotelbeds", "rate_key": rate["rate_key"], "hotel_name": rate["hotel_name"],
+                "check_in": rate["check_in"], "check_out": rate["check_out"]}
+
+
+        def _create_pi(cid, doc):
+            quote = _as_dict(doc.get("quote"))
+            return _stripe("POST", "/v1/payment_intents", {
+                "amount": int(quote["total_minor"]),
+                "currency": _text(quote["currency"]).lower(),
+                "capture_method": "manual",
+                "automatic_payment_methods": {"enabled": True},
+                "description": ("Adiona %s: %s" % (doc.get("kind"), doc.get("title") or cid))[:200],
+                "metadata": {"checkout_id": cid, "uid_hash": _uid_hash(doc.get("uid")),
+                             "kind": doc.get("kind"), "source": doc.get("source")},
+            }, idem="checkout:%s:create" % cid)
+
+
+        def _do_create(uid):
+            kind = _text(globals().get("kind")).lower()
+            if kind not in ("flight", "hotel"):
+                raise PaymentError("validation_error", "kind must be flight or hotel")
+            crid = _text(globals().get("client_request_id"))
+            if not REQUEST_ID_RE.match(crid):
+                raise PaymentError("validation_error", "client_request_id must be 8-128 of [A-Za-z0-9_-]")
+            args = {}
+            if kind == "flight":
+                args["offer_id"] = _text(globals().get("offer_id"))
+                if not args["offer_id"]:
+                    raise PaymentError("validation_error", "offer_id is required")
+                args["passengers"] = _clean_passengers(globals().get("passengers"))
+                traveller = {"passengers": args["passengers"]}
+            else:
+                args["rate_key"] = _text(globals().get("rate_key"))
+                if not args["rate_key"]:
+                    raise PaymentError("validation_error", "rate_key is required")
+                holder = _as_dict(globals().get("holder"))
+                if not _text(holder.get("name")) or not _text(holder.get("surname")):
+                    raise PaymentError("validation_error", "holder name and surname are required")
+                traveller = {"holder": {"name": _text(holder["name"])[:60], "surname": _text(holder["surname"])[:60]},
+                             "rooms": max(1, _int(globals().get("rooms"), 1)),
+                             "adults": max(1, _int(globals().get("adults"), 1)),
+                             "children": max(0, _int(globals().get("children"), 0))}
+
+            cid = "co_" + hashlib.sha256((uid + "\n" + crid).encode("utf-8")).hexdigest()[:24]
+            doc, ut = _get_checkout(cid)
+            if doc is None:
+                base_minor, currency, provider = _reprice(kind, args)
+                now = _now_ms()
+                title = _text(globals().get("title"))[:120] or (provider.get("hotel_name") or "")
+                doc = {"checkout_id": cid, "uid": uid, "kind": kind,
+                       "source": _text(globals().get("source"), "widget")[:16] or "widget",
+                       "thread_id": _text(globals().get("thread_id"))[:128], "title": title,
+                       "state": "created", "provider": provider, "traveller": traveller,
+                       "quote": _price_quote(base_minor, currency, PRICING),
+                       "payment_intent_id": "", "provider_ref": "", "events_seen": [],
+                       "created_at_ms": now, "updated_at_ms": now, "claimed_at_ms": 0}
+                if _create_checkout_doc(cid, doc) is None:
+                    doc, ut = _get_checkout(cid)  # a concurrent retry created it first
+            if _text(doc.get("uid")) != uid:
+                raise PaymentError("not_found", "checkout not found")
+
+            if doc.get("payment_intent_id"):
+                if doc.get("state") not in ("requires_payment", "payment_failed"):
+                    return _ok("create_checkout", doc)
+                pi = _stripe("GET", _pi_path(doc["payment_intent_id"]))
+            else:
+                # The stored quote, not a fresh re-price: a retried create must send the
+                # same parameters, or Stripe rejects the reused Idempotency-Key.
+                pi = _create_pi(cid, doc)
+                doc, _moved = _transition(cid, ("created",), {"state": "requires_payment",
+                                                              "payment_intent_id": pi.get("id")})
+            return _ok("create_checkout", doc, client_secret=pi.get("client_secret"))
+
+
+        def _do_finalize(uid):
+            cid = _text(globals().get("checkout_id"))
+            doc, ut = _owned(cid, uid)
+            state = doc.get("state")
+            if state in FINAL_STATES:
+                return _ok("finalize", doc), None
+            if state == "booking":
+                if _now_ms() - _int(doc.get("claimed_at_ms")) > STUCK_BOOKING_MS:
+                    doc, _ = _transition(cid, ("booking",), {"state": "needs_review", "error": {
+                        "code": "booking_stuck", "message": "The booking did not finish; our team will check it."}})
+                return _ok("finalize", doc), None
+            if not doc.get("payment_intent_id"):
+                return _ok("finalize", doc), None
+
+            pi = _stripe("GET", _pi_path(doc["payment_intent_id"]))
+            quote = _as_dict(doc.get("quote"))
+            status = _text(pi.get("status"))
+            if status == "requires_capture":
+                if (_int(pi.get("amount_capturable")) < _int(quote.get("total_minor"))
+                        or _text(pi.get("currency")).upper() != _text(quote.get("currency")).upper()
+                        or _text(_as_dict(pi.get("metadata")).get("checkout_id")) != cid):
+                    doc, _ = _transition(cid, CLAIMABLE_STATES, {"state": "needs_review", "error": {
+                        "code": "amount_mismatch", "message": "The authorised amount does not match the quote."}})
+                    return _ok("finalize", doc), None
+                doc, moved = _transition(cid, CLAIMABLE_STATES, {"state": "booking", "claimed_at_ms": _now_ms()})
+                if not moved:
+                    return _ok("finalize", doc), None  # another finalize won the claim
+                return _ok("finalize", doc), doc
+            if status == "requires_payment_method" and _as_dict(pi.get("last_payment_error")):
+                doc, _ = _transition(cid, ("requires_payment",), {"state": "payment_failed", "error": {
+                    "code": _text(_as_dict(pi.get("last_payment_error")).get("decline_code")
+                                  or _as_dict(pi.get("last_payment_error")).get("code"), "card_declined"),
+                    "message": _text(_as_dict(pi.get("last_payment_error")).get("message"),
+                                     "The card was declined.")[:200]}})
+            elif status == "canceled":
+                doc, _ = _transition(cid, CLAIMABLE_STATES, {"state": "canceled"})
+            elif status == "succeeded":
+                doc, _ = _transition(cid, CLAIMABLE_STATES, {"state": "needs_review", "error": {
+                    "code": "captured_without_booking", "message": "Payment was captured before the booking finished."}})
+            return _ok("finalize", doc, payment_status=status), None
+
+
+        def _book_args(doc):
+            traveller = _as_dict(doc.get("traveller"))
+            provider = _as_dict(doc.get("provider"))
+            if doc.get("kind") == "flight":
+                return {"offer_id": provider.get("offer_id"), "passengers": _as_list(traveller.get("passengers")),
+                        "duffel_env": "test"}
+            holder = _as_dict(traveller.get("holder"))
+            return {"rate_key": provider.get("rate_key"), "holder_name": holder.get("name"),
+                    "holder_surname": holder.get("surname"), "rooms": traveller.get("rooms") or 1,
+                    "adults": traveller.get("adults") or 1, "children": traveller.get("children") or 0,
+                    "client_reference": doc.get("checkout_id")}
+
+
+        def _do_status(uid):
+            doc, _ = _owned(_text(globals().get("checkout_id")), uid)
+            return _ok("get_status", doc)
+
+
+        def _do_cancel(uid):
+            # SKETCH (owner-approved scope): refund the captured charge in test mode.
+            # Provider-side cancellation (Duffel order_cancellations / HotelBeds DELETE
+            # booking, and refunding their quote rather than the full total) is not
+            # built yet, so the action is off until it is (CANCEL_BOOKING_ENABLED).
+            cid = _text(globals().get("checkout_id"))
+            doc, _ = _owned(cid, uid)
+            if not CANCEL_BOOKING_ENABLED:
+                return _err("cancel_booking", "not_enabled", "Cancelling a confirmed booking is not available yet.")
+            if doc.get("state") != "confirmed":
+                return _ok("cancel_booking", doc)
+            doc, moved = _transition(cid, ("confirmed",), {"state": "refund_pending",
+                                                           "ops_review": {"reason": "provider_cancellation_manual"}})
+            if not moved:
+                return _ok("cancel_booking", doc)
+            refund = _stripe("POST", "/v1/refunds", {"payment_intent": doc.get("payment_intent_id"),
+                                                     "metadata": {"checkout_id": cid}},
+                             idem="checkout:%s:refund:1" % cid)
+            if _text(refund.get("status")) == "succeeded":
+                doc, _ = _transition(cid, ("refund_pending",), {"state": "refunded"})
+            return _ok("cancel_booking", doc)
+
+
+        route = "done"
+        book_args = {}
+        _act = _text(action).lower()
+        _uid = _text(uid)
+        try:
+            if _act not in ACTIONS:
+                result = _err(_act or "unknown", "validation_error", "action must be one of " + ", ".join(ACTIONS))
+            elif not _uid_ok(_uid):
+                result = _err(_act, "unauthenticated", "sign in to pay")
+            elif _act == "create_checkout":
+                result = _do_create(_uid)
+            elif _act == "finalize":
+                result, _claimed = _do_finalize(_uid)
+                if _claimed is not None:
+                    route = "book_" + _claimed.get("kind")
+                    book_args = _book_args(_claimed)
+                    result["final"] = False  # settle writes the outcome
+            elif _act == "get_status":
+                result = _do_status(_uid)
+            else:
+                result = _do_cancel(_uid)
+        except PaymentError as exc:
+            result = _err(_act, exc.code, exc.message)
+        except Exception as exc:
+            result = _err(_act, "internal", type(exc).__name__)
+
+        result["route"] = route
+        result["book_args"] = book_args
+        if route == "done":
+            _callback(result)
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        # Each booking branch has its own entry and reaches `settle` only from
+        # there; `done` is the no-booking branch's own entry (see
+        # scripts/playbook_skip_topology_test.py for why `settle` is never a
+        # sibling target here).
+        - when: "{{ run.route == 'book_flight' }}"
+          step: book_flight
+        - when: "{{ run.route == 'book_hotel' }}"
+          step: book_hotel
+        - step: done
+
+  - step: book_flight
+    desc: Book the claimed Duffel offer (TEST env) for the checkout's travellers
+    # A ONE-ITEM LIST so the error rule is evaluated (single_tool_policy_rule_test):
+    # a failed provider child must still reach `settle`, which releases the hold.
+    tool:
+      - provider:
+          kind: playbook
+          path: automation/agents/mcp/duffel
+          return_result: true
+          result_step: duffel_dispatch
+          timeout: 180
+          payload:
+            method: tools/call
+            tool: create_order
+            arguments: "{{ run.book_args }}"
+          spec:
+            policy:
+              rules:
+                - when: "{{ output.status == 'error' }}"
+                  then:
+                    do: continue
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: settle
+
+  - step: book_hotel
+    desc: Book the claimed HotelBeds rate (SANDBOX) with clientReference = checkout_id
+    tool:
+      - provider:
+          kind: playbook
+          path: automation/agents/mcp/hotelbeds
+          return_result: true
+          result_step: hotelbeds_dispatch
+          timeout: 180
+          payload:
+            method: tools/call
+            tool: book_hotel
+            arguments: "{{ run.book_args }}"
+          spec:
+            policy:
+              rules:
+                - when: "{{ output.status == 'error' }}"
+                  then:
+                    do: continue
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: settle
+
+  - step: settle
+    desc: Capture the hold on a confirmed booking, cancel it otherwise
+    tool:
+      kind: python
+      input:
+        claim: "{{ run }}"
+        flight_result: "{{ book_flight | default({}) }}"
+        hotel_result: "{{ book_hotel | default({}) }}"
+        request_id: "{{ workload.request_id | default('') }}"
+        gateway_url: "{{ workload.gateway_url | default('') }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
+      code: |
+        # ── muno payments core (generated into every payments python step) ──────────
+        # SOURCE OF TRUTH: playbooks/payments/core.py. scripts/build_payments_playbooks.py
+        # renders it into playbooks/payments.yaml and playbooks/payments-webhook.yaml;
+        # scripts/payments_build_sync_test.py fails when the two drift. Edit here, then
+        # run the generator; never edit the generated `code:` blocks by hand.
+        #
+        # TEST MODE ONLY. Every guard below fails closed:
+        #   * the Stripe key must be sk_test_/rk_test_ (else `live_key_refused`, and no
+        #     request is sent), and every Stripe response/event must be livemode:false;
+        #   * Duffel tokens must be duffel_test_; HotelBeds must be the sandbox host.
+        # Hosts, secret names and pricing are CONSTANTS, not workload: a caller can pass
+        # any workload variable through the gateway, and none of these may be steerable
+        # (a workload `duffel_api_base` would ship the bearer to an arbitrary host, and
+        # a workload markup could price a booking below cost).
+        #
+        # The Stripe client transcribes automation/agents/mcp/stripe (noetl/ops) inline
+        # for latency, the way the planner inlines HotelBeds: a `kind: playbook` hop
+        # costs ~9s of orchestration (noetl/ai-meta#286).
+        import base64
+        import calendar
+        import gzip
+        import hashlib
+        import json
+        import re
+        import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+
+        SCHEMA = "muno.payments.v1"
+        METADATA_TOKEN_URL = ("http://metadata.google.internal/computeMetadata/v1/"
+                              "instance/service-accounts/default/token")
+        SECRETS_PROJECT = "shastaratech-noetl-prod"
+        STRIPE_API = "https://api.stripe.com"
+        STRIPE_VERSION = "2024-06-20"
+        STRIPE_SECRET = "stripe-api-test"
+        DUFFEL_API = "https://api.duffel.com"
+        DUFFEL_VERSION = "v2"
+        DUFFEL_SECRET = "duffel-api-test"
+        HOTELBEDS_API = "https://api.test.hotelbeds.com"
+        HOTELBEDS_SECRET = "hotelbeds-hotels-test"
+        SANDBOX_HOST_MARKERS = ("api.test.hotelbeds.com", "sandbox")
+        CHECKRATES_PATH = "/hotel-api/1.0/checkrates"
+        # Option A (owner, 2026-11-26): charge the provider total as-is. A markup or
+        # service fee is a change to these two numbers; _price_quote already itemises.
+        PRICING = {"markup_bps": 0, "service_fee_minor": 0}
+        # The traveller-cancel path refunds through Stripe but does not yet cancel the
+        # provider booking, so it stays off until that half exists.
+        CANCEL_BOOKING_ENABLED = False
+        STUCK_BOOKING_MS = 10 * 60 * 1000
+        EVENTS_SEEN_CAP = 50
+        ZERO_DECIMAL = {"BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG",
+                        "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"}
+        CHECKOUT_ID_RE = re.compile(r"^co_[0-9a-f]{24}$")
+        REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+        FINAL_STATES = ("confirmed", "booking_failed_released", "refund_pending",
+                        "refunded", "canceled", "needs_review")
+        CLAIMABLE_STATES = ("created", "requires_payment", "payment_failed", "authorized")
+
+
+        class PaymentError(Exception):
+            def __init__(self, code, message, status=0):
+                Exception.__init__(self, message)
+                self.code = code
+                self.message = message
+                self.status = status
+
+
+        def _as_dict(value):
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str) and value.strip().startswith("{"):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    return {}
+            return {}
+
+
+        def _as_list(value):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str) and value.strip().startswith("["):
+                try:
+                    parsed = json.loads(value)
+                    return parsed if isinstance(parsed, list) else []
+                except Exception:
+                    return []
+            return []
+
+
+        def _text(value, default=""):
+            value = default if value is None else value
+            return str(value).strip()
+
+
+        def _int(value, default=0):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+
+        def _now_ms():
+            return int(time.time() * 1000)
+
+
+        def _uid_ok(uid):
+            uid = _text(uid)
+            return bool(uid) and uid.lower() != "guest"
+
+
+        def _uid_hash(uid):
+            return hashlib.sha256(_text(uid).encode("utf-8")).hexdigest()[:32]
+
+
+        # ── GCP: metadata token + Secret Manager ────────────────────────────────────
+        _cache = {}
+
+
+        def _metadata_token():
+            if "metadata" not in _cache:
+                req = urllib.request.Request(METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"}, method="GET")
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        payload = json.loads(resp.read().decode("utf-8") or "{}")
+                except Exception as exc:
+                    raise PaymentError("credential_unavailable",
+                                       "metadata token unavailable (Workload Identity): %s" % type(exc).__name__)
+                token = _as_dict(payload).get("access_token")
+                if not token:
+                    raise PaymentError("credential_unavailable", "metadata token endpoint returned no access_token")
+                _cache["metadata"] = token
+            return _cache["metadata"]
+
+
+        def _gsm(secret_name):
+            # The value is never logged, returned or put in an error message.
+            key = "gsm:" + secret_name
+            if key not in _cache:
+                name = "projects/%s/secrets/%s/versions/latest:access" % (SECRETS_PROJECT, secret_name)
+                req = urllib.request.Request("https://secretmanager.googleapis.com/v1/" + name,
+                                             headers={"Authorization": "Bearer " + _metadata_token()}, method="GET")
+                try:
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        payload = json.loads(resp.read().decode("utf-8") or "{}")
+                except urllib.error.HTTPError as exc:
+                    raise PaymentError("credential_unavailable",
+                                       "secret manager HTTP %s for '%s': the worker GSA lacks "
+                                       "secretmanager.secretAccessor, or the secret is not loaded yet"
+                                       % (exc.code, secret_name))
+                except Exception as exc:
+                    raise PaymentError("credential_unavailable",
+                                       "secret manager unreachable for '%s': %s" % (secret_name, type(exc).__name__))
+                encoded = _text(_as_dict(_as_dict(payload).get("payload")).get("data"))
+                if not encoded:
+                    raise PaymentError("credential_unavailable", "secret '%s' has no payload data" % secret_name)
+                _cache[key] = base64.b64decode(encoded).decode("utf-8").strip()
+            return _cache[key]
+
+
+        def _extract_token(raw):
+            # Bare string, {"token": ...} or {"data": {"token": ...}} (the Duffel shape).
+            s = _text(raw)
+            if s.startswith("{"):
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    return s
+                if isinstance(obj, dict):
+                    data = obj.get("data")
+                    if isinstance(data, dict) and data.get("token"):
+                        return _text(data.get("token"))
+                    for k in ("token", "secret_key", "api_key", "key"):
+                        if obj.get(k):
+                            return _text(obj.get(k))
+            return s
+
+
+        # ── Firestore REST (inline, like threads.yaml) ──────────────────────────────
+        def _fs_root():
+            return ("https://firestore.googleapis.com/v1/projects/%s/databases/%s/documents/"
+                    % (_text(globals().get("firestore_project"), SECRETS_PROJECT) or SECRETS_PROJECT,
+                       urllib.parse.quote(_text(globals().get("firestore_database"), "(default)") or "(default)",
+                                          safe="()")))
+
+
+        def _fs_encode(value):
+            if value is None:
+                return {"nullValue": None}
+            if isinstance(value, bool):
+                return {"booleanValue": value}
+            if isinstance(value, int):
+                return {"integerValue": str(value)}
+            if isinstance(value, float):
+                return {"doubleValue": value}
+            if isinstance(value, dict):
+                return {"mapValue": {"fields": {str(k): _fs_encode(v) for k, v in value.items()}}}
+            if isinstance(value, (list, tuple)):
+                return {"arrayValue": {"values": [_fs_encode(v) for v in value]}}
+            return {"stringValue": str(value)}
+
+
+        def _fs_decode(value):
+            value = _as_dict(value)
+            if "nullValue" in value:
+                return None
+            if "booleanValue" in value:
+                return bool(value["booleanValue"])
+            if "integerValue" in value:
+                return _int(value["integerValue"])
+            if "doubleValue" in value:
+                return float(value["doubleValue"])
+            if "stringValue" in value:
+                return value["stringValue"]
+            if "mapValue" in value:
+                return {k: _fs_decode(v) for k, v in _as_dict(_as_dict(value["mapValue"]).get("fields")).items()}
+            if "arrayValue" in value:
+                return [_fs_decode(v) for v in _as_list(_as_dict(value["arrayValue"]).get("values"))]
+            return None
+
+
+        def _fs_call(method, path, query=None, body=None):
+            url = _fs_root() + urllib.parse.quote(path, safe="/")
+            if query:
+                url += "?" + urllib.parse.urlencode(query, doseq=True)
+            data = json.dumps(body).encode("utf-8") if body is not None else None
+            headers = {"Authorization": "Bearer " + _metadata_token()}
+            if data is not None:
+                headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return 200, json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                return exc.code, {}
+
+
+        def _doc_path(cid):
+            return "checkouts/" + cid
+
+
+        def _get_checkout(cid):
+            status, body = _fs_call("GET", _doc_path(cid))
+            if status == 404:
+                return None, None
+            if status != 200:
+                raise PaymentError("store_unavailable", "Firestore read failed (%s)" % status)
+            fields = {k: _fs_decode(v) for k, v in _as_dict(body.get("fields")).items()}
+            return fields, body.get("updateTime")
+
+
+        def _create_checkout_doc(cid, fields):
+            status, body = _fs_call("PATCH", _doc_path(cid), query={"currentDocument.exists": "false"},
+                                    body={"fields": {k: _fs_encode(v) for k, v in fields.items()}})
+            if status in (400, 409, 412):
+                return None  # already exists
+            if status != 200:
+                raise PaymentError("store_unavailable", "Firestore create failed (%s)" % status)
+            return body.get("updateTime")
+
+
+        def _cas(cid, update_time, fields):
+            # Compare-and-set: the write lands only if nobody wrote the checkout since we
+            # read it at `update_time`. Returns the new updateTime, or None on conflict.
+            fields = dict(fields)
+            fields["updated_at_ms"] = _now_ms()
+            query = [("updateMask.fieldPaths", k) for k in fields]
+            if update_time:
+                query.append(("currentDocument.updateTime", update_time))
+            status, body = _fs_call("PATCH", _doc_path(cid), query=query,
+                                    body={"fields": {k: _fs_encode(v) for k, v in fields.items()}})
+            if status in (400, 409, 412):
+                return None
+            if status != 200:
+                raise PaymentError("store_unavailable", "Firestore write failed (%s)" % status)
+            return body.get("updateTime") or "written"
+
+
+        def _transition(cid, allowed_from, fields, attempts=3):
+            # Re-read and CAS until the write lands or the state is no longer one we
+            # may move from. Returns (doc_after, moved).
+            for _ in range(attempts):
+                doc, ut = _get_checkout(cid)
+                if doc is None:
+                    raise PaymentError("not_found", "checkout not found")
+                if allowed_from is not None and doc.get("state") not in allowed_from:
+                    return doc, False
+                if _cas(cid, ut, fields):
+                    doc.update(fields)
+                    return doc, True
+            doc, _ = _get_checkout(cid)
+            return doc, False
+
+
+        # ── Money ───────────────────────────────────────────────────────────────────
+        def _exponent(currency):
+            return 0 if _text(currency).upper() in ZERO_DECIMAL else 2
+
+
+        def _to_minor(amount, currency):
+            try:
+                value = Decimal(_text(amount))
+            except (InvalidOperation, ValueError):
+                raise PaymentError("pricing_failed", "provider returned a non-numeric amount")
+            exp = _exponent(currency)
+            minor = int((value * (Decimal(10) ** exp)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+            if minor <= 0:
+                raise PaymentError("pricing_failed", "provider returned a non-positive amount")
+            return minor
+
+
+        def _fmt(minor, currency):
+            exp = _exponent(currency)
+            cur = _text(currency).upper()
+            if exp == 0:
+                return "%s %d" % (cur, minor)
+            return "%s %s" % (cur, str((Decimal(minor) / (Decimal(10) ** exp)).quantize(Decimal("0.01"))))
+
+
+        def _price_quote(base_minor, currency, pricing):
+            pricing = _as_dict(pricing)
+            bps = max(0, _int(pricing.get("markup_bps"), 0))
+            fee = max(0, _int(pricing.get("service_fee_minor"), 0))
+            markup = (int(base_minor) * bps + 5000) // 10000
+            total = int(base_minor) + markup + fee
+            items = [{"code": "provider_total", "label": "Booking", "amount_minor": int(base_minor)}]
+            if markup:
+                items.append({"code": "markup", "label": "Adiona markup", "amount_minor": markup})
+            if fee:
+                items.append({"code": "service_fee", "label": "Service fee", "amount_minor": fee})
+            return {"base_minor": int(base_minor), "markup_minor": markup, "fee_minor": fee,
+                    "total_minor": total, "currency": _text(currency).upper(), "line_items": items}
+
+
+        # ── Stripe (TEST MODE ONLY) ─────────────────────────────────────────────────
+        def _stripe_key():
+            if "stripe" not in _cache:
+                key = _extract_token(_gsm(STRIPE_SECRET))
+                if not (key.startswith("sk_test_") or key.startswith("rk_test_")):
+                    raise PaymentError("live_key_refused",
+                                       "the Stripe key in '%s' is not a test-mode key; refusing to call Stripe"
+                                       % STRIPE_SECRET)
+                _cache["stripe"] = key
+            return _cache["stripe"]
+
+
+        def _form(params, prefix=""):
+            pairs = []
+            if isinstance(params, dict):
+                for k, v in params.items():
+                    pairs.extend(_form(v, "%s[%s]" % (prefix, k) if prefix else str(k)))
+            elif isinstance(params, (list, tuple)):
+                for i, v in enumerate(params):
+                    pairs.extend(_form(v, "%s[%d]" % (prefix, i)))
+            elif params is None:
+                pass
+            elif isinstance(params, bool):
+                pairs.append((prefix, "true" if params else "false"))
+            else:
+                pairs.append((prefix, str(params)))
+            return pairs
+
+
+        def _stripe(method, path, params=None, idem=None):
+            method = method.upper()
+            if method == "POST" and not idem:
+                raise PaymentError("internal", "every Stripe POST needs an Idempotency-Key")
+            headers = {"Authorization": "Bearer " + _stripe_key(), "Stripe-Version": STRIPE_VERSION}
+            url = STRIPE_API + path
+            data = None
+            if method == "GET" and params:
+                url += "?" + urllib.parse.urlencode(_form(params))
+            elif params is not None or method == "POST":
+                data = urllib.parse.urlencode(_form(params or {})).encode("utf-8")
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+            if idem:
+                headers["Idempotency-Key"] = idem
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                try:
+                    err = _as_dict(json.loads(exc.read().decode("utf-8") or "{}").get("error"))
+                except Exception:
+                    err = {}
+                code = _text(err.get("decline_code") or err.get("code") or err.get("type"), "stripe_error")
+                raise PaymentError("stripe_" + code, _text(err.get("message"), "Stripe request failed")[:300], exc.code)
+            except Exception as exc:
+                raise PaymentError("stripe_unreachable", "Stripe unreachable: %s" % type(exc).__name__)
+            if _as_dict(body).get("livemode") is True:
+                raise PaymentError("livemode_refused", "Stripe returned a live-mode object; refusing to continue")
+            return _as_dict(body)
+
+
+        def _pi_path(pi_id, suffix=""):
+            return "/v1/payment_intents/" + urllib.parse.quote(_text(pi_id), safe="") + suffix
+
+
+        # ── Providers: re-price (TEST/SANDBOX only) ─────────────────────────────────
+        def _duffel_offer(offer_id):
+            token = _extract_token(_gsm(DUFFEL_SECRET))
+            if not token.startswith("duffel_test_"):
+                raise PaymentError("live_key_refused", "the Duffel token is not a test token; refusing to re-price")
+            url = "%s/air/offers/%s?return_available_services=false" % (
+                DUFFEL_API, urllib.parse.quote(_text(offer_id), safe=""))
+            req = urllib.request.Request(url, method="GET", headers={
+                "Authorization": "Bearer " + token, "Duffel-Version": DUFFEL_VERSION,
+                "Accept": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                raise PaymentError("offer_unavailable", "Duffel offer lookup failed (%s)" % exc.code, exc.code)
+            except Exception as exc:
+                raise PaymentError("offer_unavailable", "Duffel unreachable: %s" % type(exc).__name__)
+            offer = _as_dict(_as_dict(body).get("data"))
+            if offer.get("live_mode") is True:
+                raise PaymentError("livemode_refused", "Duffel returned a live-mode offer")
+            return offer
+
+
+        def _is_sandbox(base):
+            low = _text(base).lower()
+            return any(marker in low for marker in SANDBOX_HOST_MARKERS)
+
+
+        def _hotelbeds_checkrate(rate_key):
+            if not _is_sandbox(HOTELBEDS_API):
+                raise PaymentError("not_sandbox", "HotelBeds host is not the sandbox")
+            raw = _gsm(HOTELBEDS_SECRET)
+            try:
+                cred = json.loads(raw)
+            except Exception:
+                raise PaymentError("credential_unavailable", "HotelBeds secret is not JSON")
+            apikey = _text(cred.get("apikey") or cred.get("api_key") or cred.get("key"))
+            secret = _text(cred.get("secret") or cred.get("shared_secret"))
+            if not apikey or not secret:
+                raise PaymentError("credential_unavailable", "HotelBeds secret is missing apikey/secret")
+            sig = hashlib.sha256(("%s%s%d" % (apikey, secret, int(time.time()))).encode("utf-8")).hexdigest()
+            req = urllib.request.Request(
+                HOTELBEDS_API + CHECKRATES_PATH, method="POST",
+                data=json.dumps({"rooms": [{"rateKey": rate_key}]}).encode("utf-8"),
+                headers={"Api-key": apikey, "X-Signature": sig, "Accept": "application/json",
+                         "Accept-Encoding": "gzip", "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=45) as resp:
+                    raw_body = resp.read()
+                    if "gzip" in _text(resp.headers.get("Content-Encoding") if getattr(resp, "headers", None) else "").lower():
+                        raw_body = gzip.decompress(raw_body)
+                    body = json.loads(raw_body.decode("utf-8") or "{}")
+            except urllib.error.HTTPError as exc:
+                raise PaymentError("rate_unavailable", "HotelBeds checkRate failed (%s)" % exc.code, exc.code)
+            except Exception as exc:
+                raise PaymentError("rate_unavailable", "HotelBeds unreachable: %s" % type(exc).__name__)
+            hotel = _as_dict(_as_dict(body).get("hotel"))
+            for room in _as_list(hotel.get("rooms")):
+                for rate in _as_list(_as_dict(room).get("rates")):
+                    rate = _as_dict(rate)
+                    if _text(rate.get("rateKey")):
+                        return {"rate_key": _text(rate.get("rateKey")), "net": rate.get("net"),
+                                "currency": _text(hotel.get("currency")), "hotel_name": _text(hotel.get("name")),
+                                "check_in": _text(hotel.get("checkIn")), "check_out": _text(hotel.get("checkOut"))}
+            raise PaymentError("rate_unavailable", "HotelBeds checkRate returned no bookable rate")
+
+
+        # ── Views ───────────────────────────────────────────────────────────────────
+        def _view(doc):
+            doc = _as_dict(doc)
+            quote = _as_dict(doc.get("quote"))
+            view = {
+                "checkout_id": doc.get("checkout_id"),
+                "state": doc.get("state"),
+                "kind": doc.get("kind"),
+                "title": doc.get("title") or "",
+                "amount_minor": quote.get("total_minor"),
+                "currency": quote.get("currency"),
+                "display_amount": _fmt(quote.get("total_minor") or 0, quote.get("currency") or "USD") if quote else "",
+                "line_items": _as_list(quote.get("line_items")),
+            }
+            if doc.get("provider_ref"):
+                view["provider_ref"] = doc.get("provider_ref")
+            if _as_dict(doc.get("provider_booking")):
+                view["provider_booking"] = _as_dict(doc.get("provider_booking"))
+            if _as_dict(doc.get("error")):
+                view["error"] = _as_dict(doc.get("error"))
+            return view
+
+
+        def _ok(action, doc=None, **extra):
+            out = {"status": "ok", "schema": SCHEMA, "action": action, "final": True}
+            if doc is not None:
+                out["checkout"] = _view(doc)
+            out.update(extra)
+            return out
+
+
+        def _err(action, code, message):
+            return {"status": "error", "schema": SCHEMA, "action": action, "final": True,
+                    "error": code, "message": _text(message)[:300]}
+
+
+        def _callback(result):
+            rid = _text(globals().get("request_id"))
+            gw = _text(globals().get("gateway_url"))
+            if not (rid and gw):
+                return
+            try:
+                body = json.dumps({"request_id": rid,
+                                   "status": "COMPLETED" if result.get("status") == "ok" else "FAILED",
+                                   "data": result}).encode("utf-8")
+                req = urllib.request.Request(gw.rstrip("/") + "/api/internal/callback/async", data=body,
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result["gateway_callback"] = {"delivered": 200 <= response.status < 300}
+            except Exception as exc:
+                result["gateway_callback"] = {"delivered": False, "error": type(exc).__name__}
+        # ── end of muno payments core ───────────────────────────────────────────────
+        # ── step `settle`: capture on a confirmed provider booking, cancel otherwise ──
+        FAILED_PROVIDER_STATUSES = ("FAILED", "ERROR", "CANCELLED", "CANCELED")
+
+
+        def _find_envelope(value, depth=0):
+            # The provider child's MCP envelope ({isError, data}) sits somewhere inside
+            # the labelled step result; walk to it rather than hard-code the nesting.
+            if depth > 8:
+                return None
+            if isinstance(value, str):
+                value = _as_dict(value) or _as_list(value)
+            if isinstance(value, dict):
+                if "isError" in value and isinstance(value.get("data"), dict):
+                    return value
+                for key in ("provider", "result", "data", "output", "payload"):
+                    if key in value:
+                        found = _find_envelope(value[key], depth + 1)
+                        if found:
+                            return found
+                for key, nested in value.items():
+                    if key not in ("provider", "result", "data", "output", "payload"):
+                        found = _find_envelope(nested, depth + 1)
+                        if found:
+                            return found
+            if isinstance(value, list):
+                for nested in value:
+                    found = _find_envelope(nested, depth + 1)
+                    if found:
+                        return found
+            return None
+
+
+        def _provider_outcome(kind, raw):
+            env = _find_envelope(raw)
+            if env is None:
+                return False, "", {}, {"code": "provider_no_result",
+                                       "message": "The provider did not answer, so nothing was booked."}
+            data = _as_dict(env.get("data"))
+            if env.get("isError") or data.get("ok") is False:
+                return False, "", {}, {"code": _text(data.get("code"), "provider_failed"),
+                                       "message": "The provider could not confirm the booking, so nothing was booked."}
+            if kind == "flight":
+                order = _as_dict(data.get("order"))
+                ref = _text(data.get("booking_reference") or order.get("booking_reference"))
+                order_id = _text(data.get("order_id") or order.get("id"))
+                if not (ref or order_id):
+                    return False, "", {}, {"code": "provider_no_reference",
+                                           "message": "The airline returned no booking reference, so nothing was booked."}
+                return True, ref or order_id, {"order_id": order_id, "booking_reference": ref,
+                                               "total_amount": _text(order.get("total_amount")),
+                                               "total_currency": _text(order.get("total_currency"))}, None
+            ref = _text(data.get("booking_reference"))
+            if not ref or _text(data.get("status")).upper() in FAILED_PROVIDER_STATUSES:
+                return False, "", {}, {"code": "provider_no_reference",
+                                       "message": "The hotel returned no confirmation, so nothing was booked."}
+            return True, ref, {"booking_reference": ref, "status": _text(data.get("status")),
+                               "hotel_name": _text(data.get("hotel_name")), "check_in": _text(data.get("checkIn")),
+                               "check_out": _text(data.get("checkOut")), "total_amount": _text(data.get("totalNet")),
+                               "total_currency": _text(data.get("currency"))}, None
+
+
+        def _price_drift(quote, details):
+            try:
+                booked = _to_minor(details.get("total_amount"), details.get("total_currency") or quote.get("currency"))
+            except PaymentError:
+                return 0
+            if _text(details.get("total_currency")).upper() not in ("", _text(quote.get("currency")).upper()):
+                return 0
+            return max(0, booked - _int(quote.get("base_minor")))
+
+
+        def _settle():
+            cid = _text(_as_dict(claim).get("checkout", {}).get("checkout_id"))
+            if not CHECKOUT_ID_RE.match(cid):
+                return _err("finalize", "internal", "settle reached without a claimed checkout")
+            doc, _ = _get_checkout(cid)
+            if doc is None:
+                return _err("finalize", "not_found", "checkout not found")
+            if doc.get("state") != "booking":
+                return _ok("finalize", doc)  # already settled by a concurrent run
+            kind = doc.get("kind")
+            ok, ref, details, error = _provider_outcome(kind, flight_result if kind == "flight" else hotel_result)
+            pi_id = doc.get("payment_intent_id")
+            quote = _as_dict(doc.get("quote"))
+            if ok:
+                captured = None
+                for _attempt in range(2):  # same Idempotency-Key, so a retry cannot double-capture
+                    try:
+                        captured = _stripe("POST", _pi_path(pi_id, "/capture"),
+                                           {"amount_to_capture": int(quote["total_minor"])},
+                                           idem="checkout:%s:capture" % cid)
+                        break
+                    except PaymentError as exc:
+                        last = exc
+                fields = {"provider_ref": ref, "provider_booking": details}
+                drift = _price_drift(quote, details)
+                if drift:
+                    # The provider re-priced above the hold. The traveller is charged the
+                    # quoted total; Adiona absorbs the difference, recorded for ops.
+                    fields["ops_review"] = {"reason": "provider_price_drift", "drift_minor": drift}
+                if captured is not None and _text(captured.get("status")) == "succeeded":
+                    fields.update({"state": "confirmed", "error": None})
+                else:
+                    fields.update({"state": "needs_review", "error": {
+                        "code": "capture_failed",
+                        "message": "Your booking is made but the payment did not complete; our team will contact you."}})
+                doc, _ = _transition(cid, ("booking",), fields)
+                return _ok("finalize", doc)
+            try:
+                _stripe("POST", _pi_path(pi_id, "/cancel"), {"cancellation_reason": "abandoned"},
+                        idem="checkout:%s:cancel" % cid)
+                fields = {"state": "booking_failed_released", "error": error}
+            except PaymentError as exc:
+                fields = {"state": "needs_review", "error": {
+                    "code": "release_failed", "message": "The booking failed and the card hold could not be released yet."}}
+            doc, _ = _transition(cid, ("booking",), fields)
+            return _ok("finalize", doc)
+
+
+        try:
+            result = _settle()
+        except PaymentError as exc:
+            result = _err("finalize", exc.code, exc.message)
+        except Exception as exc:
+            result = _err("finalize", "internal", type(exc).__name__)
+        _callback(result)
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: done
+    desc: No provider booking on this run (the answer was already sent by `run`)
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: end
+    tool:
+      kind: noop

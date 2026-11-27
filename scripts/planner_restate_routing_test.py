@@ -47,6 +47,8 @@ def run(event_type, text, loaded_slot_state):
             "anthropic_secret_name": "shastara-eval",
             "anthropic_workspace_id": "wrkspc_test",
             "claude_thinking": "disabled",
+            "payments_checkout_mode": "off",
+            "payments_canary_uids": [],
             "slm_backend": "gemini",
             "slm_endpoint": "",
             "slm_model": "",

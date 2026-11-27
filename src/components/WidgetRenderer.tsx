@@ -23,6 +23,7 @@ import property_blockSchema from '../../playbooks/widget-contract/property_block
 import itinerary_summarySchema from '../../playbooks/widget-contract/itinerary_summary.schema.json';
 import order_confirmationSchema from '../../playbooks/widget-contract/order_confirmation.schema.json';
 import hotel_confirmationSchema from '../../playbooks/widget-contract/hotel_confirmation.schema.json';
+import payment_checkoutSchema from '../../playbooks/widget-contract/payment_checkout.schema.json';
 import activity_listSchema from '../../playbooks/widget-contract/activity_list.schema.json';
 import transfer_listSchema from '../../playbooks/widget-contract/transfer_list.schema.json';
 import notificationSchema from '../../playbooks/widget-contract/notification.schema.json';
@@ -50,6 +51,7 @@ import { PropertyBlock } from './widgets/PropertyBlock';
 import { ItinerarySummary } from './widgets/ItinerarySummary';
 import { OrderConfirmation } from './widgets/OrderConfirmation';
 import { HotelConfirmation } from './widgets/HotelConfirmation';
+import { PaymentCheckout } from './widgets/PaymentCheckout';
 import { ActivityList } from './widgets/ActivityList';
 import { TransferList } from './widgets/TransferList';
 import { Notification } from './widgets/Notification';
@@ -88,6 +90,7 @@ const payloadSchemas: Record<string, AnySchema> = {
   itinerary_summary: itinerary_summarySchema,
   order_confirmation: order_confirmationSchema,
   hotel_confirmation: hotel_confirmationSchema,
+  payment_checkout: payment_checkoutSchema,
   activity_list: activity_listSchema,
   transfer_list: transfer_listSchema,
   notification: notificationSchema,
@@ -121,6 +124,7 @@ const componentMap: Record<string, React.ComponentType<WidgetComponentProps>> = 
   itinerary_summary: ItinerarySummary,
   order_confirmation: OrderConfirmation,
   hotel_confirmation: HotelConfirmation,
+  payment_checkout: PaymentCheckout,
   activity_list: ActivityList,
   transfer_list: TransferList,
   notification: Notification,

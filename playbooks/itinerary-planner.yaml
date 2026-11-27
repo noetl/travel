@@ -577,6 +577,12 @@ workflow:
         anthropic_secret_name: "{{ workload.anthropic_secret_name | default('shastara-eval') }}"
         anthropic_workspace_id: "{{ workload.anthropic_workspace_id | default('wrkspc_01Ac7pHmUHKP8xGne1VEaZuB') }}"
         claude_thinking: "{{ workload.claude_thinking | default('disabled') }}"
+        # Stripe checkout hand-off (docs/architecture/payments-stripe.md).
+        # off (default): Book CTAs keep the direct TEST booking below.
+        # canary: only uids in payments_canary_uids get the checkout.
+        # on: everyone gets the checkout.
+        payments_checkout_mode: "{{ workload.payments_checkout_mode | default('off') }}"
+        payments_canary_uids: "{{ workload.payments_canary_uids | default([]) }}"
       code: |
         import base64
         import copy
@@ -1918,6 +1924,52 @@ workflow:
                 })
             return passengers
 
+        def _payments_checkout_active():
+            # Stripe checkout hand-off flag. Anything unrecognised is "off", so
+            # a typo can never silently move bookings onto the payment path.
+            _mode = str(globals().get("payments_checkout_mode") or "off").strip().lower()
+            if _mode == "on":
+                return True
+            if _mode != "canary":
+                return False
+            _uids = globals().get("payments_canary_uids")
+            if isinstance(_uids, str):
+                try:
+                    _uids = json.loads(_uids)
+                except Exception:
+                    _uids = [u.strip() for u in _uids.split(",")]
+            _me = str(user_uid or "").strip()
+            return bool(_me) and _me != "guest" and _me in [str(u).strip() for u in (_uids or [])]
+
+        def _payment_checkout_intent(kind):
+            # The SPA opens its Stripe checkout from this; the server re-prices,
+            # so `amount` here is display-only.
+            _party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
+            _party = {"adults": int(_party.get("adults") or 1),
+                      "children": len(_party.get("children") or []),
+                      "rooms": int(_party.get("rooms") or 1)}
+            if kind == "hotel":
+                _price = picked_hotel_card.get("price") if isinstance(picked_hotel_card.get("price"), dict) else {}
+                return {"kind": "payment_checkout", "checkout": {
+                    "kind": "hotel",
+                    "rate_key": picked_hotel_rate_key,
+                    "title": str(picked_hotel_card.get("name") or "Hotel")[:120],
+                    "subtitle": " - ".join(x for x in (str(next_state.get("check_in_date") or ""),
+                                                       str(next_state.get("check_out_date") or "")) if x),
+                    "amount": str(_price.get("total") or picked_hotel_card.get("min_rate") or ""),
+                    "currency": str(_price.get("currency") or picked_hotel_card.get("currency") or ""),
+                    "party": _party}}
+            _o = str(next_state.get("flight_origin") or "")
+            _d = str(next_state.get("flight_destination") or "")
+            return {"kind": "payment_checkout", "checkout": {
+                "kind": "flight",
+                "offer_id": str(next_state.get("picked_flight_offer_id") or ""),
+                "title": ("%s to %s" % (_o, _d)) if _o and _d else "Flight",
+                "subtitle": str(next_state.get("check_in_date") or ""),
+                "amount": "",
+                "currency": "",
+                "party": _party}}
+
         tool_requests = []
         render_intent = {"kind": "collect_missing", "missing": []}
         if not region_ready:
@@ -2146,18 +2198,24 @@ workflow:
             # Positioned above the places + guided-flow-flights branches so a
             # Book click on a hotel-only thread books instead of re-searching.
             hb_party = next_state.get("party") if isinstance(next_state.get("party"), dict) else {}
-            tool_requests.append({
-                "tool": "mcp/hotelbeds.book_hotel",
-                "arguments": {
-                    "rate_key": picked_hotel_rate_key,
-                    "holder_name": "Alex",
-                    "holder_surname": "Traveler",
-                    "rooms": int(hb_party.get("rooms") or 1),
-                    "adults": int(hb_party.get("adults") or 1),
-                    "children": len(hb_party.get("children") or []),
-                },
-            })
-            render_intent = {"kind": "hotel_confirmation"}
+            if _payments_checkout_active():
+                # Stripe checkout: no provider call this turn. The SPA collects
+                # the guest and card, and muno/playbooks/payments books only
+                # after the card is authorised.
+                render_intent = _payment_checkout_intent("hotel")
+            else:
+                tool_requests.append({
+                    "tool": "mcp/hotelbeds.book_hotel",
+                    "arguments": {
+                        "rate_key": picked_hotel_rate_key,
+                        "holder_name": "Alex",
+                        "holder_surname": "Traveler",
+                        "rooms": int(hb_party.get("rooms") or 1),
+                        "adults": int(hb_party.get("adults") or 1),
+                        "children": len(hb_party.get("children") or []),
+                    },
+                })
+                render_intent = {"kind": "hotel_confirmation"}
         elif wants_calendar:
             render_intent = {"kind": "calendar_live"}
         elif region_ready and ("places_seen" not in next_state or region_restated):
@@ -2198,15 +2256,20 @@ workflow:
         elif picked_flight and view_order_now and next_state.get("order_id"):
             render_intent = {"kind": "order_detail"}
         elif picked_flight and wants_order and not next_state.get("order_id"):
-            tool_requests.append({
-                "tool": "mcp/duffel.create_order",
-                "arguments": {
-                    "offer_id": next_state.get("picked_flight_offer_id"),
-                    "passengers": _test_passengers(next_state.get("party")),
-                    "duffel_env": "test",
-                },
-            })
-            render_intent = {"kind": "order_confirmation"}
+            if _payments_checkout_active():
+                # Stripe checkout: no Duffel order this turn (see the hotel
+                # branch above); the SPA collects real passengers and the card.
+                render_intent = _payment_checkout_intent("flight")
+            else:
+                tool_requests.append({
+                    "tool": "mcp/duffel.create_order",
+                    "arguments": {
+                        "offer_id": next_state.get("picked_flight_offer_id"),
+                        "passengers": _test_passengers(next_state.get("party")),
+                        "duffel_env": "test",
+                    },
+                })
+                render_intent = {"kind": "order_confirmation"}
         elif picked_flight and not next_state.get("hotel_search_results"):
             # noetl/ai-meta — guided booking sequence. Once a flight is
             # SELECTED (picked_flight) — regardless of whether the Duffel
@@ -9494,6 +9557,22 @@ workflow:
                 }
             widgets.append(_env("flight_card", "full", offer))
             bot_message = "Here are the flight details."
+        elif intent == "payment_checkout":
+            # Stripe checkout hand-off (payments_checkout_mode). Nothing was
+            # booked or charged this turn; the SPA opens its checkout from this.
+            _co = _as_dict(render_intent.get("checkout"))
+            widgets.append(_env("payment_checkout", "default", {
+                "kind": "hotel" if _co.get("kind") == "hotel" else "flight",
+                "offer_id": str(_co.get("offer_id") or ""),
+                "rate_key": str(_co.get("rate_key") or ""),
+                "title": str(_co.get("title") or ""),
+                "subtitle": str(_co.get("subtitle") or ""),
+                "amount": str(_co.get("amount") or ""),
+                "currency": str(_co.get("currency") or ""),
+                "party": _as_dict(_co.get("party")),
+            }))
+            bot_message = ("Review the details and pay to confirm. Nothing is booked "
+                           "or charged until you do.")
         elif intent == "order_confirmation":
             order = _as_dict(tool_summary.get("order"))
             widgets.append(_env("order_confirmation", "default", {
