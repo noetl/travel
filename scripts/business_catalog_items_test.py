@@ -76,7 +76,12 @@ print("the runtime's entry gate: every playbook needs a step named `start`")
 ALL_PLAYBOOKS = sorted(glob.glob("playbooks/**/*.yaml", recursive=True))
 check("found a plausible number of playbooks to check", len(ALL_PLAYBOOKS) >= 4, True)
 for pb in ALL_PLAYBOOKS:
-    wf = yaml.safe_load(open(pb)).get("workflow") or []
+    _doc = yaml.safe_load(open(pb)) or {}
+    # Only a Playbook has a workflow; a `kind: Subscription` (e.g.
+    # playbooks/subscriptions/stripe-test.yaml) is a different catalog kind.
+    if str(_doc.get("kind") or "Playbook").lower() != "playbook":
+        continue
+    wf = _doc.get("workflow") or []
     names = [s.get("step") for s in wf if isinstance(s, dict)]
     check("%s has a `start` step" % pb.replace("playbooks/", ""), "start" in names, True)
 

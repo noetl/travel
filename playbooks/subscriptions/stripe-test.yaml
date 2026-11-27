@@ -1,0 +1,41 @@
+# Stripe TEST-mode webhook listener for muno checkouts.
+#
+# Push ingress (Mode C, noetl/ai-meta#90): Stripe POSTs to
+#   https://<gateway>/ingress/stripe-test
+# The gateway asks the server for this config (GET /api/internal/ingress/stripe-test),
+# verifies the `Stripe-Signature` header (`verify.type: stripe_signature`, added in
+# noetl/gateway + noetl/server feat/ingress-stripe-signature), and only then forwards
+# ONE execution of muno/playbooks/payments-webhook with the event JSON merged into
+# the workload (`payload_from: message.json`).
+#
+# `verify.secret` is a NoETL Wallet credential ALIAS, never a value. The owner
+# creates it from the Stripe test-mode webhook endpoint's signing secret:
+#   credential `stripe_webhook_test`, data {"secret": "whsec_..."}
+#
+# NOT REGISTERED. Registering it (and the two playbooks) is the go-live step in
+# docs/architecture/payments-stripe.md, after the gateway/server releases that
+# understand `stripe_signature` are deployed: an older server rejects the type
+# with "unsupported ingress.verify.type".
+apiVersion: noetl.io/v1
+kind: Subscription
+
+metadata:
+  name: muno_stripe_test
+  path: muno/subscriptions/stripe-test
+  description: |
+    Stripe test-mode webhook (payment_intent.*, charge.refunded,
+    charge.dispute.created) for muno checkouts.
+
+spec:
+  source: webhook
+  mode: push
+  ingress:
+    gateway_path: /ingress/stripe-test
+    verify:
+      type: stripe_signature
+      header: stripe-signature
+      secret: stripe_webhook_test
+      tolerance_secs: 300
+  dispatch:
+    playbook: muno/playbooks/payments-webhook
+    payload_from: message.json

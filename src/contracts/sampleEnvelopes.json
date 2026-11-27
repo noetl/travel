@@ -978,6 +978,32 @@
     }
   },
   {
+    "widget_type": "payment_checkout",
+    "variant": "default",
+    "payload": {
+      "kind": "hotel",
+      "rate_key": "20260710|20260712|W|1|1234|DBL.ST|ID_B2B_1|RO|NRF|1~2~0||N@sample",
+      "title": "Sample Test Hotel Madrid",
+      "subtitle": "2026-07-10 - 2026-07-12",
+      "amount": "240.00",
+      "currency": "EUR",
+      "party": {
+        "adults": 2,
+        "children": 0,
+        "rooms": 1
+      }
+    },
+    "schema_version": 1,
+    "ai_adjustments": {
+      "annotations": [
+        {
+          "target": "widget",
+          "text": "sample"
+        }
+      ]
+    }
+  },
+  {
     "widget_type": "notification",
     "variant": "default",
     "payload": {

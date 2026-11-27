@@ -28,6 +28,7 @@ export interface WidgetEnvelope {
     | 'itinerary_summary'
     | 'order_confirmation'
     | 'hotel_confirmation'
+    | 'payment_checkout'
     | 'notification'
     | 'error_card'
     | 'clarify_question'
@@ -1231,6 +1232,34 @@ export interface PartyPickerPayload {
 
 
 /**
+ * Stripe checkout hand-off for a picked flight or hotel (payments_checkout_mode). Nothing is booked or charged yet; the client opens its checkout (muno/playbooks/payments create_checkout). The server re-prices, so amount/currency are display-only and may be empty.
+ */
+export interface PaymentCheckoutPayload {
+  kind: 'flight' | 'hotel';
+  /**
+   * Duffel offer id (kind=flight).
+   */
+  offer_id?: string;
+  /**
+   * HotelBeds rateKey (kind=hotel).
+   */
+  rate_key?: string;
+  title: string;
+  subtitle?: string;
+  /**
+   * Display-only indicative price; may be empty.
+   */
+  amount?: string;
+  currency?: string;
+  party?: {
+    adults?: number;
+    children?: number;
+    rooms?: number;
+  };
+}
+
+
+/**
  * Destination autocomplete input.
  */
 export interface PlaceAutocompleteInputPayload {
@@ -1361,6 +1390,7 @@ export const WIDGET_TYPES = [
   "notification",
   "order_confirmation",
   "party_picker",
+  "payment_checkout",
   "place_autocomplete_input",
   "place_card",
   "place_list",
@@ -1370,5 +1400,5 @@ export const WIDGET_TYPES = [
   "user_text"
 ] as const;
 export type WidgetType = typeof WIDGET_TYPES[number];
-export type WidgetPayload = ActionChooserPayload | ActivityListPayload | BotTextPayload | CalendarViewPayload | ClarifyQuestionPayload | DateRangePickerPayload | ErrorCardPayload | FilterPanelPayload | FlightCardPayload | FlightListPayload | HotelCardPayload | HotelComparePayload | HotelConfirmationPayload | HotelListPayload | ItinerarySummaryPayload | LoadingCardPayload | MapViewPayload | NotificationPayload | OrderConfirmationPayload | PartyPickerPayload | PlaceAutocompleteInputPayload | PlaceCardPayload | PlaceListPayload | PropertyBlockPayload | TransferListPayload | TypingIndicatorPayload | UserTextPayload;
+export type WidgetPayload = ActionChooserPayload | ActivityListPayload | BotTextPayload | CalendarViewPayload | ClarifyQuestionPayload | DateRangePickerPayload | ErrorCardPayload | FilterPanelPayload | FlightCardPayload | FlightListPayload | HotelCardPayload | HotelComparePayload | HotelConfirmationPayload | HotelListPayload | ItinerarySummaryPayload | LoadingCardPayload | MapViewPayload | NotificationPayload | OrderConfirmationPayload | PartyPickerPayload | PaymentCheckoutPayload | PlaceAutocompleteInputPayload | PlaceCardPayload | PlaceListPayload | PropertyBlockPayload | TransferListPayload | TypingIndicatorPayload | UserTextPayload;
 export type WidgetEnvelopeOf<TPayload = WidgetPayload> = WidgetEnvelope & { payload: TPayload };

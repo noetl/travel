@@ -1,0 +1,97 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: muno_payments_webhook
+  path: muno/playbooks/payments-webhook
+  description: |
+    Stripe webhook handler for muno checkouts (TEST MODE ONLY). Dispatched by
+    the gateway's push ingress (`POST /ingress/stripe-test`, Subscription
+    playbooks/subscriptions/stripe-test.yaml) after it verifies the
+    Stripe-Signature (`verify.type: stripe_signature`).
+
+    GENERATED FILE. Source: playbooks/payments/{payments-webhook.yaml.in,core.py,
+    webhook.py}; regenerate with `python3 scripts/build_payments_playbooks.py`.
+
+    The body is trusted for its event `id` ONLY: the event is re-fetched from
+    Stripe (GET /v1/events/{id}, test key), must be livemode:false, and is
+    deduplicated on checkouts/{id}.events_seen. Handled:
+
+      payment_intent.amount_capturable_updated  -> authorized, then finalize
+                                                   (child muno/playbooks/payments)
+      payment_intent.succeeded                  -> reconcile (settle owns confirmed)
+      payment_intent.payment_failed             -> payment_failed
+      payment_intent.canceled                   -> canceled
+      charge.refunded                           -> refunded (full) / refunded_minor
+      charge.dispute.created                    -> ops_review: dispute
+
+    Anything else completes with `transition: ignored`.
+
+workload:
+  id: ""
+  firestore_project: shastaratech-noetl-prod
+  firestore_database: "(default)"
+
+workflow:
+  - step: start
+    desc: Entry point
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: handle_event
+
+  - step: handle_event
+    desc: Re-fetch the event from Stripe, dedupe, and move the checkout
+    tool:
+      kind: python
+      input:
+        event_id: "{{ workload.id | default('') }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
+      code: |
+        # @@INCLUDE core.py webhook.py@@
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - when: "{{ handle_event.route == 'finalize' }}"
+          step: finalize_checkout
+        - step: done
+
+  - step: finalize_checkout
+    desc: Book and settle via the same idempotent finalize the SPA calls
+    # Fire-and-forget (no return_result): the delivery is already acked, and the
+    # checkout document is where the outcome lands. A ONE-ITEM LIST so a failed
+    # child cannot fail this run after the transition was written.
+    tool:
+      - finalize:
+          kind: playbook
+          path: muno/playbooks/payments
+          timeout: 60
+          payload:
+            uid: "{{ handle_event.finalize_uid }}"
+            action: finalize
+            checkout_id: "{{ handle_event.checkout_id }}"
+          spec:
+            policy:
+              rules:
+                - when: "{{ output.status == 'error' }}"
+                  then:
+                    do: continue
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: done
+    desc: Nothing further for this event
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: end
+    tool:
+      kind: noop

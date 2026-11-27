@@ -7,8 +7,15 @@ rules_version = '2';
 // This replaces the v1 demo rules, which allowed public reads of chat_threads/**,
 // trips/** and users/** (noetl/gateway advisory GHSA-qxw3-x3fw-qp2c, item 10).
 // Those were never deployed; this file is the safe state if it ever is.
+//
+// checkouts/** (Stripe payments, playbooks/payments.yaml) is covered by the
+// same deny: only the payments playbooks read or write a checkout. The
+// explicit match below keeps that true even if the catch-all is ever relaxed.
 service cloud.firestore {
   match /databases/{database}/documents {
+    match /checkouts/{document=**} {
+      allow read, write: if false;
+    }
     match /{document=**} {
       allow read, write: if false;
     }

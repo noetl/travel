@@ -1,0 +1,194 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: muno_payments
+  path: muno/playbooks/payments
+  description: |
+    Stripe checkout for Duffel flights and HotelBeds hotels (TEST MODE ONLY).
+    Design: docs/architecture/payments-stripe.md. Adiona is the merchant of
+    record (owner decision 2026-11-26, option A): the traveller's card is
+    authorised into Adiona's Stripe account, Adiona books the provider (Duffel
+    balance / HotelBeds invoice), and the hold is captured only after the
+    provider confirms. A failed booking cancels the hold, so nothing is charged.
+
+    GENERATED FILE. Source: playbooks/payments/{payments.yaml.in,core.py,run.py,
+    settle.py}; regenerate with `python3 scripts/build_payments_playbooks.py`.
+
+    ACTIONS (workload.action)
+
+      create_checkout  kind (flight|hotel), offer_id | rate_key, passengers |
+                       holder (+ rooms/adults/children), client_request_id,
+                       source, thread_id, title. Re-prices server-side (any
+                       client amount is ignored), writes checkouts/{id}, creates
+                       a manual-capture PaymentIntent, returns client_secret.
+      finalize         checkout_id. Re-reads the PaymentIntent from Stripe; only
+                       `requires_capture` claims the checkout (CAS) and books the
+                       provider; then `settle` captures or cancels. Idempotent:
+                       the SPA fast path and the Stripe webhook both call it.
+      get_status       checkout_id.
+      cancel_booking   checkout_id. Sketch only; disabled (CANCEL_BOOKING_ENABLED).
+
+    RESULT (the step result with `schema: muno.payments.v1` and `final: true`;
+    on the booking path that is `settle`, otherwise `run`)
+
+      { status: ok|error, schema, action, final, error?, message?,
+        checkout: { checkout_id, state, kind, title, amount_minor, currency,
+                    display_amount, line_items, provider_ref?, provider_booking?,
+                    error? },
+        client_secret?   (create_checkout only) }
+
+    IDENTITY. `uid` is the caller; behind the gateway it is overwritten with the
+    session's verified Auth0 subject. Empty or "guest" is refused, and a checkout
+    belonging to another uid reads as not found.
+
+workload:
+  uid: ""
+  action: get_status
+  checkout_id: ""
+  kind: ""
+  offer_id: ""
+  rate_key: ""
+  passengers: []
+  holder: {}
+  rooms: 1
+  adults: 1
+  children: 0
+  client_request_id: ""
+  source: widget
+  thread_id: ""
+  title: ""
+  request_id: ""
+  gateway_url: ""
+  firestore_project: shastaratech-noetl-prod
+  firestore_database: "(default)"
+
+workflow:
+  - step: start
+    desc: Entry point
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: run
+
+  - step: run
+    desc: Run the action; for finalize, claim the checkout and route to the provider booking
+    tool:
+      kind: python
+      input:
+        uid: "{{ workload.uid | default('') }}"
+        action: "{{ workload.action | default('get_status') }}"
+        checkout_id: "{{ workload.checkout_id | default('') }}"
+        kind: "{{ workload.kind | default('') }}"
+        offer_id: "{{ workload.offer_id | default('') }}"
+        rate_key: "{{ workload.rate_key | default('') }}"
+        passengers: "{{ workload.passengers | default([]) }}"
+        holder: "{{ workload.holder | default({}) }}"
+        rooms: "{{ workload.rooms | default(1) }}"
+        adults: "{{ workload.adults | default(1) }}"
+        children: "{{ workload.children | default(0) }}"
+        client_request_id: "{{ workload.client_request_id | default('') }}"
+        source: "{{ workload.source | default('widget') }}"
+        thread_id: "{{ workload.thread_id | default('') }}"
+        title: "{{ workload.title | default('') }}"
+        request_id: "{{ workload.request_id | default('') }}"
+        gateway_url: "{{ workload.gateway_url | default('') }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
+      code: |
+        # @@INCLUDE core.py run.py@@
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        # Each booking branch has its own entry and reaches `settle` only from
+        # there; `done` is the no-booking branch's own entry (see
+        # scripts/playbook_skip_topology_test.py for why `settle` is never a
+        # sibling target here).
+        - when: "{{ run.route == 'book_flight' }}"
+          step: book_flight
+        - when: "{{ run.route == 'book_hotel' }}"
+          step: book_hotel
+        - step: done
+
+  - step: book_flight
+    desc: Book the claimed Duffel offer (TEST env) for the checkout's travellers
+    # A ONE-ITEM LIST so the error rule is evaluated (single_tool_policy_rule_test):
+    # a failed provider child must still reach `settle`, which releases the hold.
+    tool:
+      - provider:
+          kind: playbook
+          path: automation/agents/mcp/duffel
+          return_result: true
+          result_step: duffel_dispatch
+          timeout: 180
+          payload:
+            method: tools/call
+            tool: create_order
+            arguments: "{{ run.book_args }}"
+          spec:
+            policy:
+              rules:
+                - when: "{{ output.status == 'error' }}"
+                  then:
+                    do: continue
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: settle
+
+  - step: book_hotel
+    desc: Book the claimed HotelBeds rate (SANDBOX) with clientReference = checkout_id
+    tool:
+      - provider:
+          kind: playbook
+          path: automation/agents/mcp/hotelbeds
+          return_result: true
+          result_step: hotelbeds_dispatch
+          timeout: 180
+          payload:
+            method: tools/call
+            tool: book_hotel
+            arguments: "{{ run.book_args }}"
+          spec:
+            policy:
+              rules:
+                - when: "{{ output.status == 'error' }}"
+                  then:
+                    do: continue
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: settle
+
+  - step: settle
+    desc: Capture the hold on a confirmed booking, cancel it otherwise
+    tool:
+      kind: python
+      input:
+        claim: "{{ run }}"
+        flight_result: "{{ book_flight | default({}) }}"
+        hotel_result: "{{ book_hotel | default({}) }}"
+        request_id: "{{ workload.request_id | default('') }}"
+        gateway_url: "{{ workload.gateway_url | default('') }}"
+        firestore_project: "{{ workload.firestore_project | default('shastaratech-noetl-prod') }}"
+        firestore_database: "{{ workload.firestore_database | default('(default)') }}"
+      code: |
+        # @@INCLUDE core.py settle.py@@
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: done
+    desc: No provider booking on this run (the answer was already sent by `run`)
+    tool:
+      kind: noop
+    next:
+      spec: { mode: exclusive }
+      arcs:
+        - step: end
+
+  - step: end
+    tool:
+      kind: noop

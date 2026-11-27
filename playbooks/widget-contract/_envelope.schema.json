@@ -37,6 +37,7 @@
         "itinerary_summary",
         "order_confirmation",
         "hotel_confirmation",
+        "payment_checkout",
         "notification",
         "error_card",
         "clarify_question",
