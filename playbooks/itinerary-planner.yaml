@@ -110,7 +110,12 @@ workload:
   # the shadow steps).  Any SLM error/timeout is recorded as fell_back and is a
   # no-op for the served turn.  Flip enabled=true + set endpoint to turn shadow on.
   slm_shadow:
-    enabled: false
+    # ON in prod since 2026-11-25 (catalog v120) in CAPTURE-ONLY mode: endpoint
+    # unset → the leaf makes no SLM call, records the live turn + labels
+    # (fell_back=true) for the improve-loop harvest. Parallel dead-end leaf,
+    # measured ~0 ms on the response path. ROLLBACK: set enabled back to false
+    # and re-register (or re-register catalog v119).
+    enabled: true
     endpoint: ""                 # slm_serve URL, e.g. http://host.containers.internal:8099
     model_urn: "registry://muno/travel/model/travel_slm_multitask/3"
     timeout_ms: 60000            # generous for the MLX pilot (1.5B ~2-5s/pass); a no-op on timeout
